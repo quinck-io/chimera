@@ -33,6 +33,8 @@ assert_eq!(result.unwrap(), expected);
 
 Propagate errors with `?`. Add context with `.context("what we were doing")` when it helps debugging. Don't swallow errors silently — log and continue, or propagate, but never drop.
 
+Do not add useless comments. Only comment why, not what. If the code isn't self-explanatory, comment it. If something weird is necessary, explain why. But don't comment things that are obvious from the code itself.
+
 ### Lifetimes
 
 Use as few lifetimes as possible. Prefer owned types (`String`, `Vec<T>`, `Arc<T>`) over borrowed types in structs. Only introduce lifetime parameters when the borrow is genuinely required for performance and the code stays readable. If you're fighting the borrow checker to make a lifetime work, clone instead.
@@ -88,7 +90,15 @@ Don't mock internal modules. Test them directly. Mock only external HTTP APIs us
 
 Integration or e2e tests only when explicitly requested. Default to unit tests.
 
-Tests live in the same file as the code they test (`#[cfg(test)]` at the bottom), unless they're in `tests/` by explicit request.
+Tests live in a separate file next to the module they test, named `{module}_test.rs`. For example, `src/config.rs` has tests in `src/config_test.rs`, and `src/broker/auth.rs` has tests in `src/broker/auth_test.rs`. Each test file is included at the bottom of the main module file using the `#[path]` attribute:
+
+```rust
+#[cfg(test)]
+#[path = "auth_test.rs"]
+mod auth_test;
+```
+
+The `#[path]` attribute is required because Rust's module system would otherwise look for the file in a subdirectory.
 
 Tests that require Docker are tagged `#[ignore]` so they don't run in environments without a socket, but do run in CI.
 

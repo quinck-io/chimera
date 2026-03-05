@@ -25,9 +25,12 @@ Everything lives under `~/.chimera/`. Delete the folder and chimera is completel
 
 ```
 ~/.chimera/
-├── config.toml          # main config
-├── bin/
-│   └── chimera          # the binary (symlinked from install location)
+├── config.toml          # main config (runner names list, daemon settings)
+├── runners/
+│   └── {runner-name}/
+│       ├── runner.json        # agentId, serverUrl, etc.
+│       ├── credentials.json   # scheme, clientId, authorizationUrl
+│       └── rsa_params.json    # RSA private key parameters
 ├── work/
 │   └── {runner-name}/
 │       └── {repo}/
@@ -42,11 +45,12 @@ Everything lives under `~/.chimera/`. Delete the folder and chimera is completel
 └── tool-cache/          # RUNNER_TOOL_CACHE (shared across runners)
 ```
 
-Install command:
+CLI commands:
 ```
-chimera install              # creates ~/.chimera/, writes config.toml template, registers runners
-chimera uninstall            # removes ~/.chimera/, deregisters runners from GitHub
-chimera status               # show all runner states
+chimera register --url https://github.com/org/repo --token AXXXXXXXX --name chimera-0
+chimera unregister --name chimera-0
+chimera start [--runner chimera-0]
+chimera status
 ```
 
 ---
@@ -141,74 +145,6 @@ tempfile           = "3"      # dev
 
 ---
 
-## Binary Layout
-
-```
-chimera/
-├── Cargo.toml
-├── src/
-│   ├── main.rs
-│   ├── daemon.rs               # spawn N runners, own shared services, handle SIGTERM
-│   ├── config.rs               # ~/.chimera/config.toml load/save, validation, paths
-│   ├── install.rs              # install/uninstall subcommands, dir scaffolding
-│   │
-│   ├── runner/
-│   │   ├── mod.rs              # RunnerInstance: lifecycle, state machine
-│   │   ├── state.rs            # RunnerState: Idle/Running/Draining/Error
-│   │   └── registry.rs         # RunnerRegistry: Arc<RwLock<Vec<RunnerHandle>>>
-│   │
-│   ├── broker/
-│   │   ├── mod.rs
-│   │   ├── auth.rs             # JWT sign + OAuth token exchange
-│   │   ├── session.rs          # POST /sessions, DELETE /sessions
-│   │   └── poller.rs           # GET /message long-poll loop
-│   │
-│   ├── job/
-│   │   ├── mod.rs              # Job orchestration, top-level run_job()
-│   │   ├── acquire.rs          # POST /acquirejob
-│   │   ├── renew.rs            # Heartbeat task (every 60s)
-│   │   ├── complete.rs         # POST /completejob
-│   │   └── schema.rs           # Full job manifest types
-│   │
-│   ├── executor/
-│   │   ├── mod.rs              # Executor trait, dispatch host vs docker
-│   │   ├── host.rs             # Direct host execution (no container:)
-│   │   ├── docker.rs           # Container execution (container: present)
-│   │   ├── services.rs         # Service container lifecycle (always Docker)
-│   │   ├── resources.rs        # JobResources RAII: networks/containers/volumes
-│   │   └── commands.rs         # Workflow command parser (::set-env:: etc.)
-│   │
-│   ├── logs/
-│   │   ├── mod.rs
-│   │   ├── pager.rs            # Batched upload to Azure Pipelines log API
-│   │   └── timeline.rs         # Step timeline PATCH
-│   │
-│   ├── cache/
-│   │   ├── mod.rs
-│   │   ├── manager.rs          # CacheManager: rolling LRU, eviction, stats
-│   │   ├── store.rs            # Content-addressed blob store (blake3 + zstd)
-│   │   ├── server.rs           # axum: actions/cache@v3 compat HTTP API
-│   │   └── docker_cache.rs     # Image layer cache, pull dedup, LRU eviction
-│   │
-│   ├── web/
-│   │   ├── mod.rs
-│   │   ├── api.rs              # REST API handlers
-│   │   └── ui.rs               # Inline single-file HTML dashboard (no build step)
-│   │
-│   └── util/
-│       ├── workspace.rs        # Per-job work dir: create, wipe, paths
-│       └── cgroups.rs          # cgroup v2 limits (Phase 7)
-│
-└── tests/
-    ├── broker_test.rs
-    ├── cache_test.rs
-    ├── docker_test.rs
-    ├── executor_host_test.rs
-    └── web_api_test.rs
-```
-
----
-
 ## Configuration File (`~/.chimera/config.toml`)
 
 ```toml
@@ -225,20 +161,33 @@ cache_port = 9999         # local cache HTTP server port
 socket                   = "/var/run/docker.sock"
 prune_images_older_than_days = 7
 
-# One [[runner]] block per concurrent runner instance.
-# jit_config is a base64 JIT token from the GitHub API.
-# Can also be set via env: CHIMERA_RUNNER_0_JIT_CONFIG etc.
-
-[[runner]]
-name       = "chimera-0"
-jit_config = "base64..."
-labels     = ["self-hosted", "Linux", "X64"]
-
-[[runner]]
-name       = "chimera-1"
-jit_config = "base64..."
-labels     = ["self-hosted", "Linux", "X64"]
+# Runner names referencing credential directories under ~/.chimera/runners/
+# Each runner is registered separately via `chimera register`
+runners = ["chimera-0", "chimera-1"]
 ```
+
+## Per-Runner Credentials (`~/.chimera/runners/{name}/`)
+
+Each runner stores three JSON files after `chimera register`:
+
+- `runner.json` — agentId, agentName, poolId, serverUrl, serverUrlV2, gitHubUrl, workFolder, useV2Flow
+- `credentials.json` — scheme ("OAuth"), clientId, authorizationUrl
+- `rsa_params.json` — RSA private key parameters (d, dp, dq, exponent, inverseQ, modulus, p, q as base64)
+
+## Registration Flow
+
+```
+chimera register --url https://github.com/org/repo --token AXXXXXXXX --name chimera-0
+```
+
+1. Parse GitHub URL to determine scope (repo or org)
+2. POST `https://api.github.com/actions/runner-registration` with `RemoteAuth {token}` header
+   → returns tenant URL (pipelines) and OAuth token
+3. Generate RSA-2048 key pair, format public key as XML
+4. POST `https://api.github.com/actions/runners/register` with Bearer token
+   → returns agentId, authorization (authorizationUrl, serverUrl/broker, clientId)
+5. Save three JSON files per runner under `~/.chimera/runners/{name}/`
+6. Update `~/.chimera/config.toml` to add runner name
 
 ---
 
@@ -461,24 +410,28 @@ Lookup semantics (must match GitHub exactly):
 
 ## Full Protocol Reference
 
-### Auth Flow
+### Auth Flow (Registration-based)
 
 ```
-1. POST /repos/{org}/{repo}/actions/runners/generate-jitconfig
-   → { encoded_jit_config: "<base64>" }
+1. chimera register --url https://github.com/org/repo --token AXXXXXXXX --name chimera-0
+   a. POST https://api.github.com/actions/runner-registration
+      Authorization: RemoteAuth {registration_token}
+      Body: { url: "https://github.com/org/repo", runner_event: "register" }
+      → { url (tenant/pipelines URL), token (OAuth) }
 
-2. base64-decode → JSON:
-   {
-     AgentId, AgentName,
-     ServerUrl: "https://pipelinesghubeus*.actions.githubusercontent.com/TOKEN/",
-     ServerUrlV2: "https://broker.actions.githubusercontent.com/",
-     UseV2Flow: "true",
-     GitHubUrl, WorkFolder,
-     // + RSA private key PEM + AuthorizationUrl
-   }
+   b. Generate RSA-2048 key pair, format public key as XML
 
-3. RSA private key → sign JWT → POST AuthorizationUrl → Bearer token
-   (token used for all broker + pipelines API calls)
+   c. POST https://api.github.com/actions/runners/register
+      Authorization: Bearer {oauth_token}
+      Body: { url, group_id, name, version, labels, public_key (XML) }
+      → { id, name, authorization: { authorization_url, server_url (broker), client_id } }
+
+   d. Save: runner.json, credentials.json, rsa_params.json
+
+2. chimera start
+   a. Load stored RSA private key → sign RS256 JWT → POST AuthorizationUrl → Bearer token
+   b. Token used for all broker + pipelines API calls
+   c. Token refreshed proactively (>5min remaining) or reactively (on 401)
 ```
 
 ### Broker Session
@@ -767,18 +720,18 @@ POST /api/docker/prune            → trigger image LRU eviction now
 
 ## Phase Plan
 
-### Phase 1 — Auth + Single Broker + Long-Poll
-**Goal:** One runner connects to GitHub broker, polls, logs received job ID, exits cleanly.
+### Phase 1 — Register + Auth + Single Broker + Long-Poll
+**Goal:** Registration-based flow (not raw JIT configs). One runner connects to GitHub broker, polls, logs received job ID, exits cleanly.
 
-- `config.rs` — `~/.chimera/` path layout, toml load, JIT config decode, RSA key extract
-- `broker/auth.rs` — JWT signing, OAuth token exchange
-- `broker/session.rs` — POST/DELETE /sessions
-- `broker/poller.rs` — GET /message loop, 202/200/error/BrokerMigration handling
-- `main.rs` — single runner mode, clap CLI (`run`, `install`, `uninstall`, `status`), signal handling skeleton
-- `install.rs` — scaffold `~/.chimera/` directory tree, write config template
-- **Tests:** wiremock broker tests (session, poll, ack, retry), JWT signing unit test
+- `config.rs` — `~/.chimera/` path layout, toml load, per-runner credential load/save (3 JSON files), RSA key ↔ params conversion
+- `register.rs` — `chimera register` subcommand: GitHub URL parsing, RSA key generation, API calls to register runner, credential persistence
+- `broker/auth.rs` — JWT RS256 signing, TokenManager with proactive refresh + 401 retry
+- `broker/session.rs` — POST/DELETE /sessions with broker
+- `broker/poller.rs` — GET /message long-poll loop, 202/200/error/BrokerMigration handling, exponential backoff
+- `main.rs` — clap CLI (`register`, `unregister`, `start`, `status`), signal handling (SIGTERM/SIGINT), session lifecycle
+- **Tests (30):** RSA roundtrip, credential save/load, config roundtrip, URL parsing, JWT signing + validation, token exchange/caching/invalidation, session create/delete, poll 202/200/ack/migration/401/500/shutdown, registration API flow, unregister cleanup
 
-Done when: `chimera run --config ~/.chimera/config.toml` connects and prints received job messageId.
+Done when: `chimera register --url ... --token ... --name test-0` registers runner; `chimera start` authenticates, creates session, enters poll loop, logs messageId on job receipt; Ctrl+C deletes session cleanly.
 
 ---
 
