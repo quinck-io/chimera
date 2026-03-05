@@ -11,6 +11,24 @@ use crate::config::{
     private_key_to_rsa_params, public_key_to_xml, save_config, save_runner_credentials,
 };
 
+fn os_label() -> &'static str {
+    match std::env::consts::OS {
+        "linux" => "Linux",
+        "macos" => "macOS",
+        "windows" => "Windows",
+        other => other,
+    }
+}
+
+fn arch_label() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "X64",
+        "aarch64" => "ARM64",
+        "arm" => "ARM",
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GitHub URL parsing
 // ---------------------------------------------------------------------------
@@ -326,11 +344,11 @@ async fn try_register_v2(
             label_type: "system".into(),
         },
         AgentLabelV2 {
-            name: "Linux".into(),
+            name: os_label().into(),
             label_type: "system".into(),
         },
         AgentLabelV2 {
-            name: "X64".into(),
+            name: arch_label().into(),
             label_type: "system".into(),
         },
     ];
@@ -411,11 +429,11 @@ async fn register_v1(
             label_type: "system".into(),
         },
         AgentLabelV1 {
-            name: "Linux".into(),
+            name: os_label().into(),
             label_type: "system".into(),
         },
         AgentLabelV1 {
-            name: "X64".into(),
+            name: arch_label().into(),
             label_type: "system".into(),
         },
     ];
@@ -429,7 +447,7 @@ async fn register_v1(
     let agent_body = TaskAgentV1 {
         name: name.to_string(),
         version: RUNNER_VERSION.to_string(),
-        os_description: "Linux".to_string(),
+        os_description: format!("{} {}", os_label(), arch_label()),
         enabled: true,
         status: 0,
         provisioning_state: "Provisioned".to_string(),

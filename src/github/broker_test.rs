@@ -246,7 +246,10 @@ async fn poll_401_returns_error() {
 
     let client = make_client(&mock_server.uri(), tm);
     let result = client.poll_message().await;
-    assert!(result.is_err());
-    let err_str = result.unwrap_err().to_string();
-    assert!(err_str.contains("401"));
+    let err = result.unwrap_err();
+    assert!(
+        err.downcast_ref::<BrokerError>()
+            .is_some_and(|be| matches!(be, BrokerError::Unauthorized)),
+        "expected BrokerError::Unauthorized, got: {err}"
+    );
 }

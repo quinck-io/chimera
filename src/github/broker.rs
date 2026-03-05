@@ -13,6 +13,7 @@ use super::auth::TokenManager;
 // ---------------------------------------------------------------------------
 
 const BROKER_PROTOCOL_VERSION: &str = "3.0.0";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +27,9 @@ pub struct BrokerMessage {
 pub enum BrokerError {
     #[error("broker error: {0}")]
     ServerError(String),
+
+    #[error("unauthorized (401)")]
+    Unauthorized,
 
     #[error("poll timeout")]
     Timeout,
@@ -121,7 +125,7 @@ impl BrokerClient {
                 id: agent_id,
                 name: agent_name.to_string(),
                 version: RUNNER_VERSION.to_string(),
-                os_description: "Linux".to_string(),
+                os_description: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
                 ephemeral: true,
                 status: 0,
             },
@@ -135,6 +139,7 @@ impl BrokerClient {
             .post(&url)
             .bearer_auth(&token)
             .json(&body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("sending create session request")?;
@@ -208,7 +213,7 @@ impl BrokerClient {
                 let msg: BrokerMessage = resp.json().await.context("parsing broker message")?;
                 Ok(Some(msg))
             }
-            401 => bail!("poll returned 401 Unauthorized"),
+            401 => Err(BrokerError::Unauthorized.into()),
             s if (500..600).contains(&s) => {
                 let body = resp.text().await.unwrap_or_default();
                 Err(BrokerError::ServerError(format!("{s}: {body}")).into())
@@ -234,6 +239,7 @@ impl BrokerClient {
             .client
             .delete(&url)
             .bearer_auth(&token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("sending delete message request")?;
@@ -269,6 +275,7 @@ impl BrokerClient {
             .post(&url)
             .bearer_auth(&token)
             .json(&body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("sending ack request")?;
@@ -296,6 +303,7 @@ impl BrokerClient {
             .client
             .delete(&url)
             .bearer_auth(&token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("sending delete session request")?;

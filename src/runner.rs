@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{RunnerCredentials, rsa_params_to_private_key};
 use crate::github::RUNNER_VERSION;
 use crate::github::auth::TokenManager;
-use crate::github::broker::{BrokerClient, BrokerMessage};
+use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage};
 
 pub struct Runner {
     name: String,
@@ -134,8 +134,9 @@ impl Runner {
                     continue;
                 }
                 Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("401") {
+                    if e.downcast_ref::<BrokerError>()
+                        .is_some_and(|be| matches!(be, BrokerError::Unauthorized))
+                    {
                         warn!("got 401, refreshing token");
                         broker.token_manager().invalidate().await;
                         let retry = tokio::select! {

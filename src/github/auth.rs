@@ -83,6 +83,7 @@ pub struct TokenManager {
     private_key: RsaPrivateKey,
     client_id: String,
     state: Arc<RwLock<Option<TokenState>>>,
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl TokenManager {
@@ -98,11 +99,13 @@ impl TokenManager {
             private_key,
             client_id,
             state: Arc::new(RwLock::new(None)),
+            refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Get a valid access token, refreshing if necessary.
     pub async fn get_token(&self) -> Result<String> {
+        // Fast path: cached token is still valid
         {
             let state = self.state.read().await;
             if let Some(ts) = state.as_ref()
@@ -112,11 +115,23 @@ impl TokenManager {
             }
         }
 
-        self.refresh().await
+        // Serialize concurrent refresh attempts
+        let _guard = self.refresh_lock.lock().await;
+
+        // Double-check: another task may have refreshed while we waited
+        {
+            let state = self.state.read().await;
+            if let Some(ts) = state.as_ref()
+                && ts.is_valid()
+            {
+                return Ok(ts.access_token.clone());
+            }
+        }
+
+        self.do_refresh().await
     }
 
-    /// Force a token refresh (e.g., after a 401).
-    pub async fn refresh(&self) -> Result<String> {
+    async fn do_refresh(&self) -> Result<String> {
         debug!(
             client_id = %self.client_id,
             authorization_url = %self.authorization_url,
