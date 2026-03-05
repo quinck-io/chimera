@@ -1,0 +1,83 @@
+{
+  "plan": {
+    "planId": "plan-001",
+    "jobId": "job-001",
+    "timelineId": "timeline-001"
+  },
+  "steps": [
+    {
+      "id": "step-1",
+      "displayName": "Run echo hello",
+      "reference": {
+        "name": "script",
+        "type": "script"
+      },
+      "inputs": {
+        "script": "echo hello"
+      },
+      "condition": null,
+      "timeoutInMinutes": 10,
+      "continueOnError": false,
+      "order": 1,
+      "environment": null
+    },
+    {
+      "id": "step-2",
+      "displayName": "Run echo $MY_VAR",
+      "reference": {
+        "name": "script",
+        "type": "script"
+      },
+      "inputs": {
+        "script": "echo $MY_VAR"
+      },
+      "condition": null,
+      "timeoutInMinutes": null,
+      "continueOnError": false,
+      "order": 2,
+      "environment": {
+        "MY_VAR": "my_value"
+      }
+    }
+  ],
+  "variables": {
+    "system.github.token": {
+      "value": "ghp_secret123",
+      "isSecret": true
+    },
+    "system.runner.name": {
+      "value": "chimera-0",
+      "isSecret": false
+    }
+  },
+  "resources": {
+    "endpoints": [
+      {
+        "name": "SystemVssConnection",
+        "url": "https://pipelines.actions.githubusercontent.com/abc123",
+        "authorization": {
+          "scheme": "OAuth",
+          "parameters": {
+            "AccessToken": "job-token-xyz"
+          }
+        }
+      }
+    ]
+  },
+  "contextData": {
+    "github": {
+      "repository": "owner/test-repo",
+      "sha": "abc123def",
+      "ref": "refs/heads/main",
+      "workflow": "test.yml",
+      "run_id": "12345",
+      "run_number": "1",
+      "job": "build",
+      "action": "__run",
+      "actor": "testuser",
+      "event_name": "push"
+    }
+  },
+  "jobContainer": null,
+  "serviceContainers": null
+}

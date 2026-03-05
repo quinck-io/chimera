@@ -128,7 +128,7 @@ async fn run_start(runner_name: Option<String>, root: PathBuf) -> Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    let runner = Runner::new(name, creds);
+    let runner = Runner::new(name, creds, paths);
     runner.start(shutdown_rx).await
 }
 

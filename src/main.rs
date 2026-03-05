@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod github;
+mod job;
 mod runner;
 
 use anyhow::Result;

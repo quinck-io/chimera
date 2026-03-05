@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ChimeraPaths;
 use crate::github::auth::TokenManager;
 use crate::github::broker::BrokerClient;
 use rsa::RsaPrivateKey;
@@ -32,7 +33,6 @@ async fn setup() -> (MockServer, Arc<TokenManager>, watch::Sender<bool>) {
 }
 
 fn make_runner() -> Runner {
-    // Credentials aren't used directly — poll_loop takes a BrokerClient
     Runner {
         name: "test-runner".into(),
         credentials: RunnerCredentials {
@@ -62,6 +62,7 @@ fn make_runner() -> Runner {
                 q: String::new(),
             },
         },
+        paths: ChimeraPaths::new(std::path::PathBuf::from("/tmp/chimera-test")),
     }
 }
 

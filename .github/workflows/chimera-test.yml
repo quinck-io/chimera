@@ -1,0 +1,30 @@
+name: Chimera Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Hello
+        run: echo "Hello from chimera runner!"
+
+      - name: System info
+        run: |
+          echo "OS: $(uname -s)"
+          echo "Arch: $(uname -m)"
+          echo "User: $(whoami)"
+          echo "PWD: $(pwd)"
+
+      - name: Environment
+        run: |
+          echo "GITHUB_ACTIONS=$GITHUB_ACTIONS"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_NAME=$RUNNER_NAME"
+
+      - name: Cargo version
+        run: cargo --version
