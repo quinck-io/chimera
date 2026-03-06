@@ -106,3 +106,40 @@ jobs:
       - name: Always runs
         if: always()
         run: echo "I always run, no matter what"
+
+  # ── Job 5: Secrets ───────────────────────────────────────────────
+  secrets:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Use secret
+        env:
+          MY_SECRET: ${{ secrets.SECRET }}
+        run: |
+          if [ -z "$MY_SECRET" ]; then
+            echo "::error::SECRET is empty"
+            exit 1
+          fi
+          echo "Secret is set (masked)"
+
+  # ── Job 6: Needs ───────────────────────────────────────────────
+  setup:
+    runs-on: [self-hosted, chimera]
+    outputs:
+      greeting: ${{ steps.gen.outputs.greeting }}
+    steps:
+      - name: Generate output
+        id: gen
+        run: echo "greeting=hello from setup" >> "$GITHUB_OUTPUT"
+
+  needs:
+    runs-on: [self-hosted, chimera]
+    needs: setup
+    steps:
+      - name: Use needs output
+        run: |
+          echo "Greeting from setup job: ${{ needs.setup.outputs.greeting }}"
+          test "${{ needs.setup.outputs.greeting }}" = "hello from setup"
+
+      - name: Check needs result
+        if: needs.setup.result == 'success'
+        run: echo "Setup job succeeded as expected"
