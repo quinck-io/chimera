@@ -94,7 +94,7 @@ async fn poll_loop_returns_job_request() {
     let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
     let msg = result.expect("should return job message");
     assert_eq!(msg.message_id, 99);
-    assert_eq!(msg.message_type, "RunnerJobRequest");
+    assert_eq!(msg.message_type, MessageType::RunnerJobRequest);
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn poll_loop_skips_control_then_returns_job() {
     let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
     let msg = result.expect("should return job after skipping control message");
     assert_eq!(msg.message_id, 2);
-    assert_eq!(msg.message_type, "RunnerJobRequest");
+    assert_eq!(msg.message_type, MessageType::RunnerJobRequest);
 }
 
 #[tokio::test]

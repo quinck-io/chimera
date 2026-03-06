@@ -68,7 +68,47 @@ pub struct Step {
 impl Step {
     /// Whether this step is a `run:` script (vs an action reference).
     pub fn is_script(&self) -> bool {
-        self.reference.kind == "script"
+        self.reference.kind == StepReferenceKind::Script
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepReferenceKind {
+    Script,
+    Repository,
+    ContainerRegistry,
+    Unknown(String),
+}
+
+impl Default for StepReferenceKind {
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
+}
+
+impl std::fmt::Display for StepReferenceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Script => write!(f, "script"),
+            Self::Repository => write!(f, "repository"),
+            Self::ContainerRegistry => write!(f, "containerregistry"),
+            Self::Unknown(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StepReferenceKind {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "script" => Ok(Self::Script),
+            "repository" => Ok(Self::Repository),
+            "containerregistry" => Ok(Self::ContainerRegistry),
+            _ => Ok(Self::Unknown(s)),
+        }
     }
 }
 
@@ -80,7 +120,7 @@ pub struct StepReference {
     /// "script" for `run:` steps, "repository"/"containerregistry" for action steps.
     /// Deserialized from the JSON `type` field.
     #[serde(default, rename = "type")]
-    pub kind: String,
+    pub kind: StepReferenceKind,
     #[serde(default, rename = "ref")]
     pub git_ref: Option<String>,
     #[serde(default)]

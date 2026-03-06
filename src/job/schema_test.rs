@@ -10,7 +10,7 @@ fn parse_minimal_manifest_with_two_steps() {
     let manifest = load_fixture();
     assert_eq!(manifest.steps.len(), 2);
     assert_eq!(manifest.steps[0].display_name, "Run echo hello");
-    assert_eq!(manifest.steps[0].reference.kind, "script");
+    assert_eq!(manifest.steps[0].reference.kind, StepReferenceKind::Script);
     assert_eq!(manifest.steps[1].inputs["script"], "echo $MY_VAR");
     assert_eq!(manifest.plan.plan_id, "plan-001");
     assert_eq!(manifest.plan.job_id, "job-001");
@@ -106,7 +106,7 @@ fn deserialize_action_step_with_ref_and_path() {
     let manifest: JobManifest = serde_json::from_str(json).unwrap();
     let step = &manifest.steps[0];
     assert_eq!(step.reference.name, "actions/checkout");
-    assert_eq!(step.reference.kind, "repository");
+    assert_eq!(step.reference.kind, StepReferenceKind::Repository);
     assert_eq!(step.reference.git_ref.as_deref(), Some("v4"));
     assert!(step.reference.path.is_none());
     assert_eq!(step.context_name.as_deref(), Some("checkout_main"));
@@ -164,6 +164,6 @@ fn deserialize_container_registry_step() {
     }"#;
     let manifest: JobManifest = serde_json::from_str(json).unwrap();
     let step = &manifest.steps[0];
-    assert_eq!(step.reference.kind, "containerregistry");
+    assert_eq!(step.reference.kind, StepReferenceKind::ContainerRegistry);
     assert_eq!(step.reference.image.as_deref(), Some("node:18"));
 }

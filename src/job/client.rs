@@ -50,20 +50,26 @@ impl JobClient {
         }
     }
 
-    pub fn set_job_access_token(&mut self, token: String) {
+    pub fn configure_from_manifest(&mut self, manifest: &JobManifest) -> Result<()> {
+        let access_token = manifest.access_token()?.to_string();
+        let server_url = manifest.server_url()?.to_string();
+        self.job_access_token = Some(access_token);
+        self.server_url = server_url;
+        if let Ok(pipelines_url) = manifest.pipelines_url() {
+            self.pipelines_url = Some(pipelines_url.to_string());
+        }
+        if let Some(results_url) = manifest.results_endpoint() {
+            tracing::info!(results_url, "using Results twirp API for timeline/logs");
+            self.results_url = Some(results_url.to_string());
+        } else {
+            tracing::info!("no results_endpoint, using legacy VSS API for timeline/logs");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_job_access_token(&mut self, token: String) {
         self.job_access_token = Some(token);
-    }
-
-    pub fn set_server_url(&mut self, url: String) {
-        self.server_url = url;
-    }
-
-    pub fn set_pipelines_url(&mut self, url: String) {
-        self.pipelines_url = Some(url);
-    }
-
-    pub fn set_results_url(&mut self, url: String) {
-        self.results_url = Some(url);
     }
 
     pub fn has_results_url(&self) -> bool {
@@ -563,21 +569,35 @@ pub struct ResultsStep {
     pub external_id: String,
     pub number: u32,
     pub name: String,
-    pub status: i32,
+    pub status: ResultsStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
-    pub conclusion: i32,
+    pub conclusion: ResultsConclusion,
 }
 
-pub const STATUS_IN_PROGRESS: i32 = 1;
-pub const STATUS_COMPLETED: i32 = 3;
-pub const CONCLUSION_UNKNOWN: i32 = 0;
-pub const CONCLUSION_SUCCESS: i32 = 2;
-pub const CONCLUSION_FAILURE: i32 = 3;
-pub const CONCLUSION_CANCELLED: i32 = 4;
-pub const CONCLUSION_SKIPPED: i32 = 5;
+#[derive(
+    Debug, Clone, Copy, PartialEq, serde_repr::Serialize_repr, serde_repr::Deserialize_repr,
+)]
+#[repr(i32)]
+pub enum ResultsStatus {
+    Pending = 0,
+    InProgress = 1,
+    Completed = 3,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, serde_repr::Serialize_repr, serde_repr::Deserialize_repr,
+)]
+#[repr(i32)]
+pub enum ResultsConclusion {
+    Unknown = 0,
+    Success = 2,
+    Failure = 3,
+    Cancelled = 4,
+    Skipped = 5,
+}
 
 /// High-level job conclusion passed to `complete_job`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

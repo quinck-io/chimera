@@ -77,14 +77,7 @@ async fn run_composite_action_inner(
         .context("composite action has no steps")?;
 
     let mut composite_env = build_step_env(step, job_state, workspace, base_env);
-    let expr_ctx = ExprContext {
-        env: &composite_env,
-        secrets: &job_state.secrets,
-        step_outputs: &job_state.step_outputs,
-        context_data: &job_state.context_data,
-        job_failed: false,
-        job_cancelled: false,
-    };
+    let expr_ctx = ExprContext::new(&composite_env, job_state, false, false);
     composite_env.extend(build_action_inputs(metadata, step, &expr_ctx));
 
     let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
@@ -179,14 +172,7 @@ async fn run_nested_script(
     if let Some(serde_yaml::Value::Mapping(env_map)) = step_map.get(ykey("env")) {
         for (k, v) in env_map {
             if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-                let env_ctx = ExprContext {
-                    env: &step_env,
-                    secrets: &job_state.secrets,
-                    step_outputs: &job_state.step_outputs,
-                    context_data: &job_state.context_data,
-                    job_failed: false,
-                    job_cancelled: false,
-                };
+                let env_ctx = ExprContext::new(&step_env, job_state, false, false);
                 let resolved_val = crate::job::expression::resolve_template(val, &env_ctx);
                 step_env.insert(key.to_string(), resolved_val);
             }
@@ -194,14 +180,7 @@ async fn run_nested_script(
     }
 
     // Resolve ${{ }} expressions in the script body before writing
-    let script_ctx = ExprContext {
-        env: &step_env,
-        secrets: &job_state.secrets,
-        step_outputs: &job_state.step_outputs,
-        context_data: &job_state.context_data,
-        job_failed: false,
-        job_cancelled: false,
-    };
+    let script_ctx = ExprContext::new(&step_env, job_state, false, false);
     let resolved_script = crate::job::expression::resolve_template(script, &script_ctx);
 
     let working_dir = step_map
@@ -270,7 +249,7 @@ async fn run_nested_action(
         display_name: uses.to_string(),
         reference: crate::job::schema::StepReference {
             name: uses.to_string(),
-            kind: "repository".into(),
+            kind: crate::job::schema::StepReferenceKind::Repository,
             ..Default::default()
         },
         inputs,
@@ -313,7 +292,10 @@ async fn run_nested_action(
     } else if metadata.runs.is_docker() {
         bail!("Docker actions not supported yet (Phase 3)")
     } else {
-        bail!("unknown action type in composite: {}", metadata.runs.using)
+        bail!(
+            "unsupported action runtime in composite: {}",
+            metadata.runs.using
+        )
     }
 }
 

@@ -23,6 +23,24 @@ pub struct ExprContext<'a> {
     pub job_cancelled: bool,
 }
 
+impl<'a> ExprContext<'a> {
+    pub fn new(
+        env: &'a HashMap<String, String>,
+        job_state: &'a super::execute::JobState,
+        job_failed: bool,
+        job_cancelled: bool,
+    ) -> Self {
+        Self {
+            env,
+            secrets: &job_state.secrets,
+            step_outputs: &job_state.step_outputs,
+            context_data: &job_state.context_data,
+            job_failed,
+            job_cancelled,
+        }
+    }
+}
+
 /// Evaluate a step `if:` condition. Returns whether the step should run.
 /// `None` condition defaults to `success()` behavior.
 pub fn evaluate_condition(condition: Option<&str>, ctx: &ExprContext) -> bool {

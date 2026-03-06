@@ -50,14 +50,7 @@ pub async fn run_node_action(
 
     let mut env = build_step_env(step, job_state, workspace, base_env);
 
-    let expr_ctx = ExprContext {
-        env: &env,
-        secrets: &job_state.secrets,
-        step_outputs: &job_state.step_outputs,
-        context_data: &job_state.context_data,
-        job_failed: false,
-        job_cancelled: false,
-    };
+    let expr_ctx = ExprContext::new(&env, job_state, false, false);
     env.extend(build_action_inputs(metadata, step, &expr_ctx));
 
     // Set action-specific env vars
@@ -81,12 +74,6 @@ pub async fn run_node_action(
                 env.insert(format!("STATE_{}", k), v.clone());
             }
         }
-        // Also check the empty-key bucket (for direct save-state commands)
-        if let Some(states) = job_state.action_states.get("") {
-            for (k, v) in states {
-                env.insert(format!("STATE_{}", k), v.clone());
-            }
-        }
     }
 
     let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
@@ -100,7 +87,7 @@ pub async fn run_node_action(
 
     // TODO: auto-download node if not on PATH
     let script_path_str = script_path.to_string_lossy();
-    run_process(
+    let result = run_process(
         "node",
         &[OsStr::new(script_path_str.as_ref())],
         &env,
@@ -110,7 +97,19 @@ pub async fn run_node_action(
         timeout,
         cancel_token,
     )
-    .await
+    .await;
+
+    // Re-key saved state from the empty-key bucket into the correct action-keyed bucket
+    if let Some(unnamed_state) = job_state.action_states.remove("") {
+        let key = step.context_name.as_deref().unwrap_or(&step.id);
+        job_state
+            .action_states
+            .entry(key.to_string())
+            .or_default()
+            .extend(unnamed_state);
+    }
+
+    result
 }
 
 #[cfg(test)]

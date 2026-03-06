@@ -15,11 +15,42 @@ use super::auth::TokenManager;
 const BROKER_PROTOCOL_VERSION: &str = "3.0.0";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageType {
+    RunnerJobRequest,
+    JobCancellation,
+    Unknown(String),
+}
+
+impl std::fmt::Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RunnerJobRequest => write!(f, "RunnerJobRequest"),
+            Self::JobCancellation => write!(f, "JobCancellation"),
+            Self::Unknown(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "RunnerJobRequest" => Ok(Self::RunnerJobRequest),
+            "JobCancellation" => Ok(Self::JobCancellation),
+            _ => Ok(Self::Unknown(s)),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrokerMessage {
     pub message_id: u64,
-    pub message_type: String,
+    pub message_type: MessageType,
     pub body: Option<String>,
 }
 

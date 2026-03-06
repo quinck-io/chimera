@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{ChimeraPaths, RunnerCredentials, rsa_params_to_private_key};
 use crate::github::RUNNER_VERSION;
 use crate::github::auth::TokenManager;
-use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage};
+use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage, MessageType};
 use crate::job::JobClient;
 use crate::job::action::ActionCache;
 use crate::job::client::JobConclusion;
@@ -20,6 +20,10 @@ use crate::job::execute::run_all_steps;
 use crate::job::workspace::Workspace;
 
 use env::build_base_env;
+
+const CONTROL_MSG_DELAY: Duration = Duration::from_millis(2000);
+const CANCEL_POLL_DELAY: Duration = Duration::from_millis(2000);
+const CANCEL_POLL_ERROR_DELAY: Duration = Duration::from_millis(5000);
 
 pub struct Runner {
     name: String,
@@ -195,20 +199,9 @@ impl Runner {
             debug!(endpoint = %ep.name, url = %ep.url, data_keys = ?data_keys, "manifest endpoint");
         }
 
-        // Set the job access token and URLs from the manifest's SystemVssConnection
-        let access_token = manifest.access_token()?.to_string();
-        let server_url = manifest.server_url()?.to_string();
-        job_client.set_job_access_token(access_token);
-        job_client.set_server_url(server_url);
-        if let Ok(pipelines_url) = manifest.pipelines_url() {
-            job_client.set_pipelines_url(pipelines_url.to_string());
-        }
-        if let Some(results_url) = manifest.results_endpoint() {
-            info!(results_url, "using Results twirp API for timeline/logs");
-            job_client.set_results_url(results_url.to_string());
-        } else {
-            info!("no results_endpoint, using legacy VSS API for timeline/logs");
-        }
+        job_client
+            .configure_from_manifest(&manifest)
+            .context("configuring job client from manifest")?;
 
         let repo = manifest
             .repository()
@@ -301,7 +294,7 @@ impl Runner {
 
             match poll_result {
                 Ok(Some(msg)) => {
-                    if msg.message_type != "RunnerJobRequest" {
+                    if msg.message_type != MessageType::RunnerJobRequest {
                         debug!(
                             message_id = msg.message_id,
                             message_type = %msg.message_type,
@@ -310,8 +303,12 @@ impl Runner {
                         // Control messages (JobCancellation, BrokerMigration, etc)
                         // are ephemeral — don't try to delete them. Brief pause to
                         // avoid tight-looping when broker keeps resending.
-                        let delay = if cfg!(test) { 10 } else { 2000 };
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        let delay = if cfg!(test) {
+                            Duration::from_millis(10)
+                        } else {
+                            CONTROL_MSG_DELAY
+                        };
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
 
@@ -387,7 +384,7 @@ fn spawn_cancel_poller(broker: &BrokerClient, cancel_token: CancellationToken) -
             };
 
             match poll_result {
-                Ok(Some(msg)) if msg.message_type == "JobCancellation" => {
+                Ok(Some(msg)) if msg.message_type == MessageType::JobCancellation => {
                     let job_id = msg
                         .parse_cancellation_job_id()
                         .unwrap_or_else(|_| "unknown".into());
@@ -397,17 +394,25 @@ fn spawn_cancel_poller(broker: &BrokerClient, cancel_token: CancellationToken) -
                 }
                 Ok(_) => {
                     // Not a cancellation — brief pause to avoid tight loop
-                    let delay = if cfg!(test) { 10 } else { 2000 };
+                    let delay = if cfg!(test) {
+                        Duration::from_millis(10)
+                    } else {
+                        CANCEL_POLL_DELAY
+                    };
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                        _ = tokio::time::sleep(delay) => {}
                         _ = cancel_token.cancelled() => return,
                     }
                 }
                 Err(_) => {
                     // Poll error — brief pause then retry
-                    let delay = if cfg!(test) { 10 } else { 5000 };
+                    let delay = if cfg!(test) {
+                        Duration::from_millis(10)
+                    } else {
+                        CANCEL_POLL_ERROR_DELAY
+                    };
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                        _ = tokio::time::sleep(delay) => {}
                         _ = cancel_token.cancelled() => return,
                     }
                 }

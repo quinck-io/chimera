@@ -27,7 +27,7 @@ fn make_action_step(name: &str) -> Step {
         display_name: name.into(),
         reference: StepReference {
             name: "test-owner/test-action".into(),
-            kind: "repository".into(),
+            kind: crate::job::schema::StepReferenceKind::Repository,
             git_ref: Some("v1".into()),
             ..Default::default()
         },
@@ -47,7 +47,7 @@ fn make_node_metadata(main_script: &str) -> ActionMetadata {
         inputs: HashMap::new(),
 
         runs: crate::job::action::metadata::ActionRuns {
-            using: "node20".into(),
+            using: crate::job::action::metadata::ActionRuntime::Node("20".into()),
             main: Some(main_script.into()),
             pre: None,
             post: None,

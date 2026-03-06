@@ -18,9 +18,60 @@ pub struct ActionInput {
     pub default: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActionRuntime {
+    Node(String),
+    Composite,
+    Docker,
+    Unknown(String),
+}
+
+impl ActionRuntime {
+    pub fn is_node(&self) -> bool {
+        matches!(self, Self::Node(_))
+    }
+
+    pub fn is_composite(&self) -> bool {
+        matches!(self, Self::Composite)
+    }
+
+    pub fn is_docker(&self) -> bool {
+        matches!(self, Self::Docker)
+    }
+}
+
+impl std::fmt::Display for ActionRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Node(v) => write!(f, "node{v}"),
+            Self::Composite => write!(f, "composite"),
+            Self::Docker => write!(f, "docker"),
+            Self::Unknown(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ActionRuntime {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if let Some(version) = s.strip_prefix("node") {
+            Ok(Self::Node(version.to_string()))
+        } else if s == "composite" {
+            Ok(Self::Composite)
+        } else if s == "docker" {
+            Ok(Self::Docker)
+        } else {
+            Ok(Self::Unknown(s))
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ActionRuns {
-    pub using: String,
+    pub using: ActionRuntime,
     #[serde(default)]
     pub main: Option<String>,
     #[serde(default)]
@@ -33,15 +84,15 @@ pub struct ActionRuns {
 
 impl ActionRuns {
     pub fn is_node(&self) -> bool {
-        self.using.starts_with("node")
+        self.using.is_node()
     }
 
     pub fn is_composite(&self) -> bool {
-        self.using == "composite"
+        self.using.is_composite()
     }
 
     pub fn is_docker(&self) -> bool {
-        self.using == "docker"
+        self.using.is_docker()
     }
 }
 

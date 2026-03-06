@@ -182,7 +182,7 @@ async fn poll_200_returns_message() {
     let client = make_client(&mock_server.uri(), tm);
     let msg = client.poll_message().await.unwrap().unwrap();
     assert_eq!(msg.message_id, 12345);
-    assert_eq!(msg.message_type, "RunnerJobRequest");
+    assert_eq!(msg.message_type, MessageType::RunnerJobRequest);
     assert!(msg.body.is_some());
 }
 

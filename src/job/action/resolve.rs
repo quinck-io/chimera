@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-use crate::job::schema::Step;
+use crate::job::schema::{Step, StepReferenceKind};
 
 #[derive(Debug, Clone)]
 pub enum ActionSource {
@@ -23,8 +23,8 @@ pub enum ActionSource {
 pub fn resolve_action(step: &Step) -> Result<ActionSource> {
     let reference = &step.reference;
 
-    match reference.kind.as_str() {
-        "repository" => {
+    match &reference.kind {
+        StepReferenceKind::Repository => {
             if reference.repository_type.as_deref() == Some("self") {
                 let path = reference
                     .path
@@ -40,7 +40,14 @@ pub fn resolve_action(step: &Step) -> Result<ActionSource> {
                 .as_deref()
                 .context("remote action reference missing ref")?;
 
-            let (owner, repo) = parse_owner_repo(&reference.name)?;
+            let parts: Vec<&str> = reference.name.splitn(3, '/').collect();
+            if parts.len() < 2 {
+                bail!(
+                    "invalid action name '{}', expected owner/repo",
+                    reference.name
+                );
+            }
+            let (owner, repo) = (parts[0].to_string(), parts[1].to_string());
 
             Ok(ActionSource::Remote {
                 owner,
@@ -49,7 +56,7 @@ pub fn resolve_action(step: &Step) -> Result<ActionSource> {
                 path: reference.path.clone(),
             })
         }
-        "containerregistry" => {
+        StepReferenceKind::ContainerRegistry => {
             let image = reference
                 .image
                 .as_deref()
@@ -60,42 +67,9 @@ pub fn resolve_action(step: &Step) -> Result<ActionSource> {
         }
         _ => {
             // Fallback: parse name as "owner/repo@ref" (or "owner/repo/path@ref")
-            parse_action_name(&reference.name)
+            super::parse_uses(&reference.name)
         }
     }
-}
-
-fn parse_owner_repo(name: &str) -> Result<(String, String)> {
-    let parts: Vec<&str> = name.splitn(3, '/').collect();
-    if parts.len() < 2 {
-        bail!("invalid action name '{name}', expected owner/repo");
-    }
-    Ok((parts[0].to_string(), parts[1].to_string()))
-}
-
-/// Parse "owner/repo@ref" or "owner/repo/path@ref" format.
-fn parse_action_name(name: &str) -> Result<ActionSource> {
-    let (name_part, git_ref) = name
-        .split_once('@')
-        .context(format!("action name '{name}' missing @ref"))?;
-
-    let parts: Vec<&str> = name_part.splitn(3, '/').collect();
-    if parts.len() < 2 {
-        bail!("invalid action name '{name}', expected owner/repo[@ref]");
-    }
-
-    let path = if parts.len() == 3 {
-        Some(parts[2].to_string())
-    } else {
-        None
-    };
-
-    Ok(ActionSource::Remote {
-        owner: parts[0].to_string(),
-        repo: parts[1].to_string(),
-        git_ref: git_ref.to_string(),
-        path,
-    })
 }
 
 #[cfg(test)]

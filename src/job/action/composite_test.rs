@@ -30,7 +30,7 @@ fn make_composite_metadata(steps_yaml: &str) -> ActionMetadata {
         inputs: HashMap::new(),
 
         runs: ActionRuns {
-            using: "composite".into(),
+            using: crate::job::action::metadata::ActionRuntime::Composite,
             main: None,
             pre: None,
             post: None,
@@ -45,7 +45,7 @@ fn make_step() -> Step {
         display_name: "Composite".into(),
         reference: StepReference {
             name: "test/composite".into(),
-            kind: "repository".into(),
+            kind: crate::job::schema::StepReferenceKind::Repository,
             ..Default::default()
         },
         inputs: HashMap::new(),

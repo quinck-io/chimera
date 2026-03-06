@@ -14,10 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::JobClient;
 use super::action::{ActionCache, load_action_metadata, resolve_action};
-use super::client::{
-    CONCLUSION_CANCELLED, CONCLUSION_FAILURE, CONCLUSION_SKIPPED, CONCLUSION_SUCCESS,
-    CONCLUSION_UNKNOWN, JobConclusion, ResultsStep, STATUS_COMPLETED, STATUS_IN_PROGRESS,
-};
+use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
 use super::commands::{WorkflowCommand, parse_command};
 use super::expression::ExprContext;
 use super::logs::{LogSender, StepLogger};
@@ -61,7 +58,7 @@ impl JobState {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StepConclusion {
     Succeeded,
     Failed,
@@ -73,13 +70,23 @@ pub struct StepResult {
     pub conclusion: StepConclusion,
 }
 
+impl From<StepConclusion> for ResultsConclusion {
+    fn from(c: StepConclusion) -> Self {
+        match c {
+            StepConclusion::Succeeded => Self::Success,
+            StepConclusion::Failed => Self::Failure,
+            StepConclusion::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 /// Per-step tracking for Results API updates.
 struct StepTracker {
     id: String,
     name: String,
     order: u32,
-    status: i32,
-    conclusion: i32,
+    status: ResultsStatus,
+    conclusion: ResultsConclusion,
     started_at: Option<String>,
     completed_at: Option<String>,
 }
@@ -90,20 +97,20 @@ impl StepTracker {
             id: step.id.clone(),
             name: step.display_name.clone(),
             order: step.order,
-            status: 0,
-            conclusion: CONCLUSION_UNKNOWN,
+            status: ResultsStatus::Pending,
+            conclusion: ResultsConclusion::Unknown,
             started_at: None,
             completed_at: None,
         }
     }
 
     fn mark_started(&mut self) {
-        self.status = STATUS_IN_PROGRESS;
+        self.status = ResultsStatus::InProgress;
         self.started_at = Some(format_results_timestamp(Utc::now()));
     }
 
-    fn mark_completed(&mut self, conclusion: i32) {
-        self.status = STATUS_COMPLETED;
+    fn mark_completed(&mut self, conclusion: ResultsConclusion) {
+        self.status = ResultsStatus::Completed;
         self.conclusion = conclusion;
         self.completed_at = Some(format_results_timestamp(Utc::now()));
     }
@@ -137,14 +144,7 @@ pub async fn run_host_step(
 
     let env = build_step_env(step, job_state, workspace, base_env);
 
-    let expr_ctx = ExprContext {
-        env: &env,
-        secrets: &job_state.secrets,
-        step_outputs: &job_state.step_outputs,
-        context_data: &job_state.context_data,
-        job_failed: false,
-        job_cancelled: false,
-    };
+    let expr_ctx = ExprContext::new(&env, job_state, false, false);
     let script = super::expression::resolve_template(script_raw, &expr_ctx);
 
     let script_file = workspace.runner_temp().join(format!("step_{}.sh", step.id));
@@ -170,6 +170,16 @@ pub async fn run_host_step(
         cancel_token,
     )
     .await;
+
+    // Re-key saved state from the empty-key bucket into the correct action-keyed bucket
+    if let Some(unnamed_state) = job_state.action_states.remove("") {
+        let key = step.context_name.as_deref().unwrap_or(&step.id);
+        job_state
+            .action_states
+            .entry(key.to_string())
+            .or_default()
+            .extend(unnamed_state);
+    }
 
     let _ = std::fs::remove_file(&script_file);
     result
@@ -291,14 +301,7 @@ pub fn build_step_env(
     env.extend(job_state.env.clone());
     if let Some(step_env) = &step.environment {
         for (k, v) in step_env {
-            let ctx = ExprContext {
-                env: &env,
-                secrets: &job_state.secrets,
-                step_outputs: &job_state.step_outputs,
-                context_data: &job_state.context_data,
-                job_failed: false,
-                job_cancelled: false,
-            };
+            let ctx = ExprContext::new(&env, job_state, false, false);
             let resolved = super::expression::resolve_expression(v, &ctx);
             env.insert(k.clone(), resolved);
         }
@@ -390,7 +393,7 @@ pub async fn run_all_steps(
     access_token: &str,
     cancel_token: CancellationToken,
 ) -> Result<(JobConclusion, HashMap<String, String>)> {
-    let masks = collect_secret_masks(manifest).await;
+    let masks = collect_secret_masks(manifest);
     let mut secrets: HashMap<String, String> = manifest
         .variables
         .iter()
@@ -439,19 +442,12 @@ pub async fn run_all_steps(
 
         // Check condition before starting the step — skipped steps get no
         // logs and are reported as completed immediately.
-        let condition_ctx = ExprContext {
-            env: base_env,
-            secrets: &job_state.secrets,
-            step_outputs: &job_state.step_outputs,
-            context_data: &job_state.context_data,
-            job_failed,
-            job_cancelled,
-        };
+        let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
         if !super::expression::evaluate_condition(step.condition.as_deref(), &condition_ctx) {
             debug!(step = %step.display_name, "skipping step (condition not met)");
             let now = format_timeline_timestamp(Utc::now());
             trackers[idx].mark_started();
-            trackers[idx].mark_completed(CONCLUSION_SKIPPED);
+            trackers[idx].mark_completed(ResultsConclusion::Skipped);
 
             report_step_completed(
                 use_results,
@@ -461,7 +457,7 @@ pub async fn run_all_steps(
                 step,
                 &now,
                 &now,
-                CONCLUSION_SKIPPED,
+                ResultsConclusion::Skipped,
                 0,
             )
             .await;
@@ -577,7 +573,7 @@ pub async fn run_all_steps(
     Ok((conclusion, job_state.outputs.clone()))
 }
 
-async fn collect_secret_masks(manifest: &JobManifest) -> Arc<RwLock<Vec<String>>> {
+fn collect_secret_masks(manifest: &JobManifest) -> Arc<RwLock<Vec<String>>> {
     let masks: Vec<String> = manifest
         .variables
         .values()
@@ -613,7 +609,7 @@ async fn execute_step(
     action_cache: &ActionCache,
     access_token: &str,
     cancel_token: &CancellationToken,
-) -> (StepConclusion, i32) {
+) -> (StepConclusion, ResultsConclusion) {
     log_sender.send_banner(runner_name).await;
 
     let result = if step.is_script() {
@@ -642,16 +638,12 @@ async fn execute_step(
 
     match result {
         Ok(result) => {
-            let rc = match result.conclusion {
-                StepConclusion::Succeeded => CONCLUSION_SUCCESS,
-                StepConclusion::Failed => CONCLUSION_FAILURE,
-                StepConclusion::Cancelled => CONCLUSION_CANCELLED,
-            };
+            let rc = ResultsConclusion::from(result.conclusion);
             (result.conclusion, rc)
         }
         Err(e) => {
             log_sender.send(format!("Step error: {e}")).await;
-            (StepConclusion::Failed, CONCLUSION_FAILURE)
+            (StepConclusion::Failed, ResultsConclusion::Failure)
         }
     }
 }
@@ -705,7 +697,7 @@ async fn run_action_step(
     } else if metadata.runs.is_docker() {
         anyhow::bail!("Docker actions not supported yet (Phase 3)")
     } else {
-        anyhow::bail!("unknown action type: {}", metadata.runs.using)
+        anyhow::bail!("unsupported action runtime: {}", metadata.runs.using)
     }
 }
 
@@ -764,7 +756,7 @@ async fn report_step_completed(
     step: &Step,
     start_time: &str,
     finish_time: &str,
-    result_conclusion: i32,
+    result_conclusion: ResultsConclusion,
     legacy_log_id: u64,
 ) {
     if use_results {
@@ -774,10 +766,10 @@ async fn report_step_completed(
             .await;
     } else {
         let timeline_result = match result_conclusion {
-            CONCLUSION_SUCCESS => TimelineResult::Succeeded,
-            CONCLUSION_FAILURE => TimelineResult::Failed,
-            CONCLUSION_CANCELLED => TimelineResult::Cancelled,
-            CONCLUSION_SKIPPED => TimelineResult::Skipped,
+            ResultsConclusion::Success => TimelineResult::Succeeded,
+            ResultsConclusion::Failure => TimelineResult::Failed,
+            ResultsConclusion::Cancelled => TimelineResult::Cancelled,
+            ResultsConclusion::Skipped => TimelineResult::Skipped,
             _ => TimelineResult::Failed,
         };
         let _ = client

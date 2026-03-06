@@ -2,7 +2,7 @@ use super::*;
 use crate::github::auth::TokenManager;
 use crate::job::action::ActionCache;
 use crate::job::client::JobConclusion;
-use crate::job::schema::StepReference;
+use crate::job::schema::{StepReference, StepReferenceKind};
 use rsa::RsaPrivateKey;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path_regex};
@@ -82,7 +82,7 @@ fn make_step(id: &str, script: &str) -> Step {
         display_name: format!("Run {script}"),
         reference: StepReference {
             name: "script".into(),
-            kind: "script".into(),
+            kind: StepReferenceKind::Script,
             ..Default::default()
         },
         inputs: HashMap::from([("script".into(), script.into())]),
@@ -554,7 +554,7 @@ fn step_is_script_detection() {
         display_name: "Checkout".into(),
         reference: StepReference {
             name: "actions/checkout@v4".into(),
-            kind: "action".into(),
+            kind: StepReferenceKind::Unknown("action".into()),
             ..Default::default()
         },
         inputs: HashMap::new(),
