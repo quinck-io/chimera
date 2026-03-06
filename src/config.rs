@@ -111,6 +111,10 @@ impl ChimeraPaths {
     pub fn tool_cache_dir(&self) -> PathBuf {
         self.root.join("tool-cache")
     }
+
+    pub fn actions_dir(&self) -> PathBuf {
+        self.root.join("actions")
+    }
 }
 
 pub fn default_root() -> PathBuf {

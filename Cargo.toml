@@ -24,6 +24,9 @@ dirs = "6"
 serde_urlencoded = "0.7.1"
 tokio-util = "0.7"
 serde_repr = "0.1"
+flate2 = "1"
+tar = "0.4"
+serde_yaml = "0.9"
 
 [dev-dependencies]
 wiremock = "0.6"

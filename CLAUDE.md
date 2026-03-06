@@ -16,6 +16,10 @@ The `PLAN.md` file is a detailed roadmap for how to build this. It breaks down t
 
 ## Rust Conventions
 
+It is important you structure the project in a clean, layered way. It is important to separate concerns and avoid tight coupling. It is important to write code that is easy to read and understand. 
+
+Before writing things and couple or scatter one logic in multiple places, think about how to structure it in a clean way. Do not exhagerate abstractions, but do not just throw everything in one file either.
+
 ### Error Handling
 
 Use `anyhow::Result` at function boundaries. Use `thiserror` to define typed errors inside modules when callers need to match on error variants. Never use `.unwrap()` or `.expect()` in library or daemon code — only acceptable in tests or truly unreachable branches (with a comment explaining why).

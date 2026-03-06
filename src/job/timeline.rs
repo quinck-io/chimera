@@ -34,6 +34,7 @@ pub enum TimelineResult {
     Succeeded = 0,
     Failed = 2,
     Cancelled = 3,
+    Skipped = 4,
 }
 
 #[derive(Debug, Clone, Serialize)]

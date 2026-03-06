@@ -115,10 +115,6 @@ impl JobClient {
 
         debug!(manifest_length = body_text.len(), "received job manifest");
 
-        if let Err(e) = std::fs::write("/tmp/chimera_manifest.json", &body_text) {
-            debug!(error = %e, "failed to write manifest debug file");
-        }
-
         let raw: serde_json::Value =
             serde_json::from_str(&body_text).context("parsing raw job manifest JSON")?;
         let normalized = manifest::normalize_manifest(&raw);
@@ -576,6 +572,7 @@ pub const CONCLUSION_UNKNOWN: i32 = 0;
 pub const CONCLUSION_SUCCESS: i32 = 2;
 pub const CONCLUSION_FAILURE: i32 = 3;
 pub const CONCLUSION_CANCELLED: i32 = 4;
+pub const CONCLUSION_SKIPPED: i32 = 5;
 
 /// Step result included in the /completejob request body.
 #[derive(Debug, Clone, serde::Serialize)]

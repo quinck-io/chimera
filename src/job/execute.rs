@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,11 +12,13 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use super::JobClient;
+use super::action::{ActionCache, load_action_metadata, resolve_action};
 use super::client::{
-    CONCLUSION_CANCELLED, CONCLUSION_FAILURE, CONCLUSION_SUCCESS, CONCLUSION_UNKNOWN, ResultsStep,
-    STATUS_COMPLETED, STATUS_IN_PROGRESS,
+    CONCLUSION_CANCELLED, CONCLUSION_FAILURE, CONCLUSION_SKIPPED, CONCLUSION_SUCCESS,
+    CONCLUSION_UNKNOWN, ResultsStep, STATUS_COMPLETED, STATUS_IN_PROGRESS,
 };
 use super::commands::{WorkflowCommand, parse_command};
+use super::expression::ExprContext;
 use super::logs::{LogSender, StepLogger};
 use super::schema::{JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
@@ -26,15 +30,32 @@ pub struct JobState {
     pub path_prepends: Vec<String>,
     pub outputs: HashMap<String, String>,
     pub masks: Arc<RwLock<Vec<String>>>,
+    /// Per-action state for pre→post transfer via SaveState workflow command.
+    /// Key: action context_name, Value: map of state name→value.
+    pub action_states: HashMap<String, HashMap<String, String>>,
+    /// Per-step outputs for `steps.<id>.outputs.<name>` expression resolution.
+    pub step_outputs: HashMap<String, HashMap<String, String>>,
+    /// Secret variables (name → value) for `secrets.<name>` expression resolution.
+    pub secrets: HashMap<String, String>,
+    /// Context data from the job manifest (needs, matrix, job, etc.).
+    pub context_data: serde_json::Value,
 }
 
 impl JobState {
-    pub fn new(masks: Arc<RwLock<Vec<String>>>) -> Self {
+    pub fn new(
+        masks: Arc<RwLock<Vec<String>>>,
+        secrets: HashMap<String, String>,
+        context_data: serde_json::Value,
+    ) -> Self {
         Self {
             env: HashMap::new(),
             path_prepends: Vec::new(),
             outputs: HashMap::new(),
             masks,
+            action_states: HashMap::new(),
+            step_outputs: HashMap::new(),
+            secrets,
+            context_data,
         }
     }
 }
@@ -45,6 +66,7 @@ pub enum StepConclusion {
     Failed,
 }
 
+#[derive(Debug)]
 pub struct StepResult {
     pub conclusion: StepConclusion,
 }
@@ -105,16 +127,26 @@ pub async fn run_host_step(
     base_env: &HashMap<String, String>,
     log_sender: &LogSender,
 ) -> Result<StepResult> {
-    let script = step
+    let script_raw = step
         .inputs
         .get("script")
         .context("step has no 'script' input")?;
 
-    let script_file = workspace.runner_temp().join(format!("step_{}.sh", step.id));
-    std::fs::write(&script_file, script)
-        .with_context(|| format!("writing script file {}", script_file.display()))?;
-
     let env = build_step_env(step, job_state, workspace, base_env);
+
+    let expr_ctx = ExprContext {
+        env: &env,
+        secrets: &job_state.secrets,
+        step_outputs: &job_state.step_outputs,
+        context_data: &job_state.context_data,
+        job_failed: false,
+        job_cancelled: false,
+    };
+    let script = super::expression::resolve_template(script_raw, &expr_ctx);
+
+    let script_file = workspace.runner_temp().join(format!("step_{}.sh", step.id));
+    std::fs::write(&script_file, &script)
+        .with_context(|| format!("writing script file {}", script_file.display()))?;
     let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
 
     debug!(
@@ -124,23 +156,47 @@ pub async fn run_host_step(
         "running host step"
     );
 
-    let mut child = Command::new("bash")
-        .arg("-e")
-        .arg(&script_file)
-        .current_dir(workspace.workspace_dir())
-        .envs(&env)
+    let result = run_process(
+        "bash",
+        &[OsStr::new("-e"), script_file.as_os_str()],
+        &env,
+        workspace.workspace_dir(),
+        job_state,
+        log_sender,
+        timeout,
+    )
+    .await;
+
+    let _ = std::fs::remove_file(&script_file);
+    result
+}
+
+/// Shared process runner used by host steps, node actions, and composite steps.
+pub async fn run_process(
+    program: &str,
+    args: &[&OsStr],
+    env: &HashMap<String, String>,
+    working_dir: &Path,
+    job_state: &mut JobState,
+    log_sender: &LogSender,
+    timeout: Duration,
+) -> Result<StepResult> {
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(working_dir)
+        .envs(env)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .with_context(|| format!("spawning bash for step {}", step.id))?;
+        .with_context(|| format!("spawning {program}"))?;
 
     let stdout = child.stdout.take().context("no stdout")?;
     let stderr = child.stderr.take().context("no stderr")?;
 
-    // Collect state mutations from workflow commands in background tasks
     let collected_env = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
     let collected_paths = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
     let collected_outputs = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let collected_state = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
 
     let stdout_task = spawn_stdout_reader(
         stdout,
@@ -149,6 +205,7 @@ pub async fn run_host_step(
         collected_env.clone(),
         collected_paths.clone(),
         collected_outputs.clone(),
+        collected_state.clone(),
     );
 
     let stderr_sender = log_sender.clone();
@@ -171,10 +228,7 @@ pub async fn run_host_step(
     let status = match tokio::time::timeout(timeout, timed_wait).await {
         Ok(result) => result?,
         Err(_) => {
-            // Kill closes the child's pipes, which will cause the reader tasks to
-            // finish. We don't need to await them — they hold only Arc clones and
-            // will clean up independently.
-            warn!(step_id = %step.id, "step timed out, killing process");
+            warn!("process timed out, killing");
             let _ = child.kill().await;
             return Ok(StepResult {
                 conclusion: StepConclusion::Failed,
@@ -192,8 +246,13 @@ pub async fn run_host_step(
     for (k, v) in collected_outputs.lock().await.drain(..) {
         job_state.outputs.insert(k, v);
     }
-
-    let _ = std::fs::remove_file(&script_file);
+    for (k, v) in collected_state.lock().await.drain(..) {
+        job_state
+            .action_states
+            .entry(String::new())
+            .or_default()
+            .insert(k, v);
+    }
 
     let conclusion = if status.success() {
         StepConclusion::Succeeded
@@ -205,7 +264,7 @@ pub async fn run_host_step(
 }
 
 /// Build the full environment for a step execution.
-fn build_step_env(
+pub fn build_step_env(
     step: &Step,
     job_state: &JobState,
     workspace: &Workspace,
@@ -214,7 +273,18 @@ fn build_step_env(
     let mut env = base_env.clone();
     env.extend(job_state.env.clone());
     if let Some(step_env) = &step.environment {
-        env.extend(step_env.clone());
+        for (k, v) in step_env {
+            let ctx = ExprContext {
+                env: &env,
+                secrets: &job_state.secrets,
+                step_outputs: &job_state.step_outputs,
+                context_data: &job_state.context_data,
+                job_failed: false,
+                job_cancelled: false,
+            };
+            let resolved = super::expression::resolve_expression(v, &ctx);
+            env.insert(k.clone(), resolved);
+        }
     }
 
     if let Ok(file_env) = workspace.read_env_file() {
@@ -245,6 +315,7 @@ fn spawn_stdout_reader(
     env_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
     path_buf: Arc<tokio::sync::Mutex<Vec<String>>>,
     output_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
+    state_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
@@ -279,7 +350,9 @@ fn spawn_stdout_reader(
                     WorkflowCommand::EndGroup => {
                         sender.send("##[endgroup]".into()).await;
                     }
-                    WorkflowCommand::SaveState { .. } => {}
+                    WorkflowCommand::SaveState { name, value } => {
+                        state_buf.lock().await.push((name, value));
+                    }
                 }
             } else {
                 sender.send(line).await;
@@ -295,9 +368,36 @@ pub async fn run_all_steps(
     workspace: &Workspace,
     base_env: &HashMap<String, String>,
     runner_name: &str,
-) -> Result<String> {
+    action_cache: &ActionCache,
+    access_token: &str,
+) -> Result<(String, HashMap<String, String>)> {
     let masks = collect_secret_masks(manifest).await;
-    let mut job_state = JobState::new(masks.clone());
+    let mut secrets: HashMap<String, String> = manifest
+        .variables
+        .iter()
+        .filter(|(_, v)| v.is_secret && !v.value.is_empty())
+        .map(|(k, v)| (k.clone(), v.value.clone()))
+        .collect();
+
+    // User-defined secrets (repo/org secrets) come via contextData["secrets"],
+    // not through the variables dict which only has system-level secrets.
+    if let Some(ctx_secrets) = manifest
+        .context_data
+        .get("secrets")
+        .and_then(|v| v.as_object())
+    {
+        for (k, v) in ctx_secrets {
+            if let Some(s) = v.as_str()
+                && !s.is_empty()
+            {
+                // Add to mask list so secret values are redacted in logs
+                masks.write().await.push(s.to_string());
+                secrets.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+
+    let mut job_state = JobState::new(masks.clone(), secrets, manifest.context_data.clone());
     let mut job_failed = false;
     let use_results = job_client.has_results_url();
 
@@ -310,6 +410,37 @@ pub async fn run_all_steps(
     for (idx, step) in manifest.steps.iter().enumerate() {
         if let Some(condition) = &step.condition {
             debug!(step = %step.display_name, condition, "step has condition");
+        }
+
+        // Check condition before starting the step — skipped steps get no
+        // logs and are reported as completed immediately.
+        let condition_ctx = ExprContext {
+            env: base_env,
+            secrets: &job_state.secrets,
+            step_outputs: &job_state.step_outputs,
+            context_data: &job_state.context_data,
+            job_failed,
+            job_cancelled: false,
+        };
+        if !super::expression::evaluate_condition(step.condition.as_deref(), &condition_ctx) {
+            debug!(step = %step.display_name, "skipping step (condition not met)");
+            let now = format_timeline_timestamp(Utc::now());
+            trackers[idx].mark_started();
+            trackers[idx].mark_completed(CONCLUSION_SKIPPED);
+
+            report_step_completed(
+                use_results,
+                job_client,
+                manifest,
+                &trackers,
+                step,
+                &now,
+                &now,
+                CONCLUSION_SKIPPED,
+                0,
+            )
+            .await;
+            continue;
         }
 
         let start_time = format_timeline_timestamp(Utc::now());
@@ -339,9 +470,10 @@ pub async fn run_all_steps(
             &mut job_state,
             workspace,
             base_env,
-            job_failed,
             logger.sender(),
             runner_name,
+            action_cache,
+            access_token,
         )
         .await;
 
@@ -377,6 +509,14 @@ pub async fn run_all_steps(
         )
         .await;
 
+        // Save this step's outputs for `steps.<id>.outputs.<name>` resolution
+        if !job_state.outputs.is_empty() {
+            let step_key = step.context_name.as_deref().unwrap_or(&step.id);
+            job_state
+                .step_outputs
+                .insert(step_key.to_string(), std::mem::take(&mut job_state.outputs));
+        }
+
         if conclusion == StepConclusion::Failed {
             if step.continue_on_error {
                 info!(step = %step.display_name, "step failed but continue_on_error is set");
@@ -399,11 +539,12 @@ pub async fn run_all_steps(
         job_state.outputs.extend(file_outputs);
     }
 
-    Ok(if job_failed {
+    let conclusion = if job_failed {
         "failed".to_string()
     } else {
         "succeeded".to_string()
-    })
+    };
+    Ok((conclusion, job_state.outputs.clone()))
 }
 
 async fn collect_secret_masks(manifest: &JobManifest) -> Arc<RwLock<Vec<String>>> {
@@ -430,33 +571,36 @@ async fn create_step_logger(
     }
 }
 
-/// Decide what to do with a step and run it.
+/// Run a step (already determined to not be skipped).
+#[allow(clippy::too_many_arguments)]
 async fn execute_step(
     step: &Step,
     job_state: &mut JobState,
     workspace: &Workspace,
     base_env: &HashMap<String, String>,
-    job_failed: bool,
     log_sender: &LogSender,
     runner_name: &str,
+    action_cache: &ActionCache,
+    access_token: &str,
 ) -> (StepConclusion, i32) {
     log_sender.send_banner(runner_name).await;
 
-    if !step.is_script() {
-        log_sender
-            .send("Action steps are not yet supported, marking as succeeded".into())
-            .await;
-        return (StepConclusion::Succeeded, CONCLUSION_SUCCESS);
-    }
+    let result = if step.is_script() {
+        run_host_step(step, job_state, workspace, base_env, log_sender).await
+    } else {
+        run_action_step(
+            step,
+            job_state,
+            workspace,
+            base_env,
+            log_sender,
+            action_cache,
+            access_token,
+        )
+        .await
+    };
 
-    if job_failed && !step.continue_on_error {
-        log_sender
-            .send("Skipping step due to previous failure".into())
-            .await;
-        return (StepConclusion::Failed, CONCLUSION_CANCELLED);
-    }
-
-    match run_host_step(step, job_state, workspace, base_env, log_sender).await {
+    match result {
         Ok(result) => {
             let rc = match result.conclusion {
                 StepConclusion::Succeeded => CONCLUSION_SUCCESS,
@@ -469,6 +613,68 @@ async fn execute_step(
             (StepConclusion::Failed, CONCLUSION_FAILURE)
         }
     }
+}
+
+async fn run_action_step(
+    step: &Step,
+    job_state: &mut JobState,
+    workspace: &Workspace,
+    base_env: &HashMap<String, String>,
+    log_sender: &LogSender,
+    action_cache: &ActionCache,
+    access_token: &str,
+) -> Result<StepResult> {
+    let source = resolve_action(step)?;
+    let action_dir = action_cache
+        .get_action(&source, workspace.workspace_dir(), access_token)
+        .await?;
+    let metadata = load_action_metadata(&action_dir)?;
+
+    if metadata.runs.is_node() {
+        let entry_point = detect_entry_point(step);
+        super::action::node::run_node_action(
+            &action_dir,
+            &metadata,
+            entry_point,
+            step,
+            job_state,
+            workspace,
+            base_env,
+            log_sender,
+        )
+        .await
+    } else if metadata.runs.is_composite() {
+        super::action::composite::run_composite_action(
+            &action_dir,
+            &metadata,
+            step,
+            job_state,
+            workspace,
+            base_env,
+            log_sender,
+            action_cache,
+            access_token,
+            0,
+        )
+        .await
+    } else if metadata.runs.is_docker() {
+        anyhow::bail!("Docker actions not supported yet (Phase 3)")
+    } else {
+        anyhow::bail!("unknown action type: {}", metadata.runs.using)
+    }
+}
+
+/// Detect whether this is a pre, main, or post step based on context_name.
+fn detect_entry_point(step: &Step) -> &str {
+    if let Some(ctx) = &step.context_name {
+        if ctx.ends_with("_pre") || ctx.contains("_pre_") {
+            return "pre";
+        }
+        if ctx.ends_with("_post") || ctx.contains("_post_") {
+            return "post";
+        }
+    }
+    "main"
 }
 
 async fn report_step_started(
@@ -526,6 +732,7 @@ async fn report_step_completed(
             CONCLUSION_SUCCESS => TimelineResult::Succeeded,
             CONCLUSION_FAILURE => TimelineResult::Failed,
             CONCLUSION_CANCELLED => TimelineResult::Cancelled,
+            CONCLUSION_SKIPPED => TimelineResult::Skipped,
             _ => TimelineResult::Failed,
         };
         let _ = client

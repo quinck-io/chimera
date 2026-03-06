@@ -82,12 +82,15 @@ pub fn normalize_manifest(raw: &Value) -> Value {
         result.insert("serviceContainers".into(), sc.clone());
     }
 
-    // Pass through mask and fileTable
+    // Pass through mask, fileTable, and actionsDownloadInfos
     if let Some(mask) = obj.get("mask") {
         result.insert("mask".into(), mask.clone());
     }
     if let Some(ft) = obj.get("fileTable") {
         result.insert("fileTable".into(), ft.clone());
+    }
+    if let Some(adi) = obj.get("actionsDownloadInfos") {
+        result.insert("actionsDownloadInfos".into(), adi.clone());
     }
 
     Value::Object(result)
@@ -126,19 +129,19 @@ fn normalize_step(step: &Value) -> Value {
         result.insert("inputs".into(), template_token_to_map(inputs));
     }
 
-    // condition
+    // condition: might be a template token (expression or string)
     if let Some(cond) = obj.get("condition") {
-        result.insert("condition".into(), cond.clone());
+        result.insert("condition".into(), template_token_to_value(cond));
     }
 
-    // continueOnError: might be null, bool, or absent
+    // continueOnError: might be null, bool, template token, or absent
     if let Some(coe) = obj.get("continueOnError") {
-        result.insert("continueOnError".into(), coe.clone());
+        result.insert("continueOnError".into(), template_token_to_value(coe));
     }
 
-    // timeoutInMinutes
+    // timeoutInMinutes: might be a template token
     if let Some(t) = obj.get("timeoutInMinutes") {
-        result.insert("timeoutInMinutes".into(), t.clone());
+        result.insert("timeoutInMinutes".into(), template_token_to_value(t));
     }
 
     // order

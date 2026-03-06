@@ -1,0 +1,307 @@
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use tracing::debug;
+
+use super::download::ActionCache;
+use super::metadata::ActionMetadata;
+use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env, run_process};
+use crate::job::expression::ExprContext;
+use crate::job::logs::LogSender;
+use crate::job::schema::Step;
+use crate::job::workspace::Workspace;
+
+use super::build_action_inputs;
+
+const MAX_COMPOSITE_DEPTH: u32 = 10;
+
+fn ykey(s: &str) -> serde_yaml::Value {
+    serde_yaml::Value::String(s.into())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_composite_action<'a>(
+    action_dir: &'a Path,
+    metadata: &'a ActionMetadata,
+    step: &'a Step,
+    job_state: &'a mut JobState,
+    workspace: &'a Workspace,
+    base_env: &'a HashMap<String, String>,
+    log_sender: &'a LogSender,
+    action_cache: &'a ActionCache,
+    access_token: &'a str,
+    depth: u32,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StepResult>> + Send + 'a>> {
+    Box::pin(run_composite_action_inner(
+        action_dir,
+        metadata,
+        step,
+        job_state,
+        workspace,
+        base_env,
+        log_sender,
+        action_cache,
+        access_token,
+        depth,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_composite_action_inner(
+    action_dir: &Path,
+    metadata: &ActionMetadata,
+    step: &Step,
+    job_state: &mut JobState,
+    workspace: &Workspace,
+    base_env: &HashMap<String, String>,
+    log_sender: &LogSender,
+    action_cache: &ActionCache,
+    access_token: &str,
+    depth: u32,
+) -> Result<StepResult> {
+    if depth >= MAX_COMPOSITE_DEPTH {
+        bail!("composite action recursion depth limit ({MAX_COMPOSITE_DEPTH}) exceeded");
+    }
+
+    let steps = metadata
+        .runs
+        .steps
+        .as_ref()
+        .context("composite action has no steps")?;
+
+    let mut composite_env = build_step_env(step, job_state, workspace, base_env);
+    let expr_ctx = ExprContext {
+        env: &composite_env,
+        secrets: &job_state.secrets,
+        step_outputs: &job_state.step_outputs,
+        context_data: &job_state.context_data,
+        job_failed: false,
+        job_cancelled: false,
+    };
+    composite_env.extend(build_action_inputs(metadata, step, &expr_ctx));
+
+    let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
+
+    for (i, nested_step) in steps.iter().enumerate() {
+        let nested_obj = nested_step
+            .as_mapping()
+            .context("composite step is not a mapping")?;
+
+        debug!(
+            composite_step = i,
+            action_dir = %action_dir.display(),
+            "running composite sub-step"
+        );
+
+        let result = if nested_obj.contains_key(ykey("uses")) {
+            run_nested_action(
+                nested_obj,
+                job_state,
+                workspace,
+                &composite_env,
+                log_sender,
+                action_cache,
+                access_token,
+                timeout,
+                depth,
+            )
+            .await?
+        } else if nested_obj.contains_key(ykey("run")) {
+            run_nested_script(
+                nested_obj,
+                job_state,
+                workspace,
+                &composite_env,
+                log_sender,
+                timeout,
+            )
+            .await?
+        } else {
+            log_sender
+                .send(format!(
+                    "Skipping composite step {i}: no 'run' or 'uses' key"
+                ))
+                .await;
+            continue;
+        };
+
+        if result.conclusion == StepConclusion::Failed {
+            let continue_on_error = nested_obj
+                .get(ykey("continue-on-error"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if !continue_on_error {
+                return Ok(result);
+            }
+        }
+    }
+
+    Ok(StepResult {
+        conclusion: StepConclusion::Succeeded,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_nested_script(
+    step_map: &serde_yaml::Mapping,
+    job_state: &mut JobState,
+    workspace: &Workspace,
+    env: &HashMap<String, String>,
+    log_sender: &LogSender,
+    timeout: Duration,
+) -> Result<StepResult> {
+    let script = step_map
+        .get(ykey("run"))
+        .and_then(|v| v.as_str())
+        .context("composite step 'run' is not a string")?;
+
+    let shell = step_map
+        .get(ykey("shell"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("bash");
+
+    let mut step_env = env.clone();
+    if let Some(serde_yaml::Value::Mapping(env_map)) = step_map.get(ykey("env")) {
+        for (k, v) in env_map {
+            if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+                let env_ctx = ExprContext {
+                    env: &step_env,
+                    secrets: &job_state.secrets,
+                    step_outputs: &job_state.step_outputs,
+                    context_data: &job_state.context_data,
+                    job_failed: false,
+                    job_cancelled: false,
+                };
+                let resolved_val = crate::job::expression::resolve_template(val, &env_ctx);
+                step_env.insert(key.to_string(), resolved_val);
+            }
+        }
+    }
+
+    // Resolve ${{ }} expressions in the script body before writing
+    let script_ctx = ExprContext {
+        env: &step_env,
+        secrets: &job_state.secrets,
+        step_outputs: &job_state.step_outputs,
+        context_data: &job_state.context_data,
+        job_failed: false,
+        job_cancelled: false,
+    };
+    let resolved_script = crate::job::expression::resolve_template(script, &script_ctx);
+
+    let working_dir = step_map
+        .get(ykey("working-directory"))
+        .and_then(|v| v.as_str())
+        .map(|d| workspace.workspace_dir().join(d))
+        .unwrap_or_else(|| workspace.workspace_dir().to_path_buf());
+
+    let script_file = workspace
+        .runner_temp()
+        .join(format!("_composite_step_{}.sh", uuid::Uuid::new_v4()));
+    std::fs::write(&script_file, &resolved_script)
+        .with_context(|| format!("writing composite script to {}", script_file.display()))?;
+
+    let result = run_process(
+        shell,
+        &[OsStr::new("-e"), script_file.as_os_str()],
+        &step_env,
+        &working_dir,
+        job_state,
+        log_sender,
+        timeout,
+    )
+    .await;
+
+    let _ = std::fs::remove_file(&script_file);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_nested_action(
+    step_map: &serde_yaml::Mapping,
+    job_state: &mut JobState,
+    workspace: &Workspace,
+    env: &HashMap<String, String>,
+    log_sender: &LogSender,
+    action_cache: &ActionCache,
+    access_token: &str,
+    timeout: Duration,
+    depth: u32,
+) -> Result<StepResult> {
+    let uses = step_map
+        .get(ykey("uses"))
+        .and_then(|v| v.as_str())
+        .context("composite step 'uses' is not a string")?;
+
+    let source = super::parse_uses(uses)?;
+    let action_dir = action_cache
+        .get_action(&source, workspace.workspace_dir(), access_token)
+        .await?;
+    let metadata = super::metadata::load_action_metadata(&action_dir)?;
+
+    let mut inputs = HashMap::new();
+    if let Some(serde_yaml::Value::Mapping(with_map)) = step_map.get(ykey("with")) {
+        for (k, v) in with_map {
+            if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+                inputs.insert(key.to_string(), val.to_string());
+            }
+        }
+    }
+
+    let nested_step = Step {
+        id: format!("composite_{}", uuid::Uuid::new_v4()),
+        display_name: uses.to_string(),
+        reference: crate::job::schema::StepReference {
+            name: uses.to_string(),
+            kind: "repository".into(),
+            ..Default::default()
+        },
+        inputs,
+        condition: None,
+        timeout_in_minutes: Some(timeout.as_secs() / 60),
+        continue_on_error: false,
+        order: 0,
+        environment: None,
+        context_name: None,
+    };
+
+    if metadata.runs.is_node() {
+        super::node::run_node_action(
+            &action_dir,
+            &metadata,
+            "main",
+            &nested_step,
+            job_state,
+            workspace,
+            env,
+            log_sender,
+        )
+        .await
+    } else if metadata.runs.is_composite() {
+        run_composite_action(
+            &action_dir,
+            &metadata,
+            &nested_step,
+            job_state,
+            workspace,
+            env,
+            log_sender,
+            action_cache,
+            access_token,
+            depth + 1,
+        )
+        .await
+    } else if metadata.runs.is_docker() {
+        bail!("Docker actions not supported yet (Phase 3)")
+    } else {
+        bail!("unknown action type in composite: {}", metadata.runs.using)
+    }
+}
+
+#[cfg(test)]
+#[path = "composite_test.rs"]
+mod composite_test;

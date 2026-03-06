@@ -1,5 +1,6 @@
 use super::*;
 use crate::github::auth::TokenManager;
+use crate::job::action::ActionCache;
 use crate::job::schema::StepReference;
 use rsa::RsaPrivateKey;
 use wiremock::matchers::{method, path_regex};
@@ -80,6 +81,7 @@ fn make_step(id: &str, script: &str) -> Step {
         reference: StepReference {
             name: "script".into(),
             kind: "script".into(),
+            ..Default::default()
         },
         inputs: HashMap::from([("script".into(), script.into())]),
         condition: None,
@@ -87,6 +89,7 @@ fn make_step(id: &str, script: &str) -> Step {
         continue_on_error: false,
         order: 1,
         environment: None,
+        context_name: None,
     }
 }
 
@@ -97,7 +100,11 @@ async fn echo_step_stdout_captured() {
     let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo hello world");
-    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
+    let mut state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
     let base_env = HashMap::new();
 
     let result = run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
@@ -115,7 +122,11 @@ async fn nonzero_exit_returns_failed() {
     let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "exit 1");
-    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
+    let mut state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
     let base_env = HashMap::new();
 
     let result = run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
@@ -133,7 +144,11 @@ async fn set_env_updates_job_state() {
     let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo '::set-env name=MY_KEY::my_val'");
-    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
+    let mut state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
     let base_env = HashMap::new();
 
     run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
@@ -151,7 +166,11 @@ async fn add_path_updates_path() {
     let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo '::add-path::/opt/custom/bin'");
-    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
+    let mut state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
     let base_env = HashMap::new();
 
     run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
@@ -169,7 +188,11 @@ async fn set_output_populates_outputs() {
     let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo '::set-output name=result::42'");
-    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
+    let mut state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
     let base_env = HashMap::new();
 
     run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
@@ -187,7 +210,11 @@ async fn env_propagation_across_steps() {
     let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step1 = make_step("1", "echo '::set-env name=STEP1_VAR::hello'");
-    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
+    let mut state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
     let base_env = HashMap::new();
 
     run_host_step(&step1, &mut state, &ws, &base_env, logger.sender())
@@ -205,7 +232,7 @@ async fn env_propagation_across_steps() {
 
 #[tokio::test]
 async fn continue_on_error_works() {
-    let (_tmp, ws, client, _mock) = setup_execute().await;
+    let (tmp, ws, client, _mock) = setup_execute().await;
 
     let manifest_json = r#"{
         "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
@@ -242,16 +269,25 @@ async fn continue_on_error_works() {
 
     let manifest: crate::job::schema::JobManifest = serde_json::from_str(manifest_json).unwrap();
     let base_env = HashMap::new();
+    let action_cache = ActionCache::new(tmp.path().join("actions"), reqwest::Client::new());
 
-    let result = run_all_steps(&manifest, &client, &ws, &base_env, "test-runner")
-        .await
-        .unwrap();
-    assert_eq!(result, "succeeded");
+    let result = run_all_steps(
+        &manifest,
+        &client,
+        &ws,
+        &base_env,
+        "test-runner",
+        &action_cache,
+        "fake-token",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0, "succeeded");
 }
 
 #[tokio::test]
 async fn failure_stops_remaining_steps() {
-    let (_tmp, ws, client, _mock) = setup_execute().await;
+    let (tmp, ws, client, _mock) = setup_execute().await;
 
     let manifest_json = r#"{
         "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
@@ -288,11 +324,68 @@ async fn failure_stops_remaining_steps() {
 
     let manifest: crate::job::schema::JobManifest = serde_json::from_str(manifest_json).unwrap();
     let base_env = HashMap::new();
+    let action_cache = ActionCache::new(tmp.path().join("actions"), reqwest::Client::new());
 
-    let result = run_all_steps(&manifest, &client, &ws, &base_env, "test-runner")
-        .await
-        .unwrap();
-    assert_eq!(result, "failed");
+    let result = run_all_steps(
+        &manifest,
+        &client,
+        &ws,
+        &base_env,
+        "test-runner",
+        &action_cache,
+        "fake-token",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0, "failed");
+}
+
+#[tokio::test]
+async fn secrets_from_context_data_resolved() {
+    let (tmp, ws, client, _mock) = setup_execute().await;
+
+    let manifest_json = r#"{
+        "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
+        "steps": [
+            {
+                "id": "s1",
+                "displayName": "Use secret",
+                "reference": { "name": "script", "type": "script" },
+                "inputs": { "script": "test -n \"$MY_SECRET\"" },
+                "condition": null,
+                "timeoutInMinutes": null,
+                "continueOnError": false,
+                "order": 1,
+                "environment": { "MY_SECRET": "${{ secrets.SECRET }}" }
+            }
+        ],
+        "variables": {},
+        "resources": { "endpoints": [] },
+        "contextData": {
+            "secrets": {
+                "SECRET": "super-secret-value"
+            }
+        },
+        "jobContainer": null,
+        "serviceContainers": null
+    }"#;
+
+    let manifest: crate::job::schema::JobManifest = serde_json::from_str(manifest_json).unwrap();
+    let base_env = HashMap::new();
+    let action_cache = ActionCache::new(tmp.path().join("actions"), reqwest::Client::new());
+
+    let result = run_all_steps(
+        &manifest,
+        &client,
+        &ws,
+        &base_env,
+        "test-runner",
+        &action_cache,
+        "fake-token",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0, "succeeded");
 }
 
 #[test]
@@ -306,6 +399,7 @@ fn step_is_script_detection() {
         reference: StepReference {
             name: "actions/checkout@v4".into(),
             kind: "action".into(),
+            ..Default::default()
         },
         inputs: HashMap::new(),
         condition: None,
@@ -313,6 +407,7 @@ fn step_is_script_detection() {
         continue_on_error: false,
         order: 1,
         environment: None,
+        context_name: None,
     };
     assert!(!action_step.is_script());
 }

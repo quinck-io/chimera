@@ -363,3 +363,35 @@ fn normalize_step_preserves_all_fields() {
         "bar"
     );
 }
+
+#[test]
+fn normalize_step_converts_continue_on_error_template_token() {
+    let step = json!({
+        "id": "s1",
+        "reference": { "type": "script" },
+        "continueOnError": { "type": 5, "bool": true },
+        "timeoutInMinutes": { "type": 6, "num": 30 },
+        "condition": { "type": 0, "lit": "always()" }
+    });
+
+    let result = normalize_step(&step);
+    assert_eq!(result.get("continueOnError").unwrap(), true);
+    assert_eq!(result.get("timeoutInMinutes").unwrap(), 30);
+    assert_eq!(result.get("condition").unwrap(), "always()");
+}
+
+#[test]
+fn normalize_step_handles_plain_continue_on_error() {
+    let step = json!({
+        "id": "s1",
+        "reference": { "type": "script" },
+        "continueOnError": false,
+        "timeoutInMinutes": 10,
+        "condition": "success()"
+    });
+
+    let result = normalize_step(&step);
+    assert_eq!(result.get("continueOnError").unwrap(), false);
+    assert_eq!(result.get("timeoutInMinutes").unwrap(), 10);
+    assert_eq!(result.get("condition").unwrap(), "success()");
+}

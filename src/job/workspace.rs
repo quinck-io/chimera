@@ -10,6 +10,8 @@ pub struct Workspace {
     env_file: PathBuf,
     path_file: PathBuf,
     output_file: PathBuf,
+    state_file: PathBuf,
+    step_summary_file: PathBuf,
 }
 
 impl Workspace {
@@ -34,6 +36,8 @@ impl Workspace {
         let env_file = parent.join("_env");
         let path_file = parent.join("_path");
         let output_file = parent.join("_output");
+        let state_file = parent.join("_state");
+        let step_summary_file = parent.join("_step_summary");
 
         std::fs::create_dir_all(&workspace_dir)
             .with_context(|| format!("creating workspace dir {}", workspace_dir.display()))?;
@@ -42,13 +46,18 @@ impl Workspace {
         std::fs::create_dir_all(&tool_cache)
             .with_context(|| format!("creating tool cache dir {}", tool_cache.display()))?;
 
-        // Create empty env/path/output files
+        // Create empty env/path/output/state/summary files
         std::fs::write(&env_file, "")
             .with_context(|| format!("creating env file {}", env_file.display()))?;
         std::fs::write(&path_file, "")
             .with_context(|| format!("creating path file {}", path_file.display()))?;
         std::fs::write(&output_file, "")
             .with_context(|| format!("creating output file {}", output_file.display()))?;
+        std::fs::write(&state_file, "")
+            .with_context(|| format!("creating state file {}", state_file.display()))?;
+        std::fs::write(&step_summary_file, "").with_context(|| {
+            format!("creating step summary file {}", step_summary_file.display())
+        })?;
 
         Ok(Self {
             workspace_dir,
@@ -57,6 +66,8 @@ impl Workspace {
             env_file,
             path_file,
             output_file,
+            state_file,
+            step_summary_file,
         })
     }
 
@@ -82,6 +93,14 @@ impl Workspace {
 
     pub fn output_file(&self) -> &Path {
         &self.output_file
+    }
+
+    pub fn state_file(&self) -> &Path {
+        &self.state_file
+    }
+
+    pub fn step_summary_file(&self) -> &Path {
+        &self.step_summary_file
     }
 
     /// Read GITHUB_ENV file. Supports `KEY=VALUE` and heredoc format:

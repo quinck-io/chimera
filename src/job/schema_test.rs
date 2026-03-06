@@ -71,3 +71,99 @@ fn server_url_and_access_token_helpers() {
     assert_eq!(manifest.access_token().unwrap(), "job-token-xyz");
     assert_eq!(manifest.repository().unwrap(), "owner/test-repo");
 }
+
+#[test]
+fn deserialize_action_step_with_ref_and_path() {
+    let json = r#"{
+        "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
+        "steps": [
+            {
+                "id": "s1",
+                "displayName": "Checkout",
+                "reference": {
+                    "name": "actions/checkout",
+                    "type": "repository",
+                    "ref": "v4",
+                    "path": null,
+                    "repositoryType": null,
+                    "image": null
+                },
+                "inputs": {},
+                "condition": null,
+                "timeoutInMinutes": null,
+                "continueOnError": false,
+                "order": 1,
+                "environment": null,
+                "contextName": "checkout_main"
+            }
+        ],
+        "variables": {},
+        "resources": { "endpoints": [] },
+        "contextData": {},
+        "jobContainer": null,
+        "serviceContainers": null
+    }"#;
+    let manifest: JobManifest = serde_json::from_str(json).unwrap();
+    let step = &manifest.steps[0];
+    assert_eq!(step.reference.name, "actions/checkout");
+    assert_eq!(step.reference.kind, "repository");
+    assert_eq!(step.reference.git_ref.as_deref(), Some("v4"));
+    assert!(step.reference.path.is_none());
+    assert_eq!(step.context_name.as_deref(), Some("checkout_main"));
+}
+
+#[test]
+fn deserialize_action_step_with_subpath() {
+    let json = r#"{
+        "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
+        "steps": [
+            {
+                "id": "s1",
+                "displayName": "Configure AWS",
+                "reference": {
+                    "name": "aws-actions/configure-aws-credentials",
+                    "type": "repository",
+                    "ref": "v4",
+                    "path": "configure",
+                    "repositoryType": null
+                },
+                "inputs": {},
+                "order": 1
+            }
+        ],
+        "variables": {},
+        "resources": { "endpoints": [] },
+        "contextData": {}
+    }"#;
+    let manifest: JobManifest = serde_json::from_str(json).unwrap();
+    let step = &manifest.steps[0];
+    assert_eq!(step.reference.path.as_deref(), Some("configure"));
+    assert_eq!(step.reference.git_ref.as_deref(), Some("v4"));
+}
+
+#[test]
+fn deserialize_container_registry_step() {
+    let json = r#"{
+        "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
+        "steps": [
+            {
+                "id": "s1",
+                "displayName": "Docker step",
+                "reference": {
+                    "name": "docker://node:18",
+                    "type": "containerregistry",
+                    "image": "node:18"
+                },
+                "inputs": {},
+                "order": 1
+            }
+        ],
+        "variables": {},
+        "resources": { "endpoints": [] },
+        "contextData": {}
+    }"#;
+    let manifest: JobManifest = serde_json::from_str(json).unwrap();
+    let step = &manifest.steps[0];
+    assert_eq!(step.reference.kind, "containerregistry");
+    assert_eq!(step.reference.image.as_deref(), Some("node:18"));
+}

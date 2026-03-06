@@ -61,6 +61,8 @@ pub struct Step {
     #[serde(default)]
     pub order: u32,
     pub environment: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub context_name: Option<String>,
 }
 
 impl Step {
@@ -75,10 +77,18 @@ impl Step {
 pub struct StepReference {
     #[serde(default)]
     pub name: String,
-    /// "script" for `run:` steps, "action" for action steps.
+    /// "script" for `run:` steps, "repository"/"containerregistry" for action steps.
     /// Deserialized from the JSON `type` field.
     #[serde(default, rename = "type")]
     pub kind: String,
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default, rename = "repositoryType")]
+    pub repository_type: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,6 +181,12 @@ impl JobManifest {
     pub fn results_endpoint(&self) -> Option<&str> {
         self.variables
             .get("system.github.results_endpoint")
+            .map(|v| v.value.as_str())
+    }
+
+    pub fn github_token(&self) -> Option<&str> {
+        self.variables
+            .get("system.github.token")
             .map(|v| v.value.as_str())
     }
 
