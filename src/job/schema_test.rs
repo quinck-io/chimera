@@ -10,7 +10,7 @@ fn parse_minimal_manifest_with_two_steps() {
     let manifest = load_fixture();
     assert_eq!(manifest.steps.len(), 2);
     assert_eq!(manifest.steps[0].display_name, "Run echo hello");
-    assert_eq!(manifest.steps[0].reference.r#type, "script");
+    assert_eq!(manifest.steps[0].reference.kind, "script");
     assert_eq!(manifest.steps[1].inputs["script"], "echo $MY_VAR");
     assert_eq!(manifest.plan.plan_id, "plan-001");
     assert_eq!(manifest.plan.job_id, "job-001");

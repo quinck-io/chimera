@@ -10,24 +10,7 @@ use crate::config::{
     ChimeraConfig, OAuthCredentials, RunnerCredentials, RunnerInfo, load_config,
     private_key_to_rsa_params, public_key_to_xml, save_config, save_runner_credentials,
 };
-
-fn os_label() -> &'static str {
-    match std::env::consts::OS {
-        "linux" => "Linux",
-        "macos" => "macOS",
-        "windows" => "Windows",
-        other => other,
-    }
-}
-
-fn arch_label() -> &'static str {
-    match std::env::consts::ARCH {
-        "x86_64" => "X64",
-        "aarch64" => "ARM64",
-        "arm" => "ARM",
-        other => other,
-    }
-}
+use crate::utils::{arch_label, os_label};
 
 // ---------------------------------------------------------------------------
 // GitHub URL parsing
@@ -128,7 +111,7 @@ struct TaskAgentPublicKeyV1 {
 struct AgentLabelV1 {
     name: String,
     #[serde(rename = "type")]
-    label_type: String,
+    label_type: u32, // 0 = System, 1 = User
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,7 +221,8 @@ pub async fn register(
         "runner registered successfully"
     );
 
-    let rsa_params = private_key_to_rsa_params(&private_key);
+    let rsa_params = private_key_to_rsa_params(&private_key)
+        .context("extracting RSA parameters from private key")?;
     let creds = RunnerCredentials {
         info: RunnerInfo {
             agent_id: result.agent_id,
@@ -321,7 +305,7 @@ async fn register_v2_or_v1(
     match try_register_v2(client, target, auth, name, &public_key_xml, labels).await {
         Ok(result) => return Ok(result),
         Err(e) => {
-            debug!(error = %e, "V2 registration not available, trying V1");
+            info!(error = %e, "V2 registration not available, trying V1");
         }
     }
 
@@ -426,21 +410,21 @@ async fn register_v1(
     let mut all_labels = vec![
         AgentLabelV1 {
             name: "self-hosted".into(),
-            label_type: "system".into(),
+            label_type: 0, // System
         },
         AgentLabelV1 {
             name: os_label().into(),
-            label_type: "system".into(),
+            label_type: 0, // System
         },
         AgentLabelV1 {
             name: arch_label().into(),
-            label_type: "system".into(),
+            label_type: 0, // System
         },
     ];
     for label in labels {
         all_labels.push(AgentLabelV1 {
             name: label.clone(),
-            label_type: "custom".into(),
+            label_type: 1, // User
         });
     }
 
@@ -461,6 +445,12 @@ async fn register_v1(
     let register_url = format!(
         "{}/_apis/distributedtask/pools/1/agents?api-version=6.0-preview",
         tenant_url
+    );
+
+    debug!(
+        body = %serde_json::to_string_pretty(&agent_body).unwrap_or_default(),
+        url = %register_url,
+        "V1 registration request"
     );
 
     let resp = client

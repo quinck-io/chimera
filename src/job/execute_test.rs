@@ -79,7 +79,7 @@ fn make_step(id: &str, script: &str) -> Step {
         display_name: format!("Run {script}"),
         reference: StepReference {
             name: "script".into(),
-            r#type: "script".into(),
+            kind: "script".into(),
         },
         inputs: HashMap::from([("script".into(), script.into())]),
         condition: None,
@@ -94,128 +94,119 @@ fn make_step(id: &str, script: &str) -> Step {
 async fn echo_step_stdout_captured() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = logs::start_log_upload(client, "plan".into(), 1, masks.clone());
+    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo hello world");
-    let mut state = JobState::new(masks);
+    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
     let base_env = HashMap::new();
 
-    let result = run_host_step(&step, &mut state, &ws, &base_env, &sender)
+    let result = run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
         .await
         .unwrap();
     assert_eq!(result.conclusion, StepConclusion::Succeeded);
 
-    drop(sender);
-    handle.await.unwrap();
+    drop(logger);
 }
 
 #[tokio::test]
 async fn nonzero_exit_returns_failed() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = logs::start_log_upload(client, "plan".into(), 1, masks.clone());
+    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "exit 1");
-    let mut state = JobState::new(masks);
+    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
     let base_env = HashMap::new();
 
-    let result = run_host_step(&step, &mut state, &ws, &base_env, &sender)
+    let result = run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
         .await
         .unwrap();
     assert_eq!(result.conclusion, StepConclusion::Failed);
 
-    drop(sender);
-    handle.await.unwrap();
+    drop(logger);
 }
 
 #[tokio::test]
 async fn set_env_updates_job_state() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = logs::start_log_upload(client, "plan".into(), 1, masks.clone());
+    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo '::set-env name=MY_KEY::my_val'");
-    let mut state = JobState::new(masks);
+    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
     let base_env = HashMap::new();
 
-    run_host_step(&step, &mut state, &ws, &base_env, &sender)
+    run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
         .await
         .unwrap();
     assert_eq!(state.env.get("MY_KEY").unwrap(), "my_val");
 
-    drop(sender);
-    handle.await.unwrap();
+    drop(logger);
 }
 
 #[tokio::test]
 async fn add_path_updates_path() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = logs::start_log_upload(client, "plan".into(), 1, masks.clone());
+    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo '::add-path::/opt/custom/bin'");
-    let mut state = JobState::new(masks);
+    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
     let base_env = HashMap::new();
 
-    run_host_step(&step, &mut state, &ws, &base_env, &sender)
+    run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
         .await
         .unwrap();
     assert!(state.path_prepends.contains(&"/opt/custom/bin".to_string()));
 
-    drop(sender);
-    handle.await.unwrap();
+    drop(logger);
 }
 
 #[tokio::test]
 async fn set_output_populates_outputs() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = logs::start_log_upload(client, "plan".into(), 1, masks.clone());
+    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
     let step = make_step("1", "echo '::set-output name=result::42'");
-    let mut state = JobState::new(masks);
+    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
     let base_env = HashMap::new();
 
-    run_host_step(&step, &mut state, &ws, &base_env, &sender)
+    run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
         .await
         .unwrap();
     assert_eq!(state.outputs.get("result").unwrap(), "42");
 
-    drop(sender);
-    handle.await.unwrap();
+    drop(logger);
 }
 
 #[tokio::test]
 async fn env_propagation_across_steps() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = logs::start_log_upload(client, "plan".into(), 1, masks.clone());
+    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
 
-    // Step 1: set env
     let step1 = make_step("1", "echo '::set-env name=STEP1_VAR::hello'");
-    let mut state = JobState::new(masks);
+    let mut state = JobState::new(Arc::new(RwLock::new(Vec::new())));
     let base_env = HashMap::new();
 
-    run_host_step(&step1, &mut state, &ws, &base_env, &sender)
+    run_host_step(&step1, &mut state, &ws, &base_env, logger.sender())
         .await
         .unwrap();
 
-    // Step 2: use the env
     let step2 = make_step("2", "test \"$STEP1_VAR\" = \"hello\"");
-    let result = run_host_step(&step2, &mut state, &ws, &base_env, &sender)
+    let result = run_host_step(&step2, &mut state, &ws, &base_env, logger.sender())
         .await
         .unwrap();
     assert_eq!(result.conclusion, StepConclusion::Succeeded);
 
-    drop(sender);
-    handle.await.unwrap();
+    drop(logger);
 }
 
 #[tokio::test]
 async fn continue_on_error_works() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
 
-    // TODO better way?
     let manifest_json = r#"{
         "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
         "steps": [
@@ -252,17 +243,16 @@ async fn continue_on_error_works() {
     let manifest: crate::job::schema::JobManifest = serde_json::from_str(manifest_json).unwrap();
     let base_env = HashMap::new();
 
-    let result = run_all_steps(&manifest, &client, &ws, &base_env)
+    let result = run_all_steps(&manifest, &client, &ws, &base_env, "test-runner")
         .await
         .unwrap();
-    assert_eq!(result, "success");
+    assert_eq!(result, "succeeded");
 }
 
 #[tokio::test]
 async fn failure_stops_remaining_steps() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
 
-    // TODO better way?
     let manifest_json = r#"{
         "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
         "steps": [
@@ -299,8 +289,30 @@ async fn failure_stops_remaining_steps() {
     let manifest: crate::job::schema::JobManifest = serde_json::from_str(manifest_json).unwrap();
     let base_env = HashMap::new();
 
-    let result = run_all_steps(&manifest, &client, &ws, &base_env)
+    let result = run_all_steps(&manifest, &client, &ws, &base_env, "test-runner")
         .await
         .unwrap();
-    assert_eq!(result, "failure");
+    assert_eq!(result, "failed");
+}
+
+#[test]
+fn step_is_script_detection() {
+    let script_step = make_step("1", "echo hi");
+    assert!(script_step.is_script());
+
+    let action_step = Step {
+        id: "2".into(),
+        display_name: "Checkout".into(),
+        reference: StepReference {
+            name: "actions/checkout@v4".into(),
+            kind: "action".into(),
+        },
+        inputs: HashMap::new(),
+        condition: None,
+        timeout_in_minutes: None,
+        continue_on_error: false,
+        order: 1,
+        environment: None,
+    };
+    assert!(!action_step.is_script());
 }

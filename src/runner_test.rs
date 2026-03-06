@@ -111,12 +111,7 @@ async fn poll_loop_skips_control_then_returns_job() {
         .mount(&mock_server)
         .await;
 
-    Mock::given(method("DELETE"))
-        .and(path("/message/1"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(1)
-        .mount(&mock_server)
-        .await;
+    // Control messages are no longer deleted (they're ephemeral)
 
     Mock::given(method("GET"))
         .and(path("/message"))
@@ -125,6 +120,13 @@ async fn poll_loop_skips_control_then_returns_job() {
             "messageType": "RunnerJobRequest",
             "body": "{\"runner_request_id\": \"xyz\"}"
         })))
+        .mount(&mock_server)
+        .await;
+
+    // Mock DELETE for the job message (RunnerJobRequest gets deleted)
+    Mock::given(method("DELETE"))
+        .and(path("/message/2"))
+        .respond_with(ResponseTemplate::new(200))
         .mount(&mock_server)
         .await;
 

@@ -1,5 +1,6 @@
 use super::*;
 use crate::github::auth::TokenManager;
+use crate::utils::format_log_timestamp;
 use rsa::RsaPrivateKey;
 use wiremock::matchers::{header, method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -50,7 +51,7 @@ async fn flush_on_sender_drop() {
 
     Mock::given(method("POST"))
         .and(path_regex(r"/_apis/pipelines/workflows/.*/logs/\d+"))
-        .and(header("Content-Type", "text/plain"))
+        .and(header("Content-Type", "application/octet-stream"))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)
         .mount(&mock_server)
@@ -63,7 +64,6 @@ async fn flush_on_sender_drop() {
     drop(sender);
 
     handle.await.unwrap();
-    // If we get here without panicking, the mock verified exactly 1 upload call
 }
 
 #[tokio::test]
@@ -82,7 +82,6 @@ async fn flush_on_interval() {
 
     sender.send("line 1".into()).await;
 
-    // Wait for interval flush
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
     drop(sender);
@@ -103,11 +102,9 @@ async fn flush_on_large_buffer() {
     let masks = Arc::new(RwLock::new(Vec::new()));
     let (sender, handle) = start_log_upload(client, "plan-1".into(), 1, masks);
 
-    // Send enough data to trigger buffer flush (>64KB)
     let big_line = "x".repeat(70_000);
     sender.send(big_line).await;
 
-    // Give the upload task time to process
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     drop(sender);
@@ -142,10 +139,37 @@ async fn masking_replaces_secrets() {
     drop(sender);
     handle.await.unwrap();
 
-    // Give the mock time to process
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let content = uploaded.lock().await;
     assert!(!content.contains("supersecret"), "secret should be masked");
     assert!(content.contains("***"), "should contain mask replacement");
+}
+
+#[tokio::test]
+async fn collector_collects_lines() {
+    let masks = Arc::new(RwLock::new(Vec::new()));
+    let (sender, handle) = start_log_collector(masks);
+
+    sender.send("line one".into()).await;
+    sender.send("line two".into()).await;
+    drop(sender);
+
+    let (text, count) = handle.await.unwrap();
+    assert_eq!(count, 2);
+    assert!(text.contains("line one"));
+    assert!(text.contains("line two"));
+}
+
+#[tokio::test]
+async fn collector_masks_secrets() {
+    let masks = Arc::new(RwLock::new(vec!["secret123".to_string()]));
+    let (sender, handle) = start_log_collector(masks);
+
+    sender.send("token is secret123 here".into()).await;
+    drop(sender);
+
+    let (text, _) = handle.await.unwrap();
+    assert!(!text.contains("secret123"));
+    assert!(text.contains("***"));
 }

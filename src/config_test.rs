@@ -5,7 +5,7 @@ use tempfile::TempDir;
 fn rsa_key_roundtrip() {
     let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
 
-    let params = private_key_to_rsa_params(&key);
+    let params = private_key_to_rsa_params(&key).unwrap();
     let reconstructed = rsa_params_to_private_key(&params).unwrap();
 
     assert_eq!(key.n(), reconstructed.n());
@@ -19,7 +19,7 @@ fn credentials_save_load_roundtrip() {
     let runners_dir = tmp.path().join("runners");
 
     let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
-    let params = private_key_to_rsa_params(&key);
+    let params = private_key_to_rsa_params(&key).unwrap();
 
     let creds = RunnerCredentials {
         info: RunnerInfo {
@@ -121,7 +121,7 @@ fn jwt_signing_survives_key_roundtrip() {
 
     // Generate key, save params, reconstruct (same as register -> start flow)
     let original_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
-    let params = private_key_to_rsa_params(&original_key);
+    let params = private_key_to_rsa_params(&original_key).unwrap();
     let reconstructed = rsa_params_to_private_key(&params).unwrap();
 
     // Sign JWT with reconstructed key

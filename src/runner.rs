@@ -13,6 +13,7 @@ use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage};
 use crate::job::JobClient;
 use crate::job::execute::run_all_steps;
 use crate::job::workspace::Workspace;
+use crate::utils::{arch_label, os_label};
 
 pub struct Runner {
     name: String,
@@ -69,7 +70,7 @@ impl Runner {
         loop {
             let result = self.poll_loop(&broker, &mut shutdown_rx).await;
 
-            match &result {
+            match result {
                 Ok(Some(msg)) => {
                     info!(
                         message_id = msg.message_id,
@@ -77,44 +78,13 @@ impl Runner {
                         "received job message"
                     );
 
-                    if let Some(body) = &msg.body
-                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body)
-                    {
-                        let runner_request_id = parsed
-                            .get("runner_request_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                    self.handle_job_message(&msg, &broker, &client, token_manager.clone())
+                        .await;
 
-                        // Ack the job
-                        if let Err(e) = broker.ack_job(runner_request_id).await {
-                            error!(error = %e, "failed to ack message");
-                        }
-
-                        let run_service_url = parsed
-                            .get("run_service_url")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-
-                        // Execute the job
-                        if let Err(e) = self
-                            .execute_job(
-                                &client,
-                                token_manager.clone(),
-                                runner_request_id,
-                                run_service_url,
-                            )
-                            .await
-                        {
-                            error!(error = %e, "job execution failed");
-                        }
-                    }
-
-                    // After job completes, check for shutdown, otherwise loop back to polling
                     if *shutdown_rx.borrow() {
                         info!("shutdown after job completion");
                         break;
                     }
-                    continue;
                 }
                 Ok(None) => {
                     info!("poll loop exited (shutdown)");
@@ -136,6 +106,35 @@ impl Runner {
         Ok(())
     }
 
+    async fn handle_job_message(
+        &self,
+        msg: &BrokerMessage,
+        broker: &BrokerClient,
+        client: &reqwest::Client,
+        token_manager: Arc<TokenManager>,
+    ) {
+        let (runner_request_id, run_service_url) = match msg.parse_job_request() {
+            Ok(pair) => pair,
+            Err(e) => {
+                warn!(error = %e, "failed to parse job request");
+                return;
+            }
+        };
+
+        debug!(%runner_request_id, %run_service_url, "parsed job request");
+
+        if let Err(e) = broker.ack_job(&runner_request_id).await {
+            error!(error = %e, "failed to ack job");
+        }
+
+        if let Err(e) = self
+            .execute_job(client, token_manager, &runner_request_id, &run_service_url)
+            .await
+        {
+            error!(error = %e, cause = ?e, "job execution failed");
+        }
+    }
+
     async fn execute_job(
         &self,
         client: &reqwest::Client,
@@ -143,7 +142,7 @@ impl Runner {
         runner_request_id: &str,
         run_service_url: &str,
     ) -> Result<()> {
-        info!(runner_request_id, "acquiring job");
+        info!(runner_request_id, run_service_url, "acquiring job");
 
         let mut job_client = JobClient::new(
             client.clone(),
@@ -157,24 +156,44 @@ impl Runner {
             .await
             .context("acquiring job manifest")?;
 
+        let var_names: Vec<&str> = manifest.variables.keys().map(|s| s.as_str()).collect();
         info!(
             plan_id = %manifest.plan.plan_id,
             job_id = %manifest.plan.job_id,
             steps = manifest.steps.len(),
             has_container = manifest.has_container(),
             has_services = manifest.has_services(),
+            mask_regexes = manifest.mask_regexes().len(),
+            files = ?manifest.file_table(),
+            variables = ?var_names,
             "job acquired"
         );
 
-        // Set the job access token from the manifest
+        // Log endpoint data for debugging
+        for ep in &manifest.resources.endpoints {
+            let data_keys: Vec<&str> = ep.data.keys().map(|s| s.as_str()).collect();
+            debug!(endpoint = %ep.name, url = %ep.url, data_keys = ?data_keys, "manifest endpoint");
+        }
+
+        // Set the job access token and URLs from the manifest's SystemVssConnection
         let access_token = manifest.access_token()?.to_string();
+        let server_url = manifest.server_url()?.to_string();
         job_client.set_job_access_token(access_token);
+        job_client.set_server_url(server_url);
+        if let Ok(pipelines_url) = manifest.pipelines_url() {
+            job_client.set_pipelines_url(pipelines_url.to_string());
+        }
+        if let Some(results_url) = manifest.results_endpoint() {
+            info!(results_url, "using Results twirp API for timeline/logs");
+            job_client.set_results_url(results_url.to_string());
+        } else {
+            info!("no results_endpoint, using legacy VSS API for timeline/logs");
+        }
 
         let repo = manifest
             .repository()
             .unwrap_or_else(|_| "unknown/repo".into());
 
-        // Create workspace
         let workspace = Workspace::create(
             &self.paths.work_dir(),
             &self.paths.tmp_dir(),
@@ -184,7 +203,6 @@ impl Runner {
         )
         .context("creating workspace")?;
 
-        // Build base environment
         let base_env = build_base_env(&manifest, &workspace, &self.name);
 
         // Start heartbeat
@@ -193,7 +211,7 @@ impl Runner {
             job_client.start_heartbeat(manifest.plan.plan_id.clone(), manifest.plan.job_id.clone());
 
         // Run all steps
-        let conclusion = run_all_steps(&manifest, &job_client, &workspace, &base_env)
+        let conclusion = run_all_steps(&manifest, &job_client, &workspace, &base_env, &self.name)
             .await
             .context("running job steps")?;
 
@@ -210,6 +228,7 @@ impl Runner {
                 &manifest.plan.job_id,
                 &conclusion,
                 &serde_json::json!({}),
+                &[],
             )
             .await
             .context("completing job")?;
@@ -252,13 +271,18 @@ impl Runner {
                         debug!(
                             message_id = msg.message_id,
                             message_type = %msg.message_type,
-                            "received control message, acking and skipping"
+                            "received control message, skipping"
                         );
-                        if let Err(e) = broker.delete_message(msg.message_id).await {
-                            warn!(error = %e, "failed to delete control message");
-                        }
+                        // Control messages (JobCancellation, BrokerMigration, etc)
+                        // are ephemeral — don't try to delete them. Brief pause to
+                        // avoid tight-looping when broker keeps resending.
+                        let delay = if cfg!(test) { 10 } else { 2000 };
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
                         continue;
                     }
+
+                    // V2 broker: job messages are acknowledged via /acknowledge,
+                    // not deleted. No delete needed here.
                     info!(
                         message_id = msg.message_id,
                         message_type = %msg.message_type,
@@ -332,8 +356,8 @@ fn build_base_env(
         "GITHUB_OUTPUT".into(),
         workspace.output_file().to_string_lossy().into_owned(),
     );
-    env.insert("RUNNER_OS".into(), "Linux".into());
-    env.insert("RUNNER_ARCH".into(), "X64".into());
+    env.insert("RUNNER_OS".into(), os_label().into());
+    env.insert("RUNNER_ARCH".into(), arch_label().into());
     env.insert("RUNNER_NAME".into(), runner_name.into());
     env.insert(
         "RUNNER_TEMP".into(),
@@ -369,7 +393,6 @@ fn build_base_env(
     // Add non-secret variables
     for (key, var) in &manifest.variables {
         if !var.is_secret {
-            // Convert system.xxx to env-friendly format
             let env_key = key.replace('.', "_").to_uppercase();
             env.insert(env_key, var.value.clone());
         }

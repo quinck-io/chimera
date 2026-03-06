@@ -23,6 +23,21 @@ pub struct BrokerMessage {
     pub body: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct JobRequestBody {
+    runner_request_id: String,
+    run_service_url: String,
+}
+
+impl BrokerMessage {
+    /// Parse the body of a RunnerJobRequest message into (runner_request_id, run_service_url).
+    pub fn parse_job_request(&self) -> Result<(String, String)> {
+        let body = self.body.as_deref().context("job message has no body")?;
+        let req: JobRequestBody = serde_json::from_str(body).context("parsing job request body")?;
+        Ok((req.runner_request_id, req.run_service_url))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
     #[error("broker error: {0}")]
@@ -223,36 +238,6 @@ impl BrokerClient {
                 bail!("unexpected poll status {other}: {body}");
             }
         }
-    }
-
-    /// Delete a control message (e.g. BrokerMigration, AgentRefresh).
-    pub async fn delete_message(&self, message_id: u64) -> Result<()> {
-        let token = self.token_manager.get_token().await?;
-
-        let url = format!(
-            "{}/message/{}",
-            self.server_url.trim_end_matches('/'),
-            message_id
-        );
-
-        let resp = self
-            .client
-            .delete(&url)
-            .bearer_auth(&token)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await
-            .context("sending delete message request")?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!(message_id, status = %status, "delete message failed: {body}");
-        } else {
-            debug!(message_id, "control message deleted");
-        }
-
-        Ok(())
     }
 
     /// Acknowledge a job message via POST /acknowledge (V2 broker protocol).

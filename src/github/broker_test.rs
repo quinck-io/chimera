@@ -203,21 +203,6 @@ async fn ack_job_posts_acknowledge() {
 }
 
 #[tokio::test]
-async fn delete_message_sends_delete() {
-    let (mock_server, tm) = setup().await;
-
-    Mock::given(method("DELETE"))
-        .and(path("/message/42"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(1)
-        .mount(&mock_server)
-        .await;
-
-    let client = make_client(&mock_server.uri(), tm);
-    client.delete_message(42).await.unwrap();
-}
-
-#[tokio::test]
 async fn poll_500_returns_error() {
     let (mock_server, tm) = setup().await;
 

@@ -193,15 +193,15 @@ pub fn rsa_params_to_private_key(params: &RsaParameters) -> Result<RsaPrivateKey
     Ok(key)
 }
 
-pub fn private_key_to_rsa_params(key: &RsaPrivateKey) -> RsaParameters {
+pub fn private_key_to_rsa_params(key: &RsaPrivateKey) -> anyhow::Result<RsaParameters> {
     let primes = key.primes();
 
-    let dp = key.dp().expect("missing dp");
-    let dq = key.dq().expect("missing dq");
-    let qi = key.qinv().expect("missing qinv");
-    let qi_uint = qi.to_biguint().expect("qinv is negative");
+    let dp = key.dp().context("RSA key missing dp component")?;
+    let dq = key.dq().context("RSA key missing dq component")?;
+    let qi = key.qinv().context("RSA key missing qinv component")?;
+    let qi_uint = qi.to_biguint().context("RSA key qinv is negative")?;
 
-    RsaParameters {
+    Ok(RsaParameters {
         d: encode_biguint(key.d()),
         dp: encode_biguint(dp),
         dq: encode_biguint(dq),
@@ -210,7 +210,7 @@ pub fn private_key_to_rsa_params(key: &RsaPrivateKey) -> RsaParameters {
         modulus: encode_biguint(key.n()),
         p: encode_biguint(&primes[0]),
         q: encode_biguint(&primes[1]),
-    }
+    })
 }
 
 fn decode_biguint(b64: &str, field: &str) -> Result<BigUint> {

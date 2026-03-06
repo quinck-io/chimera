@@ -1,5 +1,6 @@
 use super::*;
 use crate::github::auth::TokenManager;
+use crate::job::timeline;
 use rsa::RsaPrivateKey;
 use wiremock::matchers::{body_json, header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -113,17 +114,18 @@ async fn complete_job_sends_conclusion_and_outputs() {
         .and(body_json(serde_json::json!({
             "planId": "plan-1",
             "jobId": "job-1",
-            "conclusion": "success",
+            "conclusion": "succeeded",
             "outputs": {},
+            "stepResults": [],
         })))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)
         .mount(&mock_server)
         .await;
 
-    let client = make_client(&mock_server, tm, false);
+    let client = make_client(&mock_server, tm, true);
     client
-        .complete_job("plan-1", "job-1", "success", &serde_json::json!({}))
+        .complete_job("plan-1", "job-1", "succeeded", &serde_json::json!({}), &[])
         .await
         .unwrap();
 }
@@ -152,7 +154,7 @@ async fn upload_log_lines_sends_text_plain() {
 
     Mock::given(method("POST"))
         .and(path_regex(r"/_apis/pipelines/workflows/.*/logs/\d+"))
-        .and(header("Content-Type", "text/plain"))
+        .and(header("Content-Type", "application/octet-stream"))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)
         .mount(&mock_server)
@@ -171,7 +173,7 @@ async fn update_timeline_sends_patch() {
 
     Mock::given(method("PATCH"))
         .and(path_regex(
-            r"/_apis/distributedtask/hubs/build/plans/.*/timelines/.*",
+            r"/_apis/pipelines/workflows/.*/timelines/.*/records",
         ))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)

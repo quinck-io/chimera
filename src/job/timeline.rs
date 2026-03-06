@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_repr::Serialize_repr;
 
@@ -40,14 +39,6 @@ pub enum TimelineResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelineLogRef {
     pub id: u64,
-}
-
-/// Format a timestamp for timeline updates: RFC3339 with 7-decimal fractional seconds.
-pub fn format_timeline_timestamp(ts: DateTime<Utc>) -> String {
-    let nanos = ts.timestamp_subsec_nanos();
-    // 7 decimal places = 100ns precision
-    let frac = nanos / 100;
-    format!("{}.{:07}Z", ts.format("%Y-%m-%dT%H:%M:%S"), frac)
 }
 
 #[cfg(test)]
