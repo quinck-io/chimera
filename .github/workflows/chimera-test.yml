@@ -32,9 +32,11 @@ jobs:
       - name: Cargo version
         run: cargo --version
 
-  # ── Job 2: Node.js actions ────────────────────────────────────────
+  # ── Job 2: Node.js actions w/container  ────────────────────────────────────────
   actions:
     runs-on: [self-hosted, chimera]
+    container:
+      image: ubuntu:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,7 +79,7 @@ jobs:
         uses: ./.github/actions/greet
         with:
           name: chimera
-          loud: 'true'
+          loud: "true"
 
   # ── Job 4: Conditions ─────────────────────────────────────────────
   conditions:
