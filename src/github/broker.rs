@@ -29,12 +29,29 @@ struct JobRequestBody {
     run_service_url: String,
 }
 
+#[derive(Deserialize)]
+struct CancellationBody {
+    #[serde(rename = "jobId")]
+    job_id: String,
+}
+
 impl BrokerMessage {
     /// Parse the body of a RunnerJobRequest message into (runner_request_id, run_service_url).
     pub fn parse_job_request(&self) -> Result<(String, String)> {
         let body = self.body.as_deref().context("job message has no body")?;
         let req: JobRequestBody = serde_json::from_str(body).context("parsing job request body")?;
         Ok((req.runner_request_id, req.run_service_url))
+    }
+
+    /// Parse the body of a JobCancellation message into the job ID.
+    pub fn parse_cancellation_job_id(&self) -> Result<String> {
+        let body = self
+            .body
+            .as_deref()
+            .context("cancellation message has no body")?;
+        let parsed: CancellationBody =
+            serde_json::from_str(body).context("parsing cancellation body")?;
+        Ok(parsed.job_id)
     }
 }
 
@@ -96,7 +113,6 @@ pub struct BrokerClient {
 
 impl BrokerClient {
     /// Create a client with a pre-existing session.
-    #[cfg(test)]
     pub fn new(
         client: reqwest::Client,
         server_url: String,
@@ -184,8 +200,20 @@ impl BrokerClient {
         &self.session_id
     }
 
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     pub fn token_manager(&self) -> &TokenManager {
         &self.token_manager
+    }
+
+    pub fn token_manager_arc(&self) -> Arc<TokenManager> {
+        self.token_manager.clone()
     }
 
     /// Single poll request. Returns Some(message) on 200, None on 202.

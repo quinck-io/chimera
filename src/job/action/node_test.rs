@@ -8,6 +8,7 @@ use crate::job::execute::{JobState, StepConclusion};
 use crate::job::logs::StepLogger;
 use crate::job::schema::{Step, StepReference};
 use crate::job::workspace::Workspace;
+use tokio_util::sync::CancellationToken;
 
 fn make_test_workspace(tmp: &tempfile::TempDir) -> Workspace {
     Workspace::create(
@@ -88,6 +89,7 @@ async fn node_action_executes_script() {
         &ws,
         &base_env,
         logger.sender(),
+        &CancellationToken::new(),
     )
     .await;
 
@@ -146,6 +148,7 @@ if (process.env.INPUT_TOKEN !== 'my-secret') {
         &ws,
         &base_env,
         logger.sender(),
+        &CancellationToken::new(),
     )
     .await;
 
@@ -202,6 +205,7 @@ if (process.env.INPUT_FLAVOR !== 'vanilla') {
         &ws,
         &base_env,
         logger.sender(),
+        &CancellationToken::new(),
     )
     .await;
 
@@ -243,6 +247,7 @@ async fn nonzero_exit_fails() {
         &ws,
         &base_env,
         logger.sender(),
+        &CancellationToken::new(),
     )
     .await;
 

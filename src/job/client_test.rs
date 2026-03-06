@@ -125,7 +125,13 @@ async fn complete_job_sends_conclusion_and_outputs() {
 
     let client = make_client(&mock_server, tm, true);
     client
-        .complete_job("plan-1", "job-1", "succeeded", &serde_json::json!({}), &[])
+        .complete_job(
+            "plan-1",
+            "job-1",
+            super::JobConclusion::Succeeded,
+            &serde_json::json!({}),
+            &[],
+        )
         .await
         .unwrap();
 }

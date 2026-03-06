@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{ChimeraPaths, RunnerCredentials, rsa_params_to_private_key};
@@ -13,6 +15,7 @@ use crate::github::auth::TokenManager;
 use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage};
 use crate::job::JobClient;
 use crate::job::action::ActionCache;
+use crate::job::client::JobConclusion;
 use crate::job::execute::run_all_steps;
 use crate::job::workspace::Workspace;
 
@@ -130,10 +133,24 @@ impl Runner {
             error!(error = %e, "failed to ack job");
         }
 
-        if let Err(e) = self
-            .execute_job(client, token_manager, &runner_request_id, &run_service_url)
-            .await
-        {
+        let cancel_token = CancellationToken::new();
+        let poller_handle = spawn_cancel_poller(broker, cancel_token.clone());
+
+        let result = self
+            .execute_job(
+                client,
+                token_manager,
+                &runner_request_id,
+                &run_service_url,
+                cancel_token.clone(),
+            )
+            .await;
+
+        // Stop the cancel poller regardless of how the job ended
+        cancel_token.cancel();
+        let _ = poller_handle.await;
+
+        if let Err(e) = result {
             error!(error = %e, cause = ?e, "job execution failed");
         }
     }
@@ -144,6 +161,7 @@ impl Runner {
         token_manager: Arc<TokenManager>,
         runner_request_id: &str,
         run_service_url: &str,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
         info!(runner_request_id, run_service_url, "acquiring job");
 
@@ -215,7 +233,7 @@ impl Runner {
         let (heartbeat_handle, heartbeat_cancel) =
             job_client.start_heartbeat(manifest.plan.plan_id.clone(), manifest.plan.job_id.clone());
 
-        let (conclusion, job_outputs) = run_all_steps(
+        let (mut conclusion, job_outputs) = run_all_steps(
             &manifest,
             &job_client,
             &workspace,
@@ -223,9 +241,14 @@ impl Runner {
             &self.name,
             &action_cache,
             &github_token,
+            cancel_token.clone(),
         )
         .await
         .context("running job steps")?;
+
+        if cancel_token.is_cancelled() && conclusion != JobConclusion::Cancelled {
+            conclusion = JobConclusion::Cancelled;
+        }
 
         info!(conclusion = %conclusion, "job steps completed");
 
@@ -238,7 +261,7 @@ impl Runner {
             .complete_job(
                 &manifest.plan.plan_id,
                 &manifest.plan.job_id,
-                &conclusion,
+                conclusion,
                 &outputs_payload,
                 &[],
             )
@@ -341,6 +364,56 @@ impl Runner {
             }
         }
     }
+}
+
+/// Spawn a background task that polls the broker for cancellation messages.
+/// When a `JobCancellation` arrives, it triggers the token.
+fn spawn_cancel_poller(broker: &BrokerClient, cancel_token: CancellationToken) -> JoinHandle<()> {
+    let client = broker.client().clone();
+    let server_url = broker.server_url().to_string();
+    let session_id = broker.session_id().to_string();
+    let token_manager = broker.token_manager_arc();
+
+    tokio::spawn(async move {
+        let poller = BrokerClient::new(client, server_url, session_id, token_manager);
+        loop {
+            if cancel_token.is_cancelled() {
+                return;
+            }
+
+            let poll_result = tokio::select! {
+                result = poller.poll_message() => result,
+                _ = cancel_token.cancelled() => return,
+            };
+
+            match poll_result {
+                Ok(Some(msg)) if msg.message_type == "JobCancellation" => {
+                    let job_id = msg
+                        .parse_cancellation_job_id()
+                        .unwrap_or_else(|_| "unknown".into());
+                    info!(job_id, "received job cancellation from broker");
+                    cancel_token.cancel();
+                    return;
+                }
+                Ok(_) => {
+                    // Not a cancellation — brief pause to avoid tight loop
+                    let delay = if cfg!(test) { 10 } else { 2000 };
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                        _ = cancel_token.cancelled() => return,
+                    }
+                }
+                Err(_) => {
+                    // Poll error — brief pause then retry
+                    let delay = if cfg!(test) { 10 } else { 5000 };
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                        _ = cancel_token.cancelled() => return,
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Convert job outputs to VariableValue dictionary format for the completejob API.

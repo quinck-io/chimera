@@ -3,6 +3,7 @@ use crate::config::ChimeraPaths;
 use crate::github::auth::TokenManager;
 use crate::github::broker::BrokerClient;
 use rsa::RsaPrivateKey;
+use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -241,4 +242,70 @@ async fn poll_loop_refreshes_token_on_401() {
     let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
     // After 401 → invalidate → retry → 202 (None) → return Ok(None)
     assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn cancel_poller_triggers_token_on_cancellation() {
+    let (mock_server, tm, _shutdown_tx) = setup().await;
+
+    // First poll: return a JobCancellation message
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messageId": 42,
+            "messageType": "JobCancellation",
+            "body": "{\"jobId\": \"job-123\"}"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let broker = BrokerClient::new(
+        reqwest::Client::new(),
+        mock_server.uri(),
+        "session-123".into(),
+        tm,
+    );
+
+    let cancel_token = CancellationToken::new();
+    let handle = spawn_cancel_poller(&broker, cancel_token.clone());
+
+    // Wait for the poller to trigger
+    tokio::time::timeout(Duration::from_secs(5), cancel_token.cancelled())
+        .await
+        .expect("cancel token should be triggered within 5s");
+
+    assert!(cancel_token.is_cancelled());
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn cancel_poller_stops_when_token_cancelled_externally() {
+    let (mock_server, tm, _shutdown_tx) = setup().await;
+
+    // Return 202 (no messages) indefinitely
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&mock_server)
+        .await;
+
+    let broker = BrokerClient::new(
+        reqwest::Client::new(),
+        mock_server.uri(),
+        "session-123".into(),
+        tm,
+    );
+
+    let cancel_token = CancellationToken::new();
+    let handle = spawn_cancel_poller(&broker, cancel_token.clone());
+
+    // Cancel externally (simulating job finished normally)
+    cancel_token.cancel();
+
+    // Poller should exit promptly
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("poller should exit within 5s")
+        .expect("poller task should not panic");
 }

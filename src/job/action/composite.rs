@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::download::ActionCache;
@@ -34,6 +35,7 @@ pub fn run_composite_action<'a>(
     action_cache: &'a ActionCache,
     access_token: &'a str,
     depth: u32,
+    cancel_token: &'a CancellationToken,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StepResult>> + Send + 'a>> {
     Box::pin(run_composite_action_inner(
         action_dir,
@@ -46,6 +48,7 @@ pub fn run_composite_action<'a>(
         action_cache,
         access_token,
         depth,
+        cancel_token,
     ))
 }
 
@@ -61,6 +64,7 @@ async fn run_composite_action_inner(
     action_cache: &ActionCache,
     access_token: &str,
     depth: u32,
+    cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
     if depth >= MAX_COMPOSITE_DEPTH {
         bail!("composite action recursion depth limit ({MAX_COMPOSITE_DEPTH}) exceeded");
@@ -107,6 +111,7 @@ async fn run_composite_action_inner(
                 access_token,
                 timeout,
                 depth,
+                cancel_token,
             )
             .await?
         } else if nested_obj.contains_key(ykey("run")) {
@@ -117,6 +122,7 @@ async fn run_composite_action_inner(
                 &composite_env,
                 log_sender,
                 timeout,
+                cancel_token,
             )
             .await?
         } else {
@@ -127,6 +133,10 @@ async fn run_composite_action_inner(
                 .await;
             continue;
         };
+
+        if result.conclusion == StepConclusion::Cancelled {
+            return Ok(result);
+        }
 
         if result.conclusion == StepConclusion::Failed {
             let continue_on_error = nested_obj
@@ -153,6 +163,7 @@ async fn run_nested_script(
     env: &HashMap<String, String>,
     log_sender: &LogSender,
     timeout: Duration,
+    cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
     let script = step_map
         .get(ykey("run"))
@@ -213,6 +224,7 @@ async fn run_nested_script(
         job_state,
         log_sender,
         timeout,
+        cancel_token,
     )
     .await;
 
@@ -231,6 +243,7 @@ async fn run_nested_action(
     access_token: &str,
     timeout: Duration,
     depth: u32,
+    cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
     let uses = step_map
         .get(ykey("uses"))
@@ -279,6 +292,7 @@ async fn run_nested_action(
             workspace,
             env,
             log_sender,
+            cancel_token,
         )
         .await
     } else if metadata.runs.is_composite() {
@@ -293,6 +307,7 @@ async fn run_nested_action(
             action_cache,
             access_token,
             depth + 1,
+            cancel_token,
         )
         .await
     } else if metadata.runs.is_docker() {

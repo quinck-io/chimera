@@ -10,6 +10,7 @@ use crate::job::execute::{JobState, StepConclusion};
 use crate::job::logs::StepLogger;
 use crate::job::schema::{Step, StepReference};
 use crate::job::workspace::Workspace;
+use tokio_util::sync::CancellationToken;
 
 fn make_test_workspace(tmp: &tempfile::TempDir) -> Workspace {
     Workspace::create(
@@ -95,6 +96,7 @@ async fn nested_script_steps_execute() {
         &cache,
         "fake-token",
         0,
+        &CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -140,6 +142,7 @@ async fn failure_propagates() {
         &cache,
         "fake-token",
         0,
+        &CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -188,6 +191,7 @@ async fn inputs_available_as_env() {
         &cache,
         "fake-token",
         0,
+        &CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -231,6 +235,7 @@ async fn recursion_depth_limit() {
         &cache,
         "fake-token",
         10, // Already at limit
+        &CancellationToken::new(),
     )
     .await;
 

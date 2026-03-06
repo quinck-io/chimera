@@ -9,13 +9,14 @@ use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::JobClient;
 use super::action::{ActionCache, load_action_metadata, resolve_action};
 use super::client::{
     CONCLUSION_CANCELLED, CONCLUSION_FAILURE, CONCLUSION_SKIPPED, CONCLUSION_SUCCESS,
-    CONCLUSION_UNKNOWN, ResultsStep, STATUS_COMPLETED, STATUS_IN_PROGRESS,
+    CONCLUSION_UNKNOWN, JobConclusion, ResultsStep, STATUS_COMPLETED, STATUS_IN_PROGRESS,
 };
 use super::commands::{WorkflowCommand, parse_command};
 use super::expression::ExprContext;
@@ -64,6 +65,7 @@ impl JobState {
 pub enum StepConclusion {
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug)]
@@ -126,6 +128,7 @@ pub async fn run_host_step(
     workspace: &Workspace,
     base_env: &HashMap<String, String>,
     log_sender: &LogSender,
+    cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
     let script_raw = step
         .inputs
@@ -164,6 +167,7 @@ pub async fn run_host_step(
         job_state,
         log_sender,
         timeout,
+        cancel_token,
     )
     .await;
 
@@ -172,6 +176,7 @@ pub async fn run_host_step(
 }
 
 /// Shared process runner used by host steps, node actions, and composite steps.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_process(
     program: &str,
     args: &[&OsStr],
@@ -180,6 +185,7 @@ pub async fn run_process(
     job_state: &mut JobState,
     log_sender: &LogSender,
     timeout: Duration,
+    cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
     let mut child = Command::new(program)
         .args(args)
@@ -225,13 +231,24 @@ pub async fn run_process(
         wait_result.context("waiting for child process")
     };
 
-    let status = match tokio::time::timeout(timeout, timed_wait).await {
-        Ok(result) => result?,
-        Err(_) => {
-            warn!("process timed out, killing");
+    let status = tokio::select! {
+        result = tokio::time::timeout(timeout, timed_wait) => {
+            match result {
+                Ok(result) => result?,
+                Err(_) => {
+                    warn!("process timed out, killing");
+                    let _ = child.kill().await;
+                    return Ok(StepResult {
+                        conclusion: StepConclusion::Failed,
+                    });
+                }
+            }
+        }
+        _ = cancel_token.cancelled() => {
+            warn!("job cancelled, killing process");
             let _ = child.kill().await;
             return Ok(StepResult {
-                conclusion: StepConclusion::Failed,
+                conclusion: StepConclusion::Cancelled,
             });
         }
     };
@@ -361,7 +378,8 @@ fn spawn_stdout_reader(
     })
 }
 
-/// Run all steps in a job manifest. Returns "succeeded" or "failed".
+/// Run all steps in a job manifest.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_all_steps(
     manifest: &JobManifest,
     job_client: &Arc<JobClient>,
@@ -370,7 +388,8 @@ pub async fn run_all_steps(
     runner_name: &str,
     action_cache: &ActionCache,
     access_token: &str,
-) -> Result<(String, HashMap<String, String>)> {
+    cancel_token: CancellationToken,
+) -> Result<(JobConclusion, HashMap<String, String>)> {
     let masks = collect_secret_masks(manifest).await;
     let mut secrets: HashMap<String, String> = manifest
         .variables
@@ -399,6 +418,7 @@ pub async fn run_all_steps(
 
     let mut job_state = JobState::new(masks.clone(), secrets, manifest.context_data.clone());
     let mut job_failed = false;
+    let mut job_cancelled = false;
     let use_results = job_client.has_results_url();
 
     let mut trackers: Vec<StepTracker> =
@@ -408,6 +428,11 @@ pub async fn run_all_steps(
     let mut job_line_count: i64 = 0;
 
     for (idx, step) in manifest.steps.iter().enumerate() {
+        // Check for cancellation between steps
+        if cancel_token.is_cancelled() {
+            job_cancelled = true;
+        }
+
         if let Some(condition) = &step.condition {
             debug!(step = %step.display_name, condition, "step has condition");
         }
@@ -420,7 +445,7 @@ pub async fn run_all_steps(
             step_outputs: &job_state.step_outputs,
             context_data: &job_state.context_data,
             job_failed,
-            job_cancelled: false,
+            job_cancelled,
         };
         if !super::expression::evaluate_condition(step.condition.as_deref(), &condition_ctx) {
             debug!(step = %step.display_name, "skipping step (condition not met)");
@@ -474,6 +499,7 @@ pub async fn run_all_steps(
             runner_name,
             action_cache,
             access_token,
+            &cancel_token,
         )
         .await;
 
@@ -517,7 +543,9 @@ pub async fn run_all_steps(
                 .insert(step_key.to_string(), std::mem::take(&mut job_state.outputs));
         }
 
-        if conclusion == StepConclusion::Failed {
+        if conclusion == StepConclusion::Cancelled {
+            job_cancelled = true;
+        } else if conclusion == StepConclusion::Failed {
             if step.continue_on_error {
                 info!(step = %step.display_name, "step failed but continue_on_error is set");
             } else {
@@ -539,10 +567,12 @@ pub async fn run_all_steps(
         job_state.outputs.extend(file_outputs);
     }
 
-    let conclusion = if job_failed {
-        "failed".to_string()
+    let conclusion = if job_cancelled {
+        JobConclusion::Cancelled
+    } else if job_failed {
+        JobConclusion::Failed
     } else {
-        "succeeded".to_string()
+        JobConclusion::Succeeded
     };
     Ok((conclusion, job_state.outputs.clone()))
 }
@@ -582,11 +612,20 @@ async fn execute_step(
     runner_name: &str,
     action_cache: &ActionCache,
     access_token: &str,
+    cancel_token: &CancellationToken,
 ) -> (StepConclusion, i32) {
     log_sender.send_banner(runner_name).await;
 
     let result = if step.is_script() {
-        run_host_step(step, job_state, workspace, base_env, log_sender).await
+        run_host_step(
+            step,
+            job_state,
+            workspace,
+            base_env,
+            log_sender,
+            cancel_token,
+        )
+        .await
     } else {
         run_action_step(
             step,
@@ -596,6 +635,7 @@ async fn execute_step(
             log_sender,
             action_cache,
             access_token,
+            cancel_token,
         )
         .await
     };
@@ -605,6 +645,7 @@ async fn execute_step(
             let rc = match result.conclusion {
                 StepConclusion::Succeeded => CONCLUSION_SUCCESS,
                 StepConclusion::Failed => CONCLUSION_FAILURE,
+                StepConclusion::Cancelled => CONCLUSION_CANCELLED,
             };
             (result.conclusion, rc)
         }
@@ -615,6 +656,7 @@ async fn execute_step(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_action_step(
     step: &Step,
     job_state: &mut JobState,
@@ -623,6 +665,7 @@ async fn run_action_step(
     log_sender: &LogSender,
     action_cache: &ActionCache,
     access_token: &str,
+    cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
     let source = resolve_action(step)?;
     let action_dir = action_cache
@@ -641,6 +684,7 @@ async fn run_action_step(
             workspace,
             base_env,
             log_sender,
+            cancel_token,
         )
         .await
     } else if metadata.runs.is_composite() {
@@ -655,6 +699,7 @@ async fn run_action_step(
             action_cache,
             access_token,
             0,
+            cancel_token,
         )
         .await
     } else if metadata.runs.is_docker() {

@@ -1,8 +1,10 @@
 use super::*;
 use crate::github::auth::TokenManager;
 use crate::job::action::ActionCache;
+use crate::job::client::JobConclusion;
 use crate::job::schema::StepReference;
 use rsa::RsaPrivateKey;
+use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -107,9 +109,16 @@ async fn echo_step_stdout_captured() {
     );
     let base_env = HashMap::new();
 
-    let result = run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
-        .await
-        .unwrap();
+    let result = run_host_step(
+        &step,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(result.conclusion, StepConclusion::Succeeded);
 
     drop(logger);
@@ -129,9 +138,16 @@ async fn nonzero_exit_returns_failed() {
     );
     let base_env = HashMap::new();
 
-    let result = run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
-        .await
-        .unwrap();
+    let result = run_host_step(
+        &step,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(result.conclusion, StepConclusion::Failed);
 
     drop(logger);
@@ -151,9 +167,16 @@ async fn set_env_updates_job_state() {
     );
     let base_env = HashMap::new();
 
-    run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
-        .await
-        .unwrap();
+    run_host_step(
+        &step,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(state.env.get("MY_KEY").unwrap(), "my_val");
 
     drop(logger);
@@ -173,9 +196,16 @@ async fn add_path_updates_path() {
     );
     let base_env = HashMap::new();
 
-    run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
-        .await
-        .unwrap();
+    run_host_step(
+        &step,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert!(state.path_prepends.contains(&"/opt/custom/bin".to_string()));
 
     drop(logger);
@@ -195,9 +225,16 @@ async fn set_output_populates_outputs() {
     );
     let base_env = HashMap::new();
 
-    run_host_step(&step, &mut state, &ws, &base_env, logger.sender())
-        .await
-        .unwrap();
+    run_host_step(
+        &step,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(state.outputs.get("result").unwrap(), "42");
 
     drop(logger);
@@ -217,14 +254,28 @@ async fn env_propagation_across_steps() {
     );
     let base_env = HashMap::new();
 
-    run_host_step(&step1, &mut state, &ws, &base_env, logger.sender())
-        .await
-        .unwrap();
+    run_host_step(
+        &step1,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     let step2 = make_step("2", "test \"$STEP1_VAR\" = \"hello\"");
-    let result = run_host_step(&step2, &mut state, &ws, &base_env, logger.sender())
-        .await
-        .unwrap();
+    let result = run_host_step(
+        &step2,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(result.conclusion, StepConclusion::Succeeded);
 
     drop(logger);
@@ -279,10 +330,11 @@ async fn continue_on_error_works() {
         "test-runner",
         &action_cache,
         "fake-token",
+        CancellationToken::new(),
     )
     .await
     .unwrap();
-    assert_eq!(result.0, "succeeded");
+    assert_eq!(result.0, JobConclusion::Succeeded);
 }
 
 #[tokio::test]
@@ -334,10 +386,11 @@ async fn failure_stops_remaining_steps() {
         "test-runner",
         &action_cache,
         "fake-token",
+        CancellationToken::new(),
     )
     .await
     .unwrap();
-    assert_eq!(result.0, "failed");
+    assert_eq!(result.0, JobConclusion::Failed);
 }
 
 #[tokio::test]
@@ -382,10 +435,113 @@ async fn secrets_from_context_data_resolved() {
         "test-runner",
         &action_cache,
         "fake-token",
+        CancellationToken::new(),
     )
     .await
     .unwrap();
-    assert_eq!(result.0, "succeeded");
+    assert_eq!(result.0, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
+async fn cancel_token_returns_cancelled_between_steps() {
+    let (tmp, ws, client, _mock) = setup_execute().await;
+
+    let manifest_json = r#"{
+        "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
+        "steps": [
+            {
+                "id": "s1",
+                "displayName": "First step",
+                "reference": { "name": "script", "type": "script" },
+                "inputs": { "script": "echo step1" },
+                "condition": null,
+                "timeoutInMinutes": null,
+                "continueOnError": false,
+                "order": 1,
+                "environment": null
+            },
+            {
+                "id": "s2",
+                "displayName": "Should be cancelled",
+                "reference": { "name": "script", "type": "script" },
+                "inputs": { "script": "echo step2" },
+                "condition": null,
+                "timeoutInMinutes": null,
+                "continueOnError": false,
+                "order": 2,
+                "environment": null
+            }
+        ],
+        "variables": {},
+        "resources": { "endpoints": [] },
+        "contextData": {},
+        "jobContainer": null,
+        "serviceContainers": null
+    }"#;
+
+    let manifest: crate::job::schema::JobManifest = serde_json::from_str(manifest_json).unwrap();
+    let base_env = HashMap::new();
+    let action_cache = ActionCache::new(tmp.path().join("actions"), reqwest::Client::new());
+
+    let cancel_token = CancellationToken::new();
+    // Cancel immediately — step 1 may run but the conclusion should be "cancelled"
+    cancel_token.cancel();
+
+    let result = run_all_steps(
+        &manifest,
+        &client,
+        &ws,
+        &base_env,
+        "test-runner",
+        &action_cache,
+        "fake-token",
+        cancel_token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0, JobConclusion::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_token_kills_running_process() {
+    let (_tmp, ws, client, _mock) = setup_execute().await;
+    let masks = Arc::new(RwLock::new(Vec::new()));
+    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+
+    let step = make_step("1", "sleep 60");
+    let mut state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
+    let base_env = HashMap::new();
+
+    let cancel_token = CancellationToken::new();
+    let cancel_clone = cancel_token.clone();
+
+    // Cancel after a brief delay
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel_clone.cancel();
+    });
+
+    let start = std::time::Instant::now();
+    let result = run_host_step(
+        &step,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &cancel_token,
+    )
+    .await
+    .unwrap();
+
+    // Should return quickly (well under 60s)
+    assert!(start.elapsed().as_secs() < 5);
+    assert_eq!(result.conclusion, StepConclusion::Cancelled);
+
+    drop(logger);
 }
 
 #[test]

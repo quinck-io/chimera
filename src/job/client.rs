@@ -163,22 +163,27 @@ impl JobClient {
         &self,
         plan_id: &str,
         job_id: &str,
-        conclusion: &str,
+        conclusion: JobConclusion,
         outputs: &serde_json::Value,
         step_results: &[CompletionStepResult],
     ) -> Result<()> {
         let token = self.job_token()?;
         let url = format!("{}/completejob", self.server_url.trim_end_matches('/'));
 
+        // GitHub's completejob API only accepts "succeeded" or "failed".
+        // Cancelled jobs report "failed" — GitHub already knows the cancellation
+        // and will display the correct status.
+        let api_conclusion = conclusion.as_api_str();
+
         let body = serde_json::json!({
             "planId": plan_id,
             "jobId": job_id,
-            "conclusion": conclusion,
+            "conclusion": api_conclusion,
             "outputs": outputs,
             "stepResults": step_results,
         });
 
-        debug!(conclusion, "completing job");
+        debug!(%conclusion, api_conclusion, "completing job");
 
         let resp = self
             .client
@@ -573,6 +578,34 @@ pub const CONCLUSION_SUCCESS: i32 = 2;
 pub const CONCLUSION_FAILURE: i32 = 3;
 pub const CONCLUSION_CANCELLED: i32 = 4;
 pub const CONCLUSION_SKIPPED: i32 = 5;
+
+/// High-level job conclusion passed to `complete_job`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobConclusion {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl JobConclusion {
+    /// Map to the wire string GitHub's completejob API actually accepts.
+    fn as_api_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed | Self::Cancelled => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for JobConclusion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Succeeded => write!(f, "succeeded"),
+            Self::Failed => write!(f, "failed"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
 
 /// Step result included in the /completejob request body.
 #[derive(Debug, Clone, serde::Serialize)]

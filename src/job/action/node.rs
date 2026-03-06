@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::metadata::ActionMetadata;
@@ -25,6 +26,7 @@ pub async fn run_node_action(
     workspace: &Workspace,
     base_env: &HashMap<String, String>,
     log_sender: &LogSender,
+    cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
     let script_file = match entry_point {
         "pre" => metadata
@@ -106,6 +108,7 @@ pub async fn run_node_action(
         job_state,
         log_sender,
         timeout,
+        cancel_token,
     )
     .await
 }
