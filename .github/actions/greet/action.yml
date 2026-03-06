@@ -1,0 +1,21 @@
+name: 'Greet'
+description: 'A local composite action for testing chimera'
+inputs:
+  name:
+    description: 'Who to greet'
+    required: true
+  loud:
+    description: 'Uppercase the greeting'
+    default: 'false'
+runs:
+  using: 'composite'
+  steps:
+    - run: |
+        if [ "$INPUT_LOUD" = "true" ]; then
+          echo "HELLO $INPUT_NAME!!!" | tr '[:lower:]' '[:upper:]'
+        else
+          echo "Hello, $INPUT_NAME!"
+        fi
+      shell: bash
+    - run: echo "Greeting delivered at $(date)"
+      shell: bash

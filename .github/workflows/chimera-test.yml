@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # ── Job 1: Core features ──────────────────────────────────────────
+  basics:
     runs-on: [self-hosted, chimera]
     steps:
       - name: Hello
@@ -23,8 +24,85 @@ jobs:
         run: |
           echo "GITHUB_ACTIONS=$GITHUB_ACTIONS"
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "GITHUB_STATE=$GITHUB_STATE"
+          echo "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           echo "RUNNER_OS=$RUNNER_OS"
           echo "RUNNER_NAME=$RUNNER_NAME"
 
       - name: Cargo version
         run: cargo --version
+
+  # ── Job 2: Node.js actions ────────────────────────────────────────
+  actions:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify checkout
+        run: |
+          echo "Checking repo was cloned..."
+          test -f Cargo.toml
+          echo "Cargo.toml exists — checkout worked"
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Verify rustc
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build project
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test
+
+  # ── Job 3: Composite actions ──────────────────────────────────────
+  composite:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Greet quietly
+        uses: ./.github/actions/greet
+        with:
+          name: chimera
+
+      - name: Greet loudly
+        uses: ./.github/actions/greet
+        with:
+          name: chimera
+          loud: 'true'
+
+  # ── Job 4: Conditions ─────────────────────────────────────────────
+  conditions:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: This succeeds
+        run: echo "I will succeed"
+
+      - name: This fails (continue)
+        run: exit 1
+        continue-on-error: true
+
+      - name: Runs after continue-on-error failure
+        run: echo "Still going despite previous failure"
+
+      - name: Force failure
+        run: exit 42
+
+      - name: Skipped by default (previous failed)
+        run: echo "You should NOT see this"
+
+      - name: Runs on failure
+        if: failure()
+        run: echo "Running because a step failed"
+
+      - name: Always runs
+        if: always()
+        run: echo "I always run, no matter what"
