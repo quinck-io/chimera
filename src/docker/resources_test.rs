@@ -58,7 +58,7 @@ fn apply_options_empty() {
 #[test]
 fn remap_to_container_path_works() {
     use std::path::PathBuf;
-    let docker = bollard::Docker::connect_with_local_defaults().unwrap();
+    let docker = bollard::Docker::connect_with_http_defaults().expect("create bollard HTTP client");
     let mut resources = JobDockerResources::new(docker);
     resources.path_mappings = vec![
         (PathBuf::from("/host/workspace"), "/github/workspace".into()),
