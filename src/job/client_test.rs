@@ -101,7 +101,7 @@ async fn renew_job_correct_body() {
         .mount(&mock_server)
         .await;
 
-    let client = make_client(&mock_server, tm, false);
+    let client = make_client(&mock_server, tm, true);
     client.renew_job("plan-1", "job-1").await.unwrap();
 }
 

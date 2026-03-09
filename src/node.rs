@@ -17,11 +17,7 @@ pub async fn ensure_linux_node(externals_dir: &Path) -> Result<PathBuf> {
     ensure_node_for_platform(externals_dir, "linux", std::env::consts::ARCH).await
 }
 
-async fn ensure_node_for_platform(
-    externals_dir: &Path,
-    os: &str,
-    arch: &str,
-) -> Result<PathBuf> {
+async fn ensure_node_for_platform(externals_dir: &Path, os: &str, arch: &str) -> Result<PathBuf> {
     let node_arch = match arch {
         "x86_64" | "x86" => "x64",
         "aarch64" => "arm64",

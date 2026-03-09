@@ -104,7 +104,10 @@ async fn run_composite_action_inner(
         if let Some(condition) = nested_obj.get(ykey("if")).and_then(|v| v.as_str()) {
             let cond_ctx = ExprContext::new(&composite_env, job_state, false, false);
             if !crate::job::expression::evaluate_condition(Some(condition), &cond_ctx) {
-                debug!(composite_step = i, condition, "skipping composite sub-step (condition not met)");
+                debug!(
+                    composite_step = i,
+                    condition, "skipping composite sub-step (condition not met)"
+                );
                 continue;
             }
         }

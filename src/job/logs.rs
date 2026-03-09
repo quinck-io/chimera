@@ -17,16 +17,24 @@ pub struct LogLine {
 pub struct LogSender {
     tx: mpsc::Sender<LogLine>,
     masks: Arc<RwLock<Vec<String>>>,
+    feed: Option<(super::live_feed::FeedSender, String)>,
 }
 
 impl LogSender {
     #[cfg(test)]
     pub fn new_for_test(tx: mpsc::Sender<LogLine>, masks: Arc<RwLock<Vec<String>>>) -> Self {
-        Self { tx, masks }
+        Self {
+            tx,
+            masks,
+            feed: None,
+        }
     }
 
     pub async fn send(&self, content: String) {
         let masked = self.apply_masks(&content).await;
+        if let Some((ref feed, ref step_id)) = self.feed {
+            feed.send(step_id, &masked).await;
+        }
         let line = LogLine {
             timestamp: Utc::now(),
             content: masked,
@@ -36,14 +44,23 @@ impl LogSender {
         }
     }
 
-    pub async fn send_banner(&self, runner_name: &str) {
+    pub async fn send_banner(&self, runner_name: &str, container_mode: bool) {
         let version = env!("CARGO_PKG_VERSION");
         let y = "\x1b[33m";
         let r = "\x1b[0m";
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        let mode = match container_mode {
+            true => "container",
+            false => "host",
+        };
+
         self.send(format!("{y}========================================{r}"))
             .await;
-        self.send(format!("{y}  chimera v{version}{r}")).await;
-        self.send(format!("{y}  running on: {runner_name}{r}"))
+        self.send(format!("{y}  chimera v{version} ({os}/{arch}){r}"))
+            .await;
+        self.send(format!("{y}  runner: {runner_name}{r}")).await;
+        self.send(format!("{y}  executing job in {mode} mode{r}"))
             .await;
         self.send(format!("{y}========================================{r}"))
             .await;
@@ -76,8 +93,10 @@ pub struct CollectedLog {
 
 /// Manages the full log lifecycle for a single step.
 ///
-/// For the Results API path: collects lines in memory, then uploads via signed URL.
-/// For the legacy path: streams lines to GitHub in real-time via the VSS API.
+/// **Results mode**: streams lines to an Azure Append Blob incrementally via
+/// the Results twirp API. The GitHub UI reads from the blob directly.
+///
+/// **Legacy mode**: streams lines to the legacy VSS API for live UI visibility.
 pub enum StepLogger {
     Results {
         sender: LogSender,
@@ -91,9 +110,22 @@ pub enum StepLogger {
 }
 
 impl StepLogger {
-    /// Create a StepLogger for the Results twirp API (collects in memory).
-    pub fn results(masks: Arc<RwLock<Vec<String>>>) -> Self {
-        let (sender, handle) = start_log_collector(masks);
+    /// Create a StepLogger for the Results twirp API.
+    ///
+    /// Lines are streamed incrementally to an Azure Append Blob. The blob is
+    /// left unsealed during execution so GitHub's UI can read partial content,
+    /// and sealed when the step finishes.
+    pub fn results(
+        client: Arc<JobClient>,
+        plan_id: String,
+        job_id: String,
+        step_id: String,
+        masks: Arc<RwLock<Vec<String>>>,
+        feed: Option<(super::live_feed::FeedSender, String)>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel::<LogLine>(256);
+        let sender = LogSender { tx, masks, feed };
+        let handle = tokio::spawn(blob_collector_task(client, plan_id, job_id, step_id, rx));
         Self::Results { sender, handle }
     }
 
@@ -103,6 +135,7 @@ impl StepLogger {
         plan_id: &str,
         step_name: &str,
         masks: Arc<RwLock<Vec<String>>>,
+        feed: Option<(super::live_feed::FeedSender, String)>,
     ) -> Self {
         let log_id = client
             .create_log(plan_id, step_name)
@@ -111,7 +144,9 @@ impl StepLogger {
                 warn!(error = %e, "failed to create log, using 0");
                 0
             });
-        let (sender, handle) = start_log_upload(client, plan_id.to_string(), log_id, masks);
+        let (tx, rx) = mpsc::channel::<LogLine>(256);
+        let sender = LogSender { tx, masks, feed };
+        let handle = tokio::spawn(vss_upload_task(client, plan_id.to_string(), log_id, rx));
         Self::Legacy {
             sender,
             handle,
@@ -125,30 +160,14 @@ impl StepLogger {
         }
     }
 
-    /// Finish the step log: flush, collect output, and upload if Results mode.
-    /// Returns the collected log (Results) or None (legacy).
-    pub async fn finish(
-        self,
-        client: &JobClient,
-        plan_id: &str,
-        job_id: &str,
-        step_id: &str,
-        step_name: &str,
-    ) -> Option<CollectedLog> {
+    /// Finish the step log: flush remaining content, seal blob (Results),
+    /// and return collected output.
+    pub async fn finish(self) -> Option<CollectedLog> {
         match self {
             Self::Results { sender, handle } => {
                 drop(sender);
                 match handle.await {
-                    Ok((text, line_count)) => {
-                        if !text.is_empty()
-                            && let Err(e) = client
-                                .upload_step_log(plan_id, job_id, step_id, &text, line_count)
-                                .await
-                        {
-                            warn!(error = %e, step = step_name, "failed to upload step log");
-                        }
-                        Some(CollectedLog { text, line_count })
-                    }
+                    Ok((text, line_count)) => Some(CollectedLog { text, line_count }),
                     Err(e) => {
                         warn!(error = %e, "log collector task panicked");
                         None
@@ -167,6 +186,19 @@ impl StepLogger {
         }
     }
 
+    /// Test-only: creates a Results logger that collects lines without uploading.
+    #[cfg(test)]
+    pub fn results_for_test(masks: Arc<RwLock<Vec<String>>>) -> Self {
+        let (tx, rx) = mpsc::channel::<LogLine>(256);
+        let sender = LogSender {
+            tx,
+            masks,
+            feed: None,
+        };
+        let handle = tokio::spawn(simple_log_collector(rx));
+        Self::Results { sender, handle }
+    }
+
     /// The legacy log ID (only meaningful for legacy mode).
     pub fn log_id(&self) -> u64 {
         match self {
@@ -177,23 +209,10 @@ impl StepLogger {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy log upload (real-time streaming to GitHub)
+// Legacy VSS log upload (real-time streaming)
 // ---------------------------------------------------------------------------
 
-/// Start a background log upload task (legacy VSS API).
-pub fn start_log_upload(
-    client: Arc<JobClient>,
-    plan_id: String,
-    log_id: u64,
-    masks: Arc<RwLock<Vec<String>>>,
-) -> (LogSender, JoinHandle<()>) {
-    let (tx, rx) = mpsc::channel::<LogLine>(256);
-    let sender = LogSender { tx, masks };
-    let handle = tokio::spawn(log_upload_task(client, plan_id, log_id, rx));
-    (sender, handle)
-}
-
-async fn log_upload_task(
+async fn vss_upload_task(
     client: Arc<JobClient>,
     plan_id: String,
     log_id: u64,
@@ -210,12 +229,12 @@ async fn log_upload_task(
                     Some(line) => {
                         buffer.push_str(&format_line(&line));
                         if buffer.len() >= FLUSH_BUFFER_BYTES {
-                            flush_to_api(&client, &plan_id, log_id, &mut buffer).await;
+                            flush_to_vss(&client, &plan_id, log_id, &mut buffer).await;
                         }
                     }
                     None => {
                         if !buffer.is_empty() {
-                            flush_to_api(&client, &plan_id, log_id, &mut buffer).await;
+                            flush_to_vss(&client, &plan_id, log_id, &mut buffer).await;
                         }
                         return;
                     }
@@ -223,14 +242,14 @@ async fn log_upload_task(
             }
             _ = interval.tick() => {
                 if !buffer.is_empty() {
-                    flush_to_api(&client, &plan_id, log_id, &mut buffer).await;
+                    flush_to_vss(&client, &plan_id, log_id, &mut buffer).await;
                 }
             }
         }
     }
 }
 
-async fn flush_to_api(client: &JobClient, plan_id: &str, log_id: u64, buffer: &mut String) {
+async fn flush_to_vss(client: &JobClient, plan_id: &str, log_id: u64, buffer: &mut String) {
     let content = std::mem::take(buffer);
     if let Err(e) = client.upload_log_lines(plan_id, log_id, &content).await {
         warn!(error = %e, "failed to upload log lines");
@@ -238,27 +257,124 @@ async fn flush_to_api(client: &JobClient, plan_id: &str, log_id: u64, buffer: &m
 }
 
 // ---------------------------------------------------------------------------
-// Results log collector (in-memory collection for later upload)
+// Results blob collector (incremental append blob streaming)
 // ---------------------------------------------------------------------------
 
-/// Start a log collector that buffers lines in memory (Results twirp API).
-fn start_log_collector(masks: Arc<RwLock<Vec<String>>>) -> (LogSender, JoinHandle<(String, i64)>) {
-    let (tx, rx) = mpsc::channel::<LogLine>(256);
-    let sender = LogSender { tx, masks };
-    let handle = tokio::spawn(log_collector_task(rx));
-    (sender, handle)
+/// Mutable state for the incremental blob upload.
+struct BlobUploadState {
+    signed_url: Option<super::client::SignedUrlResponse>,
+    uploaded_len: usize,
 }
 
-async fn log_collector_task(mut rx: mpsc::Receiver<LogLine>) -> (String, i64) {
+/// Collects log lines and streams them to an Azure Append Blob incrementally.
+///
+/// On first content: gets a signed URL, creates the blob, appends content.
+/// On each interval: appends only the new delta since last flush + posts metadata.
+/// On channel close: appends remaining, seals the blob, posts final metadata.
+async fn blob_collector_task(
+    client: Arc<JobClient>,
+    plan_id: String,
+    job_id: String,
+    step_id: String,
+    mut rx: mpsc::Receiver<LogLine>,
+) -> (String, i64) {
     let mut buffer = String::new();
     let mut line_count: i64 = 0;
+    let mut blob = BlobUploadState {
+        signed_url: None,
+        uploaded_len: 0,
+    };
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(FLUSH_INTERVAL_MS));
+    interval.tick().await;
 
-    while let Some(line) = rx.recv().await {
-        buffer.push_str(&format_line(&line));
-        line_count += 1;
+    loop {
+        tokio::select! {
+            maybe_line = rx.recv() => {
+                match maybe_line {
+                    Some(line) => {
+                        buffer.push_str(&format_line(&line));
+                        line_count += 1;
+                    }
+                    None => break,
+                }
+            }
+            _ = interval.tick() => {
+                if buffer.len() > blob.uploaded_len {
+                    flush_to_blob(
+                        &client, &plan_id, &job_id, &step_id,
+                        &buffer, line_count, &mut blob,
+                    ).await;
+                }
+            }
+        }
+    }
+
+    // Final flush: append remaining delta + seal
+    if buffer.len() > blob.uploaded_len {
+        flush_to_blob(
+            &client, &plan_id, &job_id, &step_id, &buffer, line_count, &mut blob,
+        )
+        .await;
+    }
+    if let Some(ref url) = blob.signed_url {
+        if let Err(e) = client.seal_blob(url).await {
+            warn!(error = %e, "failed to seal step log blob");
+        }
+        if let Err(e) = client
+            .create_step_log_metadata(&plan_id, &job_id, &step_id, line_count)
+            .await
+        {
+            warn!(error = %e, "failed to create final step log metadata");
+        }
     }
 
     (buffer, line_count)
+}
+
+async fn flush_to_blob(
+    client: &JobClient,
+    plan_id: &str,
+    job_id: &str,
+    step_id: &str,
+    buffer: &str,
+    line_count: i64,
+    blob: &mut BlobUploadState,
+) {
+    // Create the blob on first flush
+    if blob.signed_url.is_none() {
+        match client
+            .get_step_log_signed_url(plan_id, job_id, step_id)
+            .await
+        {
+            Ok(url) => {
+                if let Err(e) = client.create_append_blob(&url).await {
+                    warn!(error = %e, "failed to create append blob");
+                    return;
+                }
+                blob.signed_url = Some(url);
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to get signed URL for step log");
+                return;
+            }
+        }
+    }
+
+    let url = blob.signed_url.as_ref().unwrap();
+    let delta = &buffer[blob.uploaded_len..];
+    if let Err(e) = client.append_blob_block(url, delta).await {
+        warn!(error = %e, "failed to append log block");
+        return;
+    }
+    blob.uploaded_len = buffer.len();
+
+    // Post metadata to notify GitHub that new log data is available
+    if let Err(e) = client
+        .create_step_log_metadata(plan_id, job_id, step_id, line_count)
+        .await
+    {
+        warn!(error = %e, "intermediate log metadata update failed");
+    }
 }
 
 fn format_line(line: &LogLine) -> String {
@@ -267,6 +383,17 @@ fn format_line(line: &LogLine) -> String {
         format_log_timestamp(line.timestamp),
         line.content
     )
+}
+
+#[cfg(test)]
+async fn simple_log_collector(mut rx: mpsc::Receiver<LogLine>) -> (String, i64) {
+    let mut buffer = String::new();
+    let mut line_count: i64 = 0;
+    while let Some(line) = rx.recv().await {
+        buffer.push_str(&format_line(&line));
+        line_count += 1;
+    }
+    (buffer, line_count)
 }
 
 #[cfg(test)]

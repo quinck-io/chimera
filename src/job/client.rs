@@ -138,7 +138,7 @@ impl JobClient {
     }
 
     pub async fn renew_job(&self, plan_id: &str, job_id: &str) -> Result<()> {
-        let token = self.token_manager.get_token().await?;
+        let token = self.job_token()?;
         let url = format!("{}/renewjob", self.run_service_url.trim_end_matches('/'));
 
         let body = serde_json::json!({
@@ -149,7 +149,7 @@ impl JobClient {
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .json(&body)
             .timeout(Duration::from_secs(30))
             .send()
@@ -252,47 +252,6 @@ impl JobClient {
         Ok(())
     }
 
-    pub async fn upload_step_log(
-        &self,
-        plan_id: &str,
-        job_id: &str,
-        step_id: &str,
-        content: &str,
-        line_count: i64,
-    ) -> Result<()> {
-        let token = self.job_token()?;
-        let base = self.results_base_url()?.trim_end_matches('/');
-
-        let signed_url = self
-            .get_signed_url(
-                token,
-                &format!(
-                    "{base}/twirp/results.services.receiver.Receiver/GetStepLogsSignedBlobURL"
-                ),
-                &serde_json::json!({
-                    "workflow_run_backend_id": plan_id,
-                    "workflow_job_run_backend_id": job_id,
-                    "step_backend_id": step_id,
-                }),
-            )
-            .await?;
-
-        self.upload_to_blob(&signed_url, content).await?;
-
-        self.post_log_metadata(
-            token,
-            &format!("{base}/twirp/results.services.receiver.Receiver/CreateStepLogsMetadata"),
-            &serde_json::json!({
-                "workflow_run_backend_id": plan_id,
-                "workflow_job_run_backend_id": job_id,
-                "step_backend_id": step_id,
-                "uploaded_at": format_results_timestamp(Utc::now()),
-                "line_count": line_count,
-            }),
-        )
-        .await
-    }
-
     pub async fn upload_job_log(
         &self,
         plan_id: &str,
@@ -314,7 +273,7 @@ impl JobClient {
             )
             .await?;
 
-        self.upload_to_blob(&signed_url, content).await?;
+        self.upload_to_blob_sealed(&signed_url, content).await?;
 
         self.post_log_metadata(
             token,
@@ -328,6 +287,115 @@ impl JobClient {
         )
         .await
     }
+
+    // ─── Append Blob Operations (incremental log streaming) ────────
+
+    /// Get a signed URL for step log blob upload.
+    pub async fn get_step_log_signed_url(
+        &self,
+        plan_id: &str,
+        job_id: &str,
+        step_id: &str,
+    ) -> Result<SignedUrlResponse> {
+        let token = self.job_token()?;
+        let base = self.results_base_url()?.trim_end_matches('/');
+        self.get_signed_url(
+            token,
+            &format!("{base}/twirp/results.services.receiver.Receiver/GetStepLogsSignedBlobURL"),
+            &serde_json::json!({
+                "workflow_run_backend_id": plan_id,
+                "workflow_job_run_backend_id": job_id,
+                "step_backend_id": step_id,
+            }),
+        )
+        .await
+    }
+
+    /// Create an empty append blob at the signed URL.
+    pub async fn create_append_blob(&self, signed: &SignedUrlResponse) -> Result<()> {
+        let is_azure = signed.blob_storage_type == "BLOB_STORAGE_TYPE_AZURE";
+        let mut req = self.client.put(&signed.logs_url).body("");
+        if is_azure {
+            req = req
+                .header("x-ms-blob-type", "AppendBlob")
+                .header("Content-Length", "0");
+        }
+        let resp = req
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .context("creating append blob")?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("create append blob failed: {body}");
+        }
+        Ok(())
+    }
+
+    /// Append a block of content to an existing append blob (no seal).
+    pub async fn append_blob_block(&self, signed: &SignedUrlResponse, content: &str) -> Result<()> {
+        let is_azure = signed.blob_storage_type == "BLOB_STORAGE_TYPE_AZURE";
+        let url = format!("{}&comp=appendblock", signed.logs_url);
+        let mut req = self.client.put(&url).body(content.to_string());
+        if is_azure {
+            req = req.header("Content-Length", content.len().to_string());
+        }
+        let resp = req
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .context("appending blob block")?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("append blob block failed: {body}");
+        }
+        Ok(())
+    }
+
+    /// Seal an append blob so no more blocks can be appended.
+    pub async fn seal_blob(&self, signed: &SignedUrlResponse) -> Result<()> {
+        let url = format!("{}&comp=seal", signed.logs_url);
+        let resp = self
+            .client
+            .put(&url)
+            .header("Content-Length", "0")
+            .body("")
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .context("sealing blob")?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            warn!("seal blob failed: {body}");
+        }
+        Ok(())
+    }
+
+    /// Post step log metadata to signal GitHub that new log data is available.
+    pub async fn create_step_log_metadata(
+        &self,
+        plan_id: &str,
+        job_id: &str,
+        step_id: &str,
+        line_count: i64,
+    ) -> Result<()> {
+        let token = self.job_token()?;
+        let base = self.results_base_url()?.trim_end_matches('/');
+        self.post_log_metadata(
+            token,
+            &format!("{base}/twirp/results.services.receiver.Receiver/CreateStepLogsMetadata"),
+            &serde_json::json!({
+                "workflow_run_backend_id": plan_id,
+                "workflow_job_run_backend_id": job_id,
+                "step_backend_id": step_id,
+                "uploaded_at": format_results_timestamp(Utc::now()),
+                "line_count": line_count,
+            }),
+        )
+        .await
+    }
+
+    // ─── Bulk Blob Upload (used for job-level log + legacy step upload) ──
 
     /// Get a signed URL from the Results API for blob upload.
     async fn get_signed_url(
@@ -360,45 +428,27 @@ impl JobClient {
         Ok(signed)
     }
 
-    /// Upload content to an Azure Blob Storage signed URL (create + append + seal).
-    async fn upload_to_blob(&self, signed: &SignedUrlResponse, content: &str) -> Result<()> {
+    /// Upload all content in one shot: create blob, append, seal.
+    /// Used for job-level log (single upload at end of job).
+    async fn upload_to_blob_sealed(&self, signed: &SignedUrlResponse, content: &str) -> Result<()> {
+        self.create_append_blob(signed).await?;
         let is_azure = signed.blob_storage_type == "BLOB_STORAGE_TYPE_AZURE";
-
-        // Create the append blob
-        let mut create_req = self.client.put(&signed.logs_url).body("");
+        let url = format!("{}&comp=appendblock&seal=true", signed.logs_url);
+        let mut req = self.client.put(&url).body(content.to_string());
         if is_azure {
-            create_req = create_req
-                .header("x-ms-blob-type", "AppendBlob")
-                .header("Content-Length", "0");
-        }
-        let create_resp = create_req
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .context("creating append blob")?;
-        if !create_resp.status().is_success() {
-            let body = create_resp.text().await.unwrap_or_default();
-            warn!("create append blob failed: {body}");
-        }
-
-        // Upload content and seal
-        let upload_url = format!("{}&comp=appendblock&seal=true", signed.logs_url);
-        let mut upload_req = self.client.put(&upload_url).body(content.to_string());
-        if is_azure {
-            upload_req = upload_req
+            req = req
                 .header("x-ms-blob-sealed", "true")
                 .header("Content-Length", content.len().to_string());
         }
-        let upload_resp = upload_req
+        let resp = req
             .timeout(Duration::from_secs(60))
             .send()
             .await
             .context("uploading blob content")?;
-        if !upload_resp.status().is_success() {
-            let body = upload_resp.text().await.unwrap_or_default();
-            warn!("upload blob content failed: {body}");
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("upload blob content failed: {body}");
         }
-
         Ok(())
     }
 

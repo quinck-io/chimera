@@ -81,7 +81,7 @@ async fn nested_script_steps_execute() {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();
 
@@ -129,7 +129,7 @@ async fn failure_propagates() {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();
 
@@ -180,7 +180,7 @@ async fn inputs_available_as_env() {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();
 
@@ -226,7 +226,7 @@ async fn recursion_depth_limit() {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();
 

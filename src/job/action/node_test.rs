@@ -77,7 +77,7 @@ async fn node_action_executes_script() {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 
     let result = run_node_action(
@@ -138,7 +138,7 @@ if (process.env.INPUT_TOKEN !== 'my-secret') {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 
     let result = run_node_action(
@@ -197,7 +197,7 @@ if (process.env.INPUT_FLAVOR !== 'vanilla') {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 
     let result = run_node_action(
@@ -241,7 +241,7 @@ async fn nonzero_exit_fails() {
         serde_json::json!({}),
     );
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::results(masks);
+    let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 
     let result = run_node_action(

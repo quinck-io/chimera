@@ -99,7 +99,7 @@ fn make_step(id: &str, script: &str) -> Step {
 async fn echo_step_stdout_captured() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
 
     let step = make_step("1", "echo hello world");
     let mut state = JobState::new(
@@ -128,7 +128,7 @@ async fn echo_step_stdout_captured() {
 async fn nonzero_exit_returns_failed() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
 
     let step = make_step("1", "exit 1");
     let mut state = JobState::new(
@@ -157,7 +157,7 @@ async fn nonzero_exit_returns_failed() {
 async fn set_env_updates_job_state() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
 
     let step = make_step("1", "echo '::set-env name=MY_KEY::my_val'");
     let mut state = JobState::new(
@@ -186,7 +186,7 @@ async fn set_env_updates_job_state() {
 async fn add_path_updates_path() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
 
     let step = make_step("1", "echo '::add-path::/opt/custom/bin'");
     let mut state = JobState::new(
@@ -215,7 +215,7 @@ async fn add_path_updates_path() {
 async fn set_output_populates_outputs() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
 
     let step = make_step("1", "echo '::set-output name=result::42'");
     let mut state = JobState::new(
@@ -244,7 +244,7 @@ async fn set_output_populates_outputs() {
 async fn env_propagation_across_steps() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
 
     let step1 = make_step("1", "echo '::set-env name=STEP1_VAR::hello'");
     let mut state = JobState::new(
@@ -333,6 +333,7 @@ async fn continue_on_error_works() {
         CancellationToken::new(),
         None,
         Path::new("node"),
+        None,
     )
     .await
     .unwrap();
@@ -391,6 +392,7 @@ async fn failure_stops_remaining_steps() {
         CancellationToken::new(),
         None,
         Path::new("node"),
+        None,
     )
     .await
     .unwrap();
@@ -442,6 +444,7 @@ async fn secrets_from_context_data_resolved() {
         CancellationToken::new(),
         None,
         Path::new("node"),
+        None,
     )
     .await
     .unwrap();
@@ -504,6 +507,7 @@ async fn cancel_token_returns_cancelled_between_steps() {
         cancel_token,
         None,
         Path::new("node"),
+        None,
     )
     .await
     .unwrap();
@@ -514,7 +518,7 @@ async fn cancel_token_returns_cancelled_between_steps() {
 async fn cancel_token_kills_running_process() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let logger = StepLogger::legacy(client, "plan", "step", masks).await;
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
 
     let step = make_step("1", "sleep 60");
     let mut state = JobState::new(

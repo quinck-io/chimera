@@ -154,10 +154,7 @@ fn container_env_remaps_paths() {
         "/github/workflow/_step_summary"
     );
     assert_eq!(env.get("RUNNER_TEMP").unwrap(), "/github/tmp");
-    assert_eq!(
-        env.get("RUNNER_TOOL_CACHE").unwrap(),
-        "/github/tool-cache"
-    );
+    assert_eq!(env.get("RUNNER_TOOL_CACHE").unwrap(), "/github/tool-cache");
 }
 
 #[test]

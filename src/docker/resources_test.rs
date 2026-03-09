@@ -87,9 +87,11 @@ fn remap_to_container_path_works() {
             .unwrap(),
         "/github/workspace"
     );
-    assert!(resources
-        .remap_to_container_path(Path::new("/other/path"))
-        .is_none());
+    assert!(
+        resources
+            .remap_to_container_path(Path::new("/other/path"))
+            .is_none()
+    );
 }
 
 /// Integration test: requires Docker daemon.

@@ -267,11 +267,26 @@ impl JobDockerResources {
 
             // Store path mappings for host→container remapping
             self.path_mappings = vec![
-                (params.workspace_host_path.to_path_buf(), "/github/workspace".into()),
-                (params.workflow_files_host_path.to_path_buf(), "/github/workflow".into()),
-                (params.runner_temp_host_path.to_path_buf(), "/github/tmp".into()),
-                (params.actions_host_path.to_path_buf(), "/github/actions".into()),
-                (params.tool_cache_host_path.to_path_buf(), "/github/tool-cache".into()),
+                (
+                    params.workspace_host_path.to_path_buf(),
+                    "/github/workspace".into(),
+                ),
+                (
+                    params.workflow_files_host_path.to_path_buf(),
+                    "/github/workflow".into(),
+                ),
+                (
+                    params.runner_temp_host_path.to_path_buf(),
+                    "/github/tmp".into(),
+                ),
+                (
+                    params.actions_host_path.to_path_buf(),
+                    "/github/actions".into(),
+                ),
+                (
+                    params.tool_cache_host_path.to_path_buf(),
+                    "/github/tool-cache".into(),
+                ),
             ];
         }
 

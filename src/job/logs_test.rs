@@ -36,6 +36,15 @@ async fn setup_log_server() -> (MockServer, Arc<JobClient>) {
     (mock_server, Arc::new(job_client))
 }
 
+/// Mount a mock for creating a legacy log (returns log ID 1).
+async fn mount_create_log(mock_server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path_regex(r"/_apis/pipelines/workflows/.*/logs$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": 1 })))
+        .mount(mock_server)
+        .await;
+}
+
 #[test]
 fn format_log_timestamp_seven_decimal_places() {
     use chrono::TimeZone;
@@ -48,6 +57,7 @@ fn format_log_timestamp_seven_decimal_places() {
 #[tokio::test]
 async fn flush_on_sender_drop() {
     let (mock_server, client) = setup_log_server().await;
+    mount_create_log(&mock_server).await;
 
     Mock::given(method("POST"))
         .and(path_regex(r"/_apis/pipelines/workflows/.*/logs/\d+"))
@@ -58,17 +68,16 @@ async fn flush_on_sender_drop() {
         .await;
 
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = start_log_upload(client, "plan-1".into(), 1, masks);
+    let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
-    sender.send("hello world".into()).await;
-    drop(sender);
-
-    handle.await.unwrap();
+    logger.sender().send("hello world".into()).await;
+    logger.finish().await;
 }
 
 #[tokio::test]
 async fn flush_on_interval() {
     let (mock_server, client) = setup_log_server().await;
+    mount_create_log(&mock_server).await;
 
     Mock::given(method("POST"))
         .and(path_regex(r"/_apis/pipelines/workflows/.*/logs/\d+"))
@@ -78,19 +87,19 @@ async fn flush_on_interval() {
         .await;
 
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = start_log_upload(client, "plan-1".into(), 1, masks);
+    let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
-    sender.send("line 1".into()).await;
+    logger.sender().send("line 1".into()).await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-    drop(sender);
-    handle.await.unwrap();
+    logger.finish().await;
 }
 
 #[tokio::test]
 async fn flush_on_large_buffer() {
     let (mock_server, client) = setup_log_server().await;
+    mount_create_log(&mock_server).await;
 
     Mock::given(method("POST"))
         .and(path_regex(r"/_apis/pipelines/workflows/.*/logs/\d+"))
@@ -100,20 +109,20 @@ async fn flush_on_large_buffer() {
         .await;
 
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = start_log_upload(client, "plan-1".into(), 1, masks);
+    let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
     let big_line = "x".repeat(70_000);
-    sender.send(big_line).await;
+    logger.sender().send(big_line).await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    drop(sender);
-    handle.await.unwrap();
+    logger.finish().await;
 }
 
 #[tokio::test]
 async fn masking_replaces_secrets() {
     let (mock_server, client) = setup_log_server().await;
+    mount_create_log(&mock_server).await;
 
     let uploaded = Arc::new(tokio::sync::Mutex::new(String::new()));
     let uploaded_clone = uploaded.clone();
@@ -133,11 +142,13 @@ async fn masking_replaces_secrets() {
         .await;
 
     let masks = Arc::new(RwLock::new(vec!["supersecret".to_string()]));
-    let (sender, handle) = start_log_upload(client, "plan-1".into(), 1, masks);
+    let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
-    sender.send("my password is supersecret here".into()).await;
-    drop(sender);
-    handle.await.unwrap();
+    logger
+        .sender()
+        .send("my password is supersecret here".into())
+        .await;
+    logger.finish().await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
@@ -149,27 +160,25 @@ async fn masking_replaces_secrets() {
 #[tokio::test]
 async fn collector_collects_lines() {
     let masks = Arc::new(RwLock::new(Vec::new()));
-    let (sender, handle) = start_log_collector(masks);
+    let logger = StepLogger::results_for_test(masks);
 
-    sender.send("line one".into()).await;
-    sender.send("line two".into()).await;
-    drop(sender);
+    logger.sender().send("line one".into()).await;
+    logger.sender().send("line two".into()).await;
 
-    let (text, count) = handle.await.unwrap();
-    assert_eq!(count, 2);
-    assert!(text.contains("line one"));
-    assert!(text.contains("line two"));
+    let collected = logger.finish().await.expect("should collect lines");
+    assert_eq!(collected.line_count, 2);
+    assert!(collected.text.contains("line one"));
+    assert!(collected.text.contains("line two"));
 }
 
 #[tokio::test]
 async fn collector_masks_secrets() {
     let masks = Arc::new(RwLock::new(vec!["secret123".to_string()]));
-    let (sender, handle) = start_log_collector(masks);
+    let logger = StepLogger::results_for_test(masks);
 
-    sender.send("token is secret123 here".into()).await;
-    drop(sender);
+    logger.sender().send("token is secret123 here".into()).await;
 
-    let (text, _) = handle.await.unwrap();
-    assert!(!text.contains("secret123"));
-    assert!(text.contains("***"));
+    let collected = logger.finish().await.expect("should collect lines");
+    assert!(!collected.text.contains("secret123"));
+    assert!(collected.text.contains("***"));
 }

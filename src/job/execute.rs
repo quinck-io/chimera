@@ -16,6 +16,7 @@ use super::JobClient;
 use super::action::{ActionCache, load_action_metadata, resolve_action};
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
 use super::expression::ExprContext;
+use super::live_feed::FeedSender;
 use super::logs::{LogSender, StepLogger};
 use super::schema::{JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
@@ -426,6 +427,7 @@ pub async fn run_all_steps(
     cancel_token: CancellationToken,
     docker_resources: Option<&JobDockerResources>,
     node_path: &Path,
+    feed_sender: Option<&FeedSender>,
 ) -> Result<(JobConclusion, HashMap<String, String>)> {
     let masks = collect_secret_masks(manifest);
     let mut secrets: HashMap<String, String> = manifest
@@ -515,8 +517,11 @@ pub async fn run_all_steps(
             use_results,
             job_client,
             &manifest.plan.plan_id,
+            &manifest.plan.job_id,
+            &step.id,
             &step.display_name,
             masks.clone(),
+            feed_sender,
         )
         .await;
 
@@ -537,16 +542,7 @@ pub async fn run_all_steps(
 
         let legacy_log_id = logger.log_id();
 
-        if let Some(collected) = logger
-            .finish(
-                job_client,
-                &manifest.plan.plan_id,
-                &manifest.plan.job_id,
-                &step.id,
-                &step.display_name,
-            )
-            .await
-        {
+        if let Some(collected) = logger.finish().await {
             job_log_buffer.push_str(&collected.text);
             job_line_count += collected.line_count;
         }
@@ -619,17 +615,29 @@ fn collect_secret_masks(manifest: &JobManifest) -> Arc<RwLock<Vec<String>>> {
     Arc::new(RwLock::new(masks))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_step_logger(
     use_results: bool,
     client: &Arc<JobClient>,
     plan_id: &str,
+    job_id: &str,
+    step_id: &str,
     step_name: &str,
     masks: Arc<RwLock<Vec<String>>>,
+    feed_sender: Option<&FeedSender>,
 ) -> StepLogger {
+    let feed = feed_sender.map(|f| (f.clone(), step_id.to_string()));
     if use_results {
-        StepLogger::results(masks)
+        StepLogger::results(
+            client.clone(),
+            plan_id.to_string(),
+            job_id.to_string(),
+            step_id.to_string(),
+            masks,
+            feed,
+        )
     } else {
-        StepLogger::legacy(client.clone(), plan_id, step_name, masks).await
+        StepLogger::legacy(client.clone(), plan_id, step_name, masks, feed).await
     }
 }
 
@@ -648,12 +656,12 @@ async fn execute_step(
     docker_resources: Option<&JobDockerResources>,
     node_path: &Path,
 ) -> (StepConclusion, ResultsConclusion) {
-    log_sender.send_banner(runner_name).await;
-
     let has_docker = docker_resources
         .as_ref()
         .and_then(|r| r.job_container_id())
         .is_some();
+
+    log_sender.send_banner(runner_name, has_docker).await;
     debug!(
         step = %step.display_name,
         is_script = step.is_script(),

@@ -239,6 +239,12 @@ impl JobManifest {
         &self.file_table
     }
 
+    pub fn feed_stream_url(&self) -> Option<&str> {
+        self.find_vss_endpoint()
+            .and_then(|e| e.data.get("FeedStreamUrl"))
+            .map(|s| s.as_str())
+    }
+
     fn find_vss_endpoint(&self) -> Option<&ServiceEndpoint> {
         self.resources
             .endpoints

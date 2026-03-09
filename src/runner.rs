@@ -18,6 +18,7 @@ use crate::job::JobClient;
 use crate::job::action::ActionCache;
 use crate::job::client::JobConclusion;
 use crate::job::execute::run_all_steps;
+use crate::job::live_feed::LiveFeed;
 use crate::job::workspace::Workspace;
 
 use env::{build_base_env, build_container_env};
@@ -281,6 +282,15 @@ impl Runner {
         let action_cache = ActionCache::new(self.paths.actions_dir(), client.clone());
         let github_token = manifest.github_token().unwrap_or("").to_string();
 
+        // Connect to the WebSocket live console feed for real-time log streaming
+        let live_feed = match (manifest.feed_stream_url(), manifest.access_token()) {
+            (Some(feed_url), Ok(token)) => {
+                debug!("connecting live console feed");
+                LiveFeed::connect(feed_url, token).await
+            }
+            _ => None,
+        };
+
         // Start heartbeat
         let job_client = Arc::new(job_client);
         let (heartbeat_handle, heartbeat_cancel) =
@@ -297,8 +307,14 @@ impl Runner {
             cancel_token.clone(),
             docker_resources.as_ref(),
             &node_path,
+            live_feed.as_ref().map(|f| f.sender()),
         )
         .await;
+
+        // Close the live feed so remaining lines are flushed over WebSocket
+        if let Some(feed) = live_feed {
+            feed.close().await;
+        }
 
         // ALWAYS cleanup Docker resources, even if job_result is Err
         if let Some(ref mut resources) = docker_resources {
