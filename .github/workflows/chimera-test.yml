@@ -139,26 +139,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: hashFiles produces a non-empty 64-char hash
-        id: single
-        run: echo "hash=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_OUTPUT"
+      - name: Debug workspace
+        run: echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" && ls "$GITHUB_WORKSPACE/Cargo.toml"
 
-      - name: Verify single hash
-        run: test ${#HASH} -eq 64
-        env:
-          HASH: ${{ steps.single.outputs.hash }}
+      - name: hashFiles single file
+        run: echo "${{ hashFiles('Cargo.toml') }}" | grep -qE '^[0-9a-f]{64}$'
 
       - name: hashFiles is deterministic
         run: test "${{ hashFiles('Cargo.toml') }}" = "${{ hashFiles('Cargo.toml') }}"
 
       - name: hashFiles recursive glob
-        id: recursive
-        run: echo "hash=${{ hashFiles('**/*.rs') }}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify recursive hash
-        run: test ${#HASH} -eq 64
-        env:
-          HASH: ${{ steps.recursive.outputs.hash }}
+        run: echo "${{ hashFiles('**/*.rs') }}" | grep -qE '^[0-9a-f]{64}$'
 
       - name: hashFiles multiple patterns differ from single
         run: test "${{ hashFiles('Cargo.toml') }}" != "${{ hashFiles('Cargo.toml', 'Cargo.lock') }}"
@@ -167,7 +158,7 @@ jobs:
         run: test -z "${{ hashFiles('*.this-extension-does-not-exist') }}"
 
       - name: hashFiles in cache key expression
-        run: echo "Cache key ${{ format('{0}-deps-{1}', runner.os, hashFiles('Cargo.toml', 'Cargo.lock')) }}"
+        run: echo "${{ format('{0}-deps-{1}', runner.os, hashFiles('Cargo.toml', 'Cargo.lock')) }}"
 
   # ── Job 7: Needs ───────────────────────────────────────────────
   setup:
