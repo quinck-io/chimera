@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use super::*;
 
 fn empty_ctx() -> ExprContext<'static> {

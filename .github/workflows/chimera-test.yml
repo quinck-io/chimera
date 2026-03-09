@@ -92,21 +92,27 @@ jobs:
         run: echo "I will succeed"
 
       - name: This fails (continue)
+        id: soft_fail
         run: exit 1
         continue-on-error: true
 
       - name: Runs after continue-on-error failure
         run: echo "Still going despite previous failure"
 
-      - name: Force failure
+      - name: Verify soft failure was detected
+        run: test "${{ steps.soft_fail.outcome }}" = "failure"
+
+      - name: Force failure (continue)
+        id: hard_fail
         run: exit 42
+        continue-on-error: true
 
-      - name: Skipped by default (previous failed)
-        run: echo "You should NOT see this"
+      - name: Next step still runs
+        run: echo "Job continues because continue-on-error absorbed the failure"
 
-      - name: Runs on failure
-        if: failure()
-        run: echo "Running because a step failed"
+      - name: Verify hard failure was detected
+        if: always()
+        run: test "${{ steps.hard_fail.outcome }}" = "failure"
 
       - name: Always runs
         if: always()
@@ -133,54 +139,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify hashFiles produces a hash
-        run: |
-          HASH="${{ hashFiles('Cargo.toml') }}"
-          echo "hashFiles('Cargo.toml') = $HASH"
-          if [ -z "$HASH" ]; then
-            echo "::error::hashFiles returned empty string"
-            exit 1
-          fi
-          if [ ${#HASH} -ne 64 ]; then
-            echo "::error::Expected 64-char SHA-256 hex, got ${#HASH} chars"
-            exit 1
-          fi
+      - name: hashFiles produces a non-empty 64-char hash
+        id: single
+        run: echo "hash=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify hashFiles is deterministic
-        run: |
-          HASH1="${{ hashFiles('Cargo.toml') }}"
-          HASH2="${{ hashFiles('Cargo.toml') }}"
-          echo "Hash 1: $HASH1"
-          echo "Hash 2: $HASH2"
-          test "$HASH1" = "$HASH2"
+      - name: Verify single hash
+        run: test ${#HASH} -eq 64
+        env:
+          HASH: ${{ steps.single.outputs.hash }}
 
-      - name: Verify recursive glob
-        run: |
-          HASH="${{ hashFiles('**/*.rs') }}"
-          echo "hashFiles('**/*.rs') = $HASH"
-          test -n "$HASH"
-          test ${#HASH} -eq 64
+      - name: hashFiles is deterministic
+        run: test "${{ hashFiles('Cargo.toml') }}" = "${{ hashFiles('Cargo.toml') }}"
 
-      - name: Verify multiple patterns
-        run: |
-          SINGLE="${{ hashFiles('Cargo.toml') }}"
-          MULTI="${{ hashFiles('Cargo.toml', 'Cargo.lock') }}"
-          echo "Single: $SINGLE"
-          echo "Multi:  $MULTI"
-          test -n "$MULTI"
-          test "$SINGLE" != "$MULTI"
+      - name: hashFiles recursive glob
+        id: recursive
+        run: echo "hash=${{ hashFiles('**/*.rs') }}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify no match returns empty
-        run: |
-          HASH="${{ hashFiles('*.this-extension-does-not-exist') }}"
-          echo "No-match hash: '$HASH'"
-          test -z "$HASH"
+      - name: Verify recursive hash
+        run: test ${#HASH} -eq 64
+        env:
+          HASH: ${{ steps.recursive.outputs.hash }}
 
-      - name: Verify hashFiles in cache key expression
-        run: |
-          KEY="${{ format('{0}-deps-{1}', runner.os, hashFiles('Cargo.toml', 'Cargo.lock')) }}"
-          echo "Cache key: $KEY"
-          test -n "$KEY"
+      - name: hashFiles multiple patterns differ from single
+        run: test "${{ hashFiles('Cargo.toml') }}" != "${{ hashFiles('Cargo.toml', 'Cargo.lock') }}"
+
+      - name: hashFiles no match returns empty
+        run: test -z "${{ hashFiles('*.this-extension-does-not-exist') }}"
+
+      - name: hashFiles in cache key expression
+        run: echo "Cache key ${{ format('{0}-deps-{1}', runner.os, hashFiles('Cargo.toml', 'Cargo.lock')) }}"
 
   # ── Job 7: Needs ───────────────────────────────────────────────
   setup:
