@@ -47,6 +47,9 @@ jobs:
           test -f Cargo.toml
           echo "Cargo.toml exists — checkout worked"
 
+      - name: install deps
+        run: apt-get update && apt-get install -y curl build-essential
+
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
