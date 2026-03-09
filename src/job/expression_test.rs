@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use super::*;
 
 fn empty_ctx() -> ExprContext<'static> {
@@ -514,4 +516,284 @@ fn parentheses() {
             .unwrap()
             .is_truthy()
     );
+}
+
+// ── hashFiles ──────────────────────────────────────────────────────
+
+#[test]
+fn hash_files_no_args_errors() {
+    let ctx = empty_ctx();
+
+    let result = parse_and_eval("hashFiles()", &ctx);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("requires at least 1 argument"));
+}
+
+#[test]
+fn hash_files_no_workspace_errors() {
+    let ctx = empty_ctx();
+
+    let result = parse_and_eval("hashFiles('*.txt')", &ctx);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("GITHUB_WORKSPACE"));
+}
+
+#[test]
+fn hash_files_no_matches_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let result = parse_and_eval("hashFiles('*.nonexistent')", &ctx).unwrap();
+
+    assert_eq!(result.to_display(), "");
+}
+
+#[test]
+fn hash_files_single_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hello.txt"), b"hello world").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let result = parse_and_eval("hashFiles('hello.txt')", &ctx)
+        .unwrap()
+        .to_display();
+
+    assert_eq!(result.len(), 64); // SHA-256 hex is 64 chars
+    assert_ne!(result, "");
+
+    // Verify against known SHA-256 of "hello world"
+    assert_eq!(
+        result,
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    );
+}
+
+#[test]
+fn hash_files_glob_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"aaa").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"bbb").unwrap();
+    std::fs::write(dir.path().join("c.json"), b"ccc").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let txt_hash = parse_and_eval("hashFiles('*.txt')", &ctx)
+        .unwrap()
+        .to_display();
+    let json_hash = parse_and_eval("hashFiles('*.json')", &ctx)
+        .unwrap()
+        .to_display();
+    let all_hash = parse_and_eval("hashFiles('*')", &ctx).unwrap().to_display();
+
+    // txt and json patterns match different files → different hashes
+    assert_ne!(txt_hash, json_hash);
+    // All files together → yet another hash
+    assert_ne!(all_hash, txt_hash);
+    assert_ne!(all_hash, json_hash);
+}
+
+#[test]
+fn hash_files_recursive_glob() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(dir.path().join("root.txt"), b"root").unwrap();
+    std::fs::write(sub.join("nested.txt"), b"nested").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let root_only = parse_and_eval("hashFiles('*.txt')", &ctx)
+        .unwrap()
+        .to_display();
+    let recursive = parse_and_eval("hashFiles('**/*.txt')", &ctx)
+        .unwrap()
+        .to_display();
+
+    // root_only matches 1 file, recursive matches 2
+    assert_ne!(root_only, recursive);
+    assert_ne!(recursive, "");
+}
+
+#[test]
+fn hash_files_multiple_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package-lock.json"), b"lock").unwrap();
+    std::fs::write(dir.path().join("Gemfile.lock"), b"gem").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let combined = parse_and_eval("hashFiles('package-lock.json', 'Gemfile.lock')", &ctx)
+        .unwrap()
+        .to_display();
+
+    let single = parse_and_eval("hashFiles('package-lock.json')", &ctx)
+        .unwrap()
+        .to_display();
+
+    assert_ne!(combined, "");
+    assert_ne!(combined, single);
+}
+
+#[test]
+fn hash_files_is_deterministic() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"content-a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"content-b").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let hash1 = parse_and_eval("hashFiles('*.txt')", &ctx)
+        .unwrap()
+        .to_display();
+    let hash2 = parse_and_eval("hashFiles('*.txt')", &ctx)
+        .unwrap()
+        .to_display();
+
+    assert_eq!(hash1, hash2);
+}
+
+#[test]
+fn hash_files_content_change_changes_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.txt");
+    std::fs::write(&path, b"version1").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let hash1 = parse_and_eval("hashFiles('data.txt')", &ctx)
+        .unwrap()
+        .to_display();
+
+    std::fs::write(&path, b"version2").unwrap();
+    let hash2 = parse_and_eval("hashFiles('data.txt')", &ctx)
+        .unwrap()
+        .to_display();
+
+    assert_ne!(hash1, hash2);
+}
+
+#[test]
+fn hash_files_ignores_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("subdir")).unwrap();
+    std::fs::write(dir.path().join("file.txt"), b"data").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let result = parse_and_eval("hashFiles('*')", &ctx).unwrap().to_display();
+
+    // Only file.txt should be hashed — the directory is skipped
+    let file_only = parse_and_eval("hashFiles('file.txt')", &ctx)
+        .unwrap()
+        .to_display();
+    assert_eq!(result, file_only);
+}
+
+#[test]
+fn hash_files_deduplicates_across_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("data.txt"), b"data").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    // Same file matched by two patterns should only be hashed once
+    let once = parse_and_eval("hashFiles('data.txt')", &ctx)
+        .unwrap()
+        .to_display();
+    let twice = parse_and_eval("hashFiles('data.txt', '*.txt')", &ctx)
+        .unwrap()
+        .to_display();
+
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn hash_files_in_template() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lock.json"), b"deps").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    env.insert("RUNNER_OS".into(), "Linux".into());
+    let ctx = ctx_with_env(&env);
+
+    let result = resolve_template("key=${{ runner.os }}-${{ hashFiles('lock.json') }}", &ctx);
+
+    assert!(result.starts_with("key=Linux-"));
+    assert_eq!(result.len(), "key=Linux-".len() + 64);
+}
+
+#[test]
+fn hash_files_expression_arg() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lock.json"), b"deps").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    // hashFiles with a format() call as argument
+    let result = parse_and_eval("hashFiles(format('{0}.json', 'lock'))", &ctx)
+        .unwrap()
+        .to_display();
+
+    let direct = parse_and_eval("hashFiles('lock.json')", &ctx)
+        .unwrap()
+        .to_display();
+
+    assert_eq!(result, direct);
 }

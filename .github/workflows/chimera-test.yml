@@ -126,7 +126,63 @@ jobs:
           fi
           echo "Secret is set (masked)"
 
-  # ── Job 6: Needs ───────────────────────────────────────────────
+  # ── Job 6: hashFiles ────────────────────────────────────────────
+  hashfiles:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify hashFiles produces a hash
+        run: |
+          HASH="${{ hashFiles('Cargo.toml') }}"
+          echo "hashFiles('Cargo.toml') = $HASH"
+          if [ -z "$HASH" ]; then
+            echo "::error::hashFiles returned empty string"
+            exit 1
+          fi
+          if [ ${#HASH} -ne 64 ]; then
+            echo "::error::Expected 64-char SHA-256 hex, got ${#HASH} chars"
+            exit 1
+          fi
+
+      - name: Verify hashFiles is deterministic
+        run: |
+          HASH1="${{ hashFiles('Cargo.toml') }}"
+          HASH2="${{ hashFiles('Cargo.toml') }}"
+          echo "Hash 1: $HASH1"
+          echo "Hash 2: $HASH2"
+          test "$HASH1" = "$HASH2"
+
+      - name: Verify recursive glob
+        run: |
+          HASH="${{ hashFiles('**/*.rs') }}"
+          echo "hashFiles('**/*.rs') = $HASH"
+          test -n "$HASH"
+          test ${#HASH} -eq 64
+
+      - name: Verify multiple patterns
+        run: |
+          SINGLE="${{ hashFiles('Cargo.toml') }}"
+          MULTI="${{ hashFiles('Cargo.toml', 'Cargo.lock') }}"
+          echo "Single: $SINGLE"
+          echo "Multi:  $MULTI"
+          test -n "$MULTI"
+          test "$SINGLE" != "$MULTI"
+
+      - name: Verify no match returns empty
+        run: |
+          HASH="${{ hashFiles('*.this-extension-does-not-exist') }}"
+          echo "No-match hash: '$HASH'"
+          test -z "$HASH"
+
+      - name: Verify hashFiles in cache key expression
+        run: |
+          KEY="${{ format('{0}-deps-{1}', runner.os, hashFiles('Cargo.toml', 'Cargo.lock')) }}"
+          echo "Cache key: $KEY"
+          test -n "$KEY"
+
+  # ── Job 7: Needs ───────────────────────────────────────────────
   setup:
     runs-on: [self-hosted, chimera]
     outputs:

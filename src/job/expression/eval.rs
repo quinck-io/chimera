@@ -1,4 +1,5 @@
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use super::ExprContext;
@@ -253,8 +254,21 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
             }
         }
         "hashFiles" => {
-            debug!("hashFiles() is not supported, returning empty string");
-            Ok(Value::String(String::new()))
+            if args.is_empty() {
+                return Err("hashFiles() requires at least 1 argument".into());
+            }
+
+            let workspace = ctx
+                .env
+                .get("GITHUB_WORKSPACE")
+                .ok_or("hashFiles() requires GITHUB_WORKSPACE to be set")?;
+
+            let mut patterns = Vec::new();
+            for arg in args {
+                patterns.push(eval(arg, ctx)?.to_display());
+            }
+
+            hash_files(workspace, &patterns)
         }
 
         _ => Err(format!("unknown function: {name}()")),
@@ -270,4 +284,38 @@ fn check_args(name: &str, args: &[Expr], expected: usize) -> Result<(), String> 
     } else {
         Ok(())
     }
+}
+
+fn hash_files(workspace: &str, patterns: &[String]) -> Result<Value, String> {
+    let workspace_path = std::path::Path::new(workspace);
+    let mut matched_paths = Vec::new();
+
+    for pattern in patterns {
+        let full_pattern = workspace_path.join(pattern).to_string_lossy().to_string();
+        let entries = glob::glob(&full_pattern)
+            .map_err(|e| format!("invalid glob pattern '{pattern}': {e}"))?;
+
+        for entry in entries {
+            let path = entry.map_err(|e| format!("glob error: {e}"))?;
+            if path.is_file() {
+                matched_paths.push(path);
+            }
+        }
+    }
+
+    if matched_paths.is_empty() {
+        return Ok(Value::String(String::new()));
+    }
+
+    matched_paths.sort();
+    matched_paths.dedup();
+
+    let mut hasher = Sha256::new();
+    for path in &matched_paths {
+        let contents =
+            std::fs::read(path).map_err(|e| format!("failed to read '{}': {e}", path.display()))?;
+        hasher.update(&contents);
+    }
+
+    Ok(Value::String(format!("{:x}", hasher.finalize())))
 }
