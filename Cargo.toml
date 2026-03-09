@@ -29,7 +29,7 @@ tar = "0.4"
 serde_yaml = "0.9"
 bollard = "0.18"
 futures = "0.3"
-tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 wiremock = "0.6"
