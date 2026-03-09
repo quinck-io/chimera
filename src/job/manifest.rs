@@ -1,4 +1,5 @@
 use serde_json::{Map, Value, json};
+use tracing::debug;
 
 /// Convert a raw job manifest (template token format) into normalized plain JSON
 /// that our JobManifest struct can deserialize.
@@ -74,12 +75,21 @@ pub fn normalize_manifest(raw: &Value) -> Value {
         result.insert("contextData".into(), json!({}));
     }
 
-    // Pass through container fields
+    // Normalize container fields — environment maps inside may be template tokens
     if let Some(jc) = obj.get("jobContainer") {
-        result.insert("jobContainer".into(), jc.clone());
+        let normalized_jc = normalize_container_spec(jc);
+        debug!(raw = %jc, normalized = %normalized_jc, "normalizing jobContainer");
+        result.insert("jobContainer".into(), normalized_jc);
+    } else {
+        debug!("no jobContainer field in raw manifest");
     }
     if let Some(sc) = obj.get("jobServiceContainers") {
-        result.insert("serviceContainers".into(), sc.clone());
+        if let Some(arr) = sc.as_array() {
+            let normalized: Vec<Value> = arr.iter().map(normalize_container_spec).collect();
+            result.insert("serviceContainers".into(), Value::Array(normalized));
+        } else {
+            result.insert("serviceContainers".into(), sc.clone());
+        }
     }
 
     // Pass through mask, fileTable, and actionsDownloadInfos
@@ -274,6 +284,64 @@ fn template_token_to_map(token: &Value) -> Value {
 
     // Fallback: try to convert as a generic token
     template_token_to_value(token)
+}
+
+/// Normalize a container spec (jobContainer or service container).
+///
+/// GitHub always sends container specs as mapping template tokens (type=2),
+/// or null when no container is configured. The token's map entries contain
+/// keys like "image", "environment", etc. as nested template tokens.
+fn normalize_container_spec(spec: &Value) -> Value {
+    if spec.is_null() {
+        return Value::Null;
+    }
+
+    // Resolve the template token to a plain map (handles type=2 mapping tokens
+    // and passes through plain objects unchanged)
+    let resolved = template_token_to_map(spec);
+
+    let obj = match resolved.as_object() {
+        Some(o) => o,
+        None => return Value::Null,
+    };
+
+    if obj.is_empty() || !obj.contains_key("image") {
+        return Value::Null;
+    }
+
+    // The resolved map values may themselves still be template tokens
+    // (e.g. environment as a nested type=2 mapping), so resolve each field.
+    let mut result = Map::new();
+
+    if let Some(image) = obj.get("image") {
+        result.insert("image".into(), template_token_to_value(image));
+    }
+
+    if let Some(env) = obj.get("environment") {
+        result.insert("environment".into(), template_token_to_map(env));
+    }
+
+    if let Some(ports) = obj.get("ports") {
+        result.insert("ports".into(), template_token_to_value(ports));
+    }
+
+    if let Some(volumes) = obj.get("volumes") {
+        result.insert("volumes".into(), template_token_to_value(volumes));
+    }
+
+    if let Some(options) = obj.get("options") {
+        result.insert("options".into(), template_token_to_value(options));
+    }
+
+    if let Some(creds) = obj.get("credentials") {
+        result.insert("credentials".into(), creds.clone());
+    }
+
+    if let Some(alias) = obj.get("alias") {
+        result.insert("alias".into(), template_token_to_value(alias));
+    }
+
+    Value::Object(result)
 }
 
 /// Convert PipelineContextData to plain JSON.

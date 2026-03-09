@@ -27,6 +27,8 @@ serde_repr = "0.1"
 flate2 = "1"
 tar = "0.4"
 serde_yaml = "0.9"
+bollard = "0.18"
+futures = "0.3"
 
 [dev-dependencies]
 wiremock = "0.6"

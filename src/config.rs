@@ -115,6 +115,10 @@ impl ChimeraPaths {
     pub fn actions_dir(&self) -> PathBuf {
         self.root.join("actions")
     }
+
+    pub fn externals_dir(&self) -> PathBuf {
+        self.root.join("externals")
+    }
 }
 
 pub fn default_root() -> PathBuf {

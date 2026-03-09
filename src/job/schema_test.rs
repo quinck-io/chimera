@@ -26,11 +26,15 @@ fn manifest_with_container_field() {
         "resources": { "endpoints": [] },
         "contextData": {},
         "jobContainer": { "image": "ubuntu:latest" },
-        "serviceContainers": [{ "image": "postgres:15" }]
+        "serviceContainers": [{ "image": "postgres:15", "alias": "db" }]
     }"#;
     let manifest: JobManifest = serde_json::from_str(json).unwrap();
-    assert!(manifest.job_container.is_some());
-    assert_eq!(manifest.service_containers.unwrap().len(), 1);
+    let jc = manifest.job_container.as_ref().unwrap();
+    assert_eq!(jc.image, "ubuntu:latest");
+    let svcs = manifest.service_containers.as_ref().unwrap();
+    assert_eq!(svcs.len(), 1);
+    assert_eq!(svcs[0].image, "postgres:15");
+    assert_eq!(svcs[0].alias.as_deref(), Some("db"));
 }
 
 #[test]

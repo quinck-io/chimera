@@ -104,6 +104,47 @@ pub fn build_base_env(
     env
 }
 
+/// Build environment variables for container-mode execution.
+///
+/// Same as `build_base_env()` but remaps workspace paths to container-internal paths
+/// where bind mounts map host files to the container filesystem.
+pub fn build_container_env(
+    manifest: &JobManifest,
+    workspace: &Workspace,
+    runner_name: &str,
+) -> HashMap<String, String> {
+    let mut env = build_base_env(manifest, workspace, runner_name);
+
+    // Container is always Linux — override host OS/arch so actions
+    // don't try to use macOS tools like brew inside a Linux container.
+    env.insert("RUNNER_OS".into(), "Linux".into());
+    env.insert("ImageOS".into(), "ubuntu22".into());
+
+    // Remap paths to container-internal layout
+    env.insert("GITHUB_WORKSPACE".into(), "/github/workspace".into());
+    env.insert("GITHUB_ENV".into(), "/github/workflow/_env".into());
+    env.insert("GITHUB_PATH".into(), "/github/workflow/_path".into());
+    env.insert("GITHUB_OUTPUT".into(), "/github/workflow/_output".into());
+    env.insert("GITHUB_STATE".into(), "/github/workflow/_state".into());
+    env.insert(
+        "GITHUB_STEP_SUMMARY".into(),
+        "/github/workflow/_step_summary".into(),
+    );
+    env.insert("RUNNER_TEMP".into(), "/github/tmp".into());
+    env.insert("RUNNER_TOOL_CACHE".into(), "/github/tool-cache".into());
+
+    // Set a proper default PATH for the Linux container. In host mode PATH
+    // is inherited from the process environment, but docker exec only gets
+    // what we explicitly pass. Without this, any GITHUB_PATH additions
+    // would replace PATH entirely, losing /usr/bin etc.
+    env.insert(
+        "PATH".into(),
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+    );
+
+    env
+}
+
 #[cfg(test)]
 #[path = "env_test.rs"]
 mod env_test;

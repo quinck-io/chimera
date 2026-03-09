@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
+use crate::docker::container::{JobContainerSpec, ServiceContainerSpec};
 use crate::utils::deserialize_nullable_bool;
 
 #[derive(Debug, Deserialize)]
@@ -18,8 +19,8 @@ pub struct JobManifest {
     pub resources: JobResources,
     #[serde(default)]
     pub context_data: serde_json::Value,
-    pub job_container: Option<serde_json::Value>,
-    pub service_containers: Option<Vec<serde_json::Value>>,
+    pub job_container: Option<JobContainerSpec>,
+    pub service_containers: Option<Vec<ServiceContainerSpec>>,
     #[serde(default)]
     pub mask: Vec<serde_json::Value>,
     #[serde(default)]

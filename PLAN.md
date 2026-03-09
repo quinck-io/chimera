@@ -758,11 +758,11 @@ Done when: workflow with only `run:` steps → green checkmarks + live logs in G
 ### Phase 3 — Container Execution + Services
 **Goal:** `container:` and `services:` work. Resources always cleaned up.
 
-- `executor/docker.rs` — container execution via bollard, `docker exec` per step
-- `executor/services.rs` — service container start/stop, port mapping, DNS
-- `executor/resources.rs` — `JobResources` RAII, scopeguard cleanup
+- container execution via bollard, `docker exec` per step
+-  service container start/stop, port mapping, DNS
+- RAII, scopeguard cleanup
 - `cache/docker_cache.rs` — inspect-before-pull, digest TTL cache, LRU eviction
-- `executor/mod.rs` — wire dispatch to host vs docker based on manifest
+- wire dispatch to host vs docker based on manifest
 - **Tests:** Docker integration (real daemon), cleanup-on-panic, image skip-pull, service DNS
 
 Done when: workflow with `container: ubuntu:latest` and `services: postgres:` runs end-to-end.

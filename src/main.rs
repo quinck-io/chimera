@@ -1,7 +1,9 @@
 mod cli;
 mod config;
+mod docker;
 mod github;
 mod job;
+mod node;
 mod runner;
 mod utils;
 

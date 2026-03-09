@@ -90,6 +90,8 @@ async fn node_action_executes_script() {
         &base_env,
         logger.sender(),
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await;
 
@@ -149,6 +151,8 @@ if (process.env.INPUT_TOKEN !== 'my-secret') {
         &base_env,
         logger.sender(),
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await;
 
@@ -206,6 +210,8 @@ if (process.env.INPUT_FLAVOR !== 'vanilla') {
         &base_env,
         logger.sender(),
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await;
 
@@ -248,6 +254,8 @@ async fn nonzero_exit_fails() {
         &base_env,
         logger.sender(),
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await;
 

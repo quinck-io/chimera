@@ -97,6 +97,8 @@ async fn nested_script_steps_execute() {
         "fake-token",
         0,
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await
     .unwrap();
@@ -143,6 +145,8 @@ async fn failure_propagates() {
         "fake-token",
         0,
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await
     .unwrap();
@@ -192,6 +196,8 @@ async fn inputs_available_as_env() {
         "fake-token",
         0,
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await
     .unwrap();
@@ -236,6 +242,8 @@ async fn recursion_depth_limit() {
         "fake-token",
         10, // Already at limit
         &CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await;
 

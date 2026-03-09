@@ -133,3 +133,46 @@ fn sets_actions_runtime() {
     );
     assert_eq!(env.get("ACTIONS_RUNTIME_TOKEN").unwrap(), "runtime-token");
 }
+
+#[test]
+fn container_env_remaps_paths() {
+    let manifest = minimal_manifest();
+    let (_tmp, ws) = test_workspace();
+
+    let env = build_container_env(&manifest, &ws, "test-runner");
+
+    assert_eq!(env.get("GITHUB_WORKSPACE").unwrap(), "/github/workspace");
+    assert_eq!(env.get("GITHUB_ENV").unwrap(), "/github/workflow/_env");
+    assert_eq!(env.get("GITHUB_PATH").unwrap(), "/github/workflow/_path");
+    assert_eq!(
+        env.get("GITHUB_OUTPUT").unwrap(),
+        "/github/workflow/_output"
+    );
+    assert_eq!(env.get("GITHUB_STATE").unwrap(), "/github/workflow/_state");
+    assert_eq!(
+        env.get("GITHUB_STEP_SUMMARY").unwrap(),
+        "/github/workflow/_step_summary"
+    );
+    assert_eq!(env.get("RUNNER_TEMP").unwrap(), "/github/tmp");
+    assert_eq!(
+        env.get("RUNNER_TOOL_CACHE").unwrap(),
+        "/github/tool-cache"
+    );
+}
+
+#[test]
+fn container_env_preserves_non_path_vars() {
+    let manifest = minimal_manifest();
+    let (_tmp, ws) = test_workspace();
+
+    let env = build_container_env(&manifest, &ws, "test-runner");
+
+    // Non-path variables should still be present
+    assert_eq!(env.get("GITHUB_ACTIONS").unwrap(), "true");
+    assert_eq!(env.get("GITHUB_REPOSITORY").unwrap(), "owner/repo");
+    assert_eq!(env.get("GITHUB_TOKEN").unwrap(), "ghs_test123");
+
+    // Container is always Linux regardless of host OS
+    assert_eq!(env.get("RUNNER_OS").unwrap(), "Linux");
+    assert!(env.contains_key("RUNNER_ARCH"));
+}

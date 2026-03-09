@@ -395,3 +395,147 @@ fn normalize_step_handles_plain_continue_on_error() {
     assert_eq!(result.get("timeoutInMinutes").unwrap(), 10);
     assert_eq!(result.get("condition").unwrap(), "success()");
 }
+
+#[test]
+fn normalize_container_fields_with_template_tokens() {
+    let raw = json!({
+        "plan": { "planId": "p" },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "jobContainer": {
+            "image": { "type": 0, "lit": "ubuntu:latest" },
+            "environment": {
+                "type": 2,
+                "map": [
+                    {
+                        "Key": { "type": 0, "lit": "FOO" },
+                        "Value": { "type": 0, "lit": "bar" }
+                    }
+                ]
+            },
+            "ports": { "type": 1, "seq": [{ "type": 0, "lit": "8080:8080" }] },
+            "volumes": { "type": 1, "seq": [] }
+        },
+        "jobServiceContainers": [
+            {
+                "image": { "type": 0, "lit": "postgres:15" },
+                "environment": {
+                    "type": 2,
+                    "map": [
+                        {
+                            "Key": { "type": 0, "lit": "POSTGRES_PASSWORD" },
+                            "Value": { "type": 0, "lit": "test" }
+                        }
+                    ]
+                },
+                "alias": { "type": 0, "lit": "db" }
+            }
+        ]
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest =
+        serde_json::from_value(normalized).expect("should deserialize");
+
+    let jc = manifest.job_container.as_ref().unwrap();
+    assert_eq!(jc.image, "ubuntu:latest");
+    assert_eq!(jc.environment.get("FOO").unwrap(), "bar");
+    assert_eq!(jc.ports, vec!["8080:8080"]);
+    assert!(jc.volumes.is_empty());
+
+    let svcs = manifest.service_containers.as_ref().unwrap();
+    assert_eq!(svcs.len(), 1);
+    assert_eq!(svcs[0].image, "postgres:15");
+    assert_eq!(
+        svcs[0].environment.get("POSTGRES_PASSWORD").unwrap(),
+        "test"
+    );
+    assert_eq!(svcs[0].alias.as_deref(), Some("db"));
+}
+
+#[test]
+fn normalize_container_fields_plain_passthrough() {
+    let raw = json!({
+        "plan": { "planId": "p" },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "jobContainer": {
+            "image": "node:18",
+            "environment": { "CI": "true" },
+            "ports": ["3000:3000"]
+        }
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest =
+        serde_json::from_value(normalized).expect("should deserialize");
+
+    let jc = manifest.job_container.as_ref().unwrap();
+    assert_eq!(jc.image, "node:18");
+    assert_eq!(jc.environment.get("CI").unwrap(), "true");
+    assert_eq!(jc.ports, vec!["3000:3000"]);
+}
+
+#[test]
+fn normalize_job_container_as_mapping_template_token() {
+    // Real GitHub manifest format: jobContainer is a type=2 mapping token
+    let raw = json!({
+        "plan": { "planId": "p" },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "jobContainer": {
+            "type": 2,
+            "col": 7,
+            "file": 1,
+            "line": 39,
+            "map": [
+                {
+                    "Key": { "col": 7, "file": 1, "line": 39, "lit": "image", "type": 0 },
+                    "Value": { "col": 14, "file": 1, "line": 39, "lit": "ubuntu:latest", "type": 0 }
+                }
+            ]
+        }
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest =
+        serde_json::from_value(normalized).expect("should deserialize");
+
+    assert!(manifest.has_container());
+    let jc = manifest.job_container.as_ref().unwrap();
+    assert_eq!(jc.image, "ubuntu:latest");
+}
+
+#[test]
+fn normalize_null_job_container_becomes_none() {
+    let raw = json!({
+        "plan": { "planId": "p" },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "jobContainer": null
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest =
+        serde_json::from_value(normalized).expect("should deserialize");
+
+    assert!(manifest.job_container.is_none());
+    assert!(!manifest.has_container());
+}
+
+#[test]
+fn normalize_empty_job_container_becomes_none() {
+    let raw = json!({
+        "plan": { "planId": "p" },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "jobContainer": {}
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest =
+        serde_json::from_value(normalized).expect("should deserialize");
+
+    assert!(manifest.job_container.is_none());
+    assert!(!manifest.has_container());
+}

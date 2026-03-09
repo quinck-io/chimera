@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::metadata::ActionMetadata;
+use crate::docker::resources::JobDockerResources;
 use crate::job::execute::{JobState, StepResult, build_step_env, run_process};
 use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
@@ -27,6 +28,8 @@ pub async fn run_node_action(
     base_env: &HashMap<String, String>,
     log_sender: &LogSender,
     cancel_token: &CancellationToken,
+    docker_resources: Option<&JobDockerResources>,
+    node_path: &Path,
 ) -> Result<StepResult> {
     let script_file = match entry_point {
         "pre" => metadata
@@ -54,10 +57,6 @@ pub async fn run_node_action(
     env.extend(build_action_inputs(metadata, step, &expr_ctx));
 
     // Set action-specific env vars
-    env.insert(
-        "GITHUB_ACTION_PATH".into(),
-        action_dir.to_string_lossy().into_owned(),
-    );
     if let Some(name) = &metadata.name {
         env.insert("GITHUB_ACTION".into(), name.clone());
     }
@@ -78,6 +77,50 @@ pub async fn run_node_action(
 
     let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
 
+    // Container mode: run via docker exec with remapped paths
+    if let Some(resources) = docker_resources.filter(|r| r.job_container_id().is_some()) {
+        let container_id = resources
+            .job_container_id()
+            .context("no job container for action step")?;
+
+        let container_action_dir = resources
+            .remap_to_container_path(action_dir)
+            .context("cannot remap action dir to container path")?;
+        let container_script = format!("{}/{}", container_action_dir, script_file);
+
+        env.insert("GITHUB_ACTION_PATH".into(), container_action_dir);
+
+        debug!(
+            action_dir = %action_dir.display(),
+            container_script = %container_script,
+            script = script_file,
+            entry_point,
+            "running node action in container"
+        );
+
+        let result = crate::docker::exec::docker_exec(
+            resources.docker(),
+            container_id,
+            vec![resources.node_path().into(), container_script],
+            &env,
+            "/github/workspace",
+            job_state,
+            log_sender,
+            timeout,
+            cancel_token,
+        )
+        .await;
+
+        rekey_action_state(job_state, step);
+        return result;
+    }
+
+    // Host mode
+    env.insert(
+        "GITHUB_ACTION_PATH".into(),
+        action_dir.to_string_lossy().into_owned(),
+    );
+
     debug!(
         action_dir = %action_dir.display(),
         script = script_file,
@@ -85,10 +128,10 @@ pub async fn run_node_action(
         "running node action"
     );
 
-    // TODO: auto-download node if not on PATH
     let script_path_str = script_path.to_string_lossy();
+    let node_path_str = node_path.to_string_lossy();
     let result = run_process(
-        "node",
+        &node_path_str,
         &[OsStr::new(script_path_str.as_ref())],
         &env,
         workspace.workspace_dir(),
@@ -99,7 +142,12 @@ pub async fn run_node_action(
     )
     .await;
 
-    // Re-key saved state from the empty-key bucket into the correct action-keyed bucket
+    rekey_action_state(job_state, step);
+    result
+}
+
+/// Re-key saved state from the empty-key bucket into the correct action-keyed bucket.
+fn rekey_action_state(job_state: &mut JobState, step: &Step) {
     if let Some(unnamed_state) = job_state.action_states.remove("") {
         let key = step.context_name.as_deref().unwrap_or(&step.id);
         job_state
@@ -108,8 +156,6 @@ pub async fn run_node_action(
             .or_default()
             .extend(unnamed_state);
     }
-
-    result
 }
 
 #[cfg(test)]

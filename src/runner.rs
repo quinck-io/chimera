@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{ChimeraPaths, RunnerCredentials, rsa_params_to_private_key};
+use crate::docker::resources::{JobDockerResources, SetupParams};
 use crate::github::RUNNER_VERSION;
 use crate::github::auth::TokenManager;
 use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage, MessageType};
@@ -19,7 +20,7 @@ use crate::job::client::JobConclusion;
 use crate::job::execute::run_all_steps;
 use crate::job::workspace::Workspace;
 
-use env::build_base_env;
+use env::{build_base_env, build_container_env};
 
 const CONTROL_MSG_DELAY: Duration = Duration::from_millis(2000);
 const CANCEL_POLL_DELAY: Duration = Duration::from_millis(2000);
@@ -182,11 +183,17 @@ impl Runner {
             .context("acquiring job manifest")?;
 
         let var_names: Vec<&str> = manifest.variables.keys().map(|s| s.as_str()).collect();
+        let container_image = manifest
+            .job_container
+            .as_ref()
+            .map(|c| c.image.as_str())
+            .unwrap_or("none");
         info!(
             plan_id = %manifest.plan.plan_id,
             job_id = %manifest.plan.job_id,
             steps = manifest.steps.len(),
             has_container = manifest.has_container(),
+            container_image,
             has_services = manifest.has_services(),
             mask_regexes = manifest.mask_regexes().len(),
             files = ?manifest.file_table(),
@@ -216,7 +223,60 @@ impl Runner {
         )
         .context("creating workspace")?;
 
-        let base_env = build_base_env(&manifest, &workspace, &self.name);
+        // Ensure a node binary is available for the host platform.
+        // Used by node actions in host mode; container mode downloads its own Linux binary.
+        let node_path = crate::node::ensure_node(&self.paths.externals_dir())
+            .await
+            .context("ensuring node binary")?;
+
+        // Set up Docker resources if the job needs containers or services
+        let mut docker_resources = if manifest.has_container() || manifest.has_services() {
+            let docker = crate::docker::client::connect(None)?;
+            crate::docker::client::ping(&docker).await?;
+            let mut resources = JobDockerResources::new(docker);
+
+            let services = manifest.service_containers.as_deref().unwrap_or_default();
+
+            // The workflow files dir is one level above workspace_dir (where _env, _path etc live)
+            let workflow_files_path = workspace
+                .workspace_dir()
+                .parent()
+                .context("workspace has no parent")?;
+
+            resources
+                .setup(&SetupParams {
+                    runner_name: &self.name,
+                    job_id: &manifest.plan.job_id,
+                    job_container: manifest.job_container.as_ref(),
+                    services,
+                    workspace_host_path: workspace.workspace_dir(),
+                    workflow_files_host_path: workflow_files_path,
+                    runner_temp_host_path: workspace.runner_temp(),
+                    actions_host_path: &self.paths.actions_dir(),
+                    tool_cache_host_path: workspace.tool_cache(),
+                    externals_dir: &self.paths.externals_dir(),
+                })
+                .await
+                .context("setting up Docker resources")?;
+            Some(resources)
+        } else {
+            None
+        };
+
+        // Choose env builder based on execution mode
+        let mut base_env = if manifest.has_container() {
+            build_container_env(&manifest, &workspace, &self.name)
+        } else {
+            build_base_env(&manifest, &workspace, &self.name)
+        };
+
+        // Inject service container addresses into environment for discoverability
+        if let Some(ref resources) = docker_resources {
+            for (alias, ip) in resources.service_addresses() {
+                let env_key = format!("SERVICE_{}_HOST", alias.to_uppercase().replace('-', "_"));
+                base_env.insert(env_key, ip.clone());
+            }
+        }
 
         let action_cache = ActionCache::new(self.paths.actions_dir(), client.clone());
         let github_token = manifest.github_token().unwrap_or("").to_string();
@@ -226,7 +286,7 @@ impl Runner {
         let (heartbeat_handle, heartbeat_cancel) =
             job_client.start_heartbeat(manifest.plan.plan_id.clone(), manifest.plan.job_id.clone());
 
-        let (mut conclusion, job_outputs) = run_all_steps(
+        let job_result = run_all_steps(
             &manifest,
             &job_client,
             &workspace,
@@ -235,9 +295,17 @@ impl Runner {
             &action_cache,
             &github_token,
             cancel_token.clone(),
+            docker_resources.as_ref(),
+            &node_path,
         )
-        .await
-        .context("running job steps")?;
+        .await;
+
+        // ALWAYS cleanup Docker resources, even if job_result is Err
+        if let Some(ref mut resources) = docker_resources {
+            resources.cleanup().await;
+        }
+
+        let (mut conclusion, job_outputs) = job_result.context("running job steps")?;
 
         if cancel_token.is_cancelled() && conclusion != JobConclusion::Cancelled {
             conclusion = JobConclusion::Cancelled;

@@ -331,6 +331,8 @@ async fn continue_on_error_works() {
         &action_cache,
         "fake-token",
         CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await
     .unwrap();
@@ -387,6 +389,8 @@ async fn failure_stops_remaining_steps() {
         &action_cache,
         "fake-token",
         CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await
     .unwrap();
@@ -436,6 +440,8 @@ async fn secrets_from_context_data_resolved() {
         &action_cache,
         "fake-token",
         CancellationToken::new(),
+        None,
+        Path::new("node"),
     )
     .await
     .unwrap();
@@ -496,6 +502,8 @@ async fn cancel_token_returns_cancelled_between_steps() {
         &action_cache,
         "fake-token",
         cancel_token,
+        None,
+        Path::new("node"),
     )
     .await
     .unwrap();

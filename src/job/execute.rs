@@ -15,12 +15,13 @@ use tracing::{debug, info, warn};
 use super::JobClient;
 use super::action::{ActionCache, load_action_metadata, resolve_action};
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
-use super::commands::{WorkflowCommand, parse_command};
 use super::expression::ExprContext;
 use super::logs::{LogSender, StepLogger};
 use super::schema::{JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
+use crate::docker::exec::process_output_line;
+use crate::docker::resources::JobDockerResources;
 use crate::utils::{format_results_timestamp, format_timeline_timestamp};
 
 pub struct JobState {
@@ -185,6 +186,63 @@ pub async fn run_host_step(
     result
 }
 
+/// Execute a single run: step inside a Docker container via `docker exec`.
+pub async fn run_container_step(
+    step: &Step,
+    job_state: &mut JobState,
+    workspace: &Workspace,
+    base_env: &HashMap<String, String>,
+    log_sender: &LogSender,
+    docker_resources: &JobDockerResources,
+    cancel_token: &CancellationToken,
+) -> Result<StepResult> {
+    let script_raw = step
+        .inputs
+        .get("script")
+        .context("step has no 'script' input")?;
+
+    let env = build_step_env(step, job_state, workspace, base_env);
+
+    let expr_ctx = ExprContext::new(&env, job_state, false, false);
+    let script = super::expression::resolve_template(script_raw, &expr_ctx);
+
+    let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
+    let container_id = docker_resources
+        .job_container_id()
+        .context("no job container for container step")?;
+
+    debug!(
+        step_id = %step.id,
+        step_name = %step.display_name,
+        "running container step"
+    );
+
+    let result = crate::docker::exec::docker_exec(
+        docker_resources.docker(),
+        container_id,
+        vec!["bash".into(), "-e".into(), "-c".into(), script],
+        &env,
+        "/github/workspace",
+        job_state,
+        log_sender,
+        timeout,
+        cancel_token,
+    )
+    .await;
+
+    // Re-key saved state from the empty-key bucket into the correct action-keyed bucket
+    if let Some(unnamed_state) = job_state.action_states.remove("") {
+        let key = step.context_name.as_deref().unwrap_or(&step.id);
+        job_state
+            .action_states
+            .entry(key.to_string())
+            .or_default()
+            .extend(unnamed_state);
+    }
+
+    result
+}
+
 /// Shared process runner used by host steps, node actions, and composite steps.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_process(
@@ -341,42 +399,16 @@ fn spawn_stdout_reader(
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(cmd) = parse_command(&line) {
-                match cmd {
-                    WorkflowCommand::SetEnv { name, value } => {
-                        env_buf.lock().await.push((name, value));
-                    }
-                    WorkflowCommand::AddPath(p) => {
-                        path_buf.lock().await.push(p);
-                    }
-                    WorkflowCommand::SetOutput { name, value } => {
-                        output_buf.lock().await.push((name, value));
-                    }
-                    WorkflowCommand::AddMask(secret) => {
-                        masks.write().await.push(secret);
-                    }
-                    WorkflowCommand::Debug(msg) => {
-                        sender.send(format!("##[debug]{msg}")).await;
-                    }
-                    WorkflowCommand::Warning(msg) => {
-                        sender.send(format!("##[warning]{msg}")).await;
-                    }
-                    WorkflowCommand::Error(msg) => {
-                        sender.send(format!("##[error]{msg}")).await;
-                    }
-                    WorkflowCommand::Group(title) => {
-                        sender.send(format!("##[group]{title}")).await;
-                    }
-                    WorkflowCommand::EndGroup => {
-                        sender.send("##[endgroup]".into()).await;
-                    }
-                    WorkflowCommand::SaveState { name, value } => {
-                        state_buf.lock().await.push((name, value));
-                    }
-                }
-            } else {
-                sender.send(line).await;
-            }
+            process_output_line(
+                &line,
+                &sender,
+                &masks,
+                &env_buf,
+                &path_buf,
+                &output_buf,
+                &state_buf,
+            )
+            .await;
         }
     })
 }
@@ -392,6 +424,8 @@ pub async fn run_all_steps(
     action_cache: &ActionCache,
     access_token: &str,
     cancel_token: CancellationToken,
+    docker_resources: Option<&JobDockerResources>,
+    node_path: &Path,
 ) -> Result<(JobConclusion, HashMap<String, String>)> {
     let masks = collect_secret_masks(manifest);
     let mut secrets: HashMap<String, String> = manifest
@@ -496,6 +530,8 @@ pub async fn run_all_steps(
             action_cache,
             access_token,
             &cancel_token,
+            docker_resources,
+            node_path,
         )
         .await;
 
@@ -609,19 +645,46 @@ async fn execute_step(
     action_cache: &ActionCache,
     access_token: &str,
     cancel_token: &CancellationToken,
+    docker_resources: Option<&JobDockerResources>,
+    node_path: &Path,
 ) -> (StepConclusion, ResultsConclusion) {
     log_sender.send_banner(runner_name).await;
 
+    let has_docker = docker_resources
+        .as_ref()
+        .and_then(|r| r.job_container_id())
+        .is_some();
+    debug!(
+        step = %step.display_name,
+        is_script = step.is_script(),
+        has_docker,
+        "executing step"
+    );
+
     let result = if step.is_script() {
-        run_host_step(
-            step,
-            job_state,
-            workspace,
-            base_env,
-            log_sender,
-            cancel_token,
-        )
-        .await
+        // Script steps: container mode if docker_resources has a job container, else host
+        if let Some(resources) = docker_resources.filter(|r| r.job_container_id().is_some()) {
+            run_container_step(
+                step,
+                job_state,
+                workspace,
+                base_env,
+                log_sender,
+                resources,
+                cancel_token,
+            )
+            .await
+        } else {
+            run_host_step(
+                step,
+                job_state,
+                workspace,
+                base_env,
+                log_sender,
+                cancel_token,
+            )
+            .await
+        }
     } else {
         run_action_step(
             step,
@@ -632,6 +695,8 @@ async fn execute_step(
             action_cache,
             access_token,
             cancel_token,
+            docker_resources,
+            node_path,
         )
         .await
     };
@@ -658,6 +723,8 @@ async fn run_action_step(
     action_cache: &ActionCache,
     access_token: &str,
     cancel_token: &CancellationToken,
+    docker_resources: Option<&JobDockerResources>,
+    node_path: &Path,
 ) -> Result<StepResult> {
     let source = resolve_action(step)?;
     let action_dir = action_cache
@@ -677,6 +744,8 @@ async fn run_action_step(
             base_env,
             log_sender,
             cancel_token,
+            docker_resources,
+            node_path,
         )
         .await
     } else if metadata.runs.is_composite() {
@@ -692,6 +761,8 @@ async fn run_action_step(
             access_token,
             0,
             cancel_token,
+            docker_resources,
+            node_path,
         )
         .await
     } else if metadata.runs.is_docker() {

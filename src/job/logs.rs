@@ -20,6 +20,11 @@ pub struct LogSender {
 }
 
 impl LogSender {
+    #[cfg(test)]
+    pub fn new_for_test(tx: mpsc::Sender<LogLine>, masks: Arc<RwLock<Vec<String>>>) -> Self {
+        Self { tx, masks }
+    }
+
     pub async fn send(&self, content: String) {
         let masked = self.apply_masks(&content).await;
         let line = LogLine {
