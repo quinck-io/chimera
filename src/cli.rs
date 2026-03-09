@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{ChimeraPaths, default_root, load_config, load_runner_credentials};
 use crate::runner::Runner;
@@ -117,14 +117,19 @@ async fn run_start(runner_name: Option<String>, root: PathBuf) -> Result<()> {
 
     tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-
-        tokio::select! {
-            _ = ctrl_c => info!("received SIGINT"),
-            _ = sigterm.recv() => info!("received SIGTERM"),
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = ctrl_c => info!("received SIGINT"),
+                    _ = sigterm.recv() => info!("received SIGTERM"),
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to register SIGTERM handler, using SIGINT only");
+                let _ = ctrl_c.await;
+                info!("received SIGINT");
+            }
         }
-
         let _ = shutdown_tx.send(true);
     });
 

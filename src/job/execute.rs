@@ -543,7 +543,11 @@ pub async fn run_all_steps(
         let legacy_log_id = logger.log_id();
 
         if let Some(collected) = logger.finish().await {
-            job_log_buffer.push_str(&collected.text);
+            // In Results mode, step logs are already uploaded to the blob — only
+            // accumulate text for the job-level log in legacy mode.
+            if !use_results {
+                job_log_buffer.push_str(&collected.text);
+            }
             job_line_count += collected.line_count;
         }
 

@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::resolve::ActionSource;
 
@@ -55,7 +55,7 @@ impl ActionCache {
         owner: &str,
         repo: &str,
         git_ref: &str,
-        dest: &PathBuf,
+        dest: &Path,
         access_token: &str,
     ) -> Result<()> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/tarball/{git_ref}");
@@ -83,14 +83,50 @@ impl ActionCache {
             .await
             .context("reading tarball response body")?;
 
-        std::fs::create_dir_all(dest)
-            .with_context(|| format!("creating action cache dir {}", dest.display()))?;
+        // Extract to a temp directory, then atomically rename to avoid TOCTOU races.
+        // All filesystem I/O runs on the blocking threadpool to avoid starving the runtime.
+        let tmp_name = format!(
+            "{}.tmp-{}",
+            dest.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("action"),
+            uuid::Uuid::new_v4()
+        );
+        let tmp_dir = dest.parent().context("dest has no parent")?.join(&tmp_name);
+        let dest = dest.to_path_buf();
+        let owner = owner.to_string();
+        let repo = repo.to_string();
+        let git_ref = git_ref.to_string();
 
-        extract_tarball(&bytes, dest)
-            .with_context(|| format!("extracting tarball for {owner}/{repo}@{git_ref}"))?;
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&tmp_dir)
+                .with_context(|| format!("creating temp action dir {}", tmp_dir.display()))?;
 
-        Ok(())
+            extract_tarball(&bytes, &tmp_dir)
+                .with_context(|| format!("extracting tarball for {owner}/{repo}@{git_ref}"))?;
+
+            match std::fs::rename(&tmp_dir, &dest) {
+                Ok(()) => {}
+                Err(e) if dest.exists() => {
+                    debug!(error = %e, "action cache dir already exists (concurrent download), using existing");
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return Err(e).context("renaming temp action dir to final location");
+                }
+            }
+
+            Ok(())
+        })
+        .await
+        .context("extract task panicked")?
     }
+}
+
+/// Returns true if the path contains `..` components that could escape the destination.
+fn has_path_traversal(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, Component::ParentDir))
 }
 
 fn extract_tarball(data: &[u8], dest: &Path) -> Result<()> {
@@ -104,6 +140,11 @@ fn extract_tarball(data: &[u8], dest: &Path) -> Result<()> {
         // Strip the first path component (GitHub adds a prefix like "owner-repo-sha/")
         let stripped: PathBuf = entry_path.components().skip(1).collect();
         if stripped.as_os_str().is_empty() {
+            continue;
+        }
+
+        if has_path_traversal(&stripped) {
+            warn!(path = %entry_path.display(), "skipping tarball entry with path traversal");
             continue;
         }
 

@@ -86,10 +86,21 @@ pub async fn docker_exec(
         }
     });
 
+    let timed_stream = tokio::time::timeout(timeout, stream_task);
+
     let result = tokio::select! {
-        _ = tokio::time::timeout(timeout, stream_task) => {
-            // Stream finished (or timed out — handled below)
-            Ok(())
+        timeout_result = timed_stream => {
+            match timeout_result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    warn!(error = %e, "docker exec stream task panicked");
+                    Ok(())
+                }
+                Err(_) => {
+                    warn!("docker exec timed out");
+                    Err(StepConclusion::Failed)
+                }
+            }
         }
         _ = cancel_token.cancelled() => {
             warn!("job cancelled, docker exec will be stopped");
@@ -97,7 +108,6 @@ pub async fn docker_exec(
         }
     };
 
-    // Check for cancellation or timeout
     if let Err(conclusion) = result {
         return Ok(StepResult { conclusion });
     }

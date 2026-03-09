@@ -123,8 +123,8 @@ impl ChimeraPaths {
 
 pub fn default_root() -> PathBuf {
     dirs::home_dir()
-        .expect("could not determine home directory")
-        .join(".chimera")
+        .map(|h| h.join(".chimera"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/chimera"))
 }
 
 pub fn load_config(path: &Path) -> Result<ChimeraConfig> {

@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const NODE_VERSION: &str = "v20.18.3";
 
@@ -51,50 +51,78 @@ async fn ensure_node_for_platform(externals_dir: &Path, os: &str, arch: &str) ->
     }
     let bytes = response.bytes().await.context("reading node tarball")?;
 
-    std::fs::create_dir_all(&node_dir)
-        .with_context(|| format!("creating node dir {}", node_dir.display()))?;
+    // Extract to a temp directory, then atomically rename to avoid TOCTOU races.
+    // All filesystem I/O runs on the blocking threadpool to avoid starving the runtime.
+    let tmp_name = format!("{dir_name}.tmp-{}", uuid::Uuid::new_v4());
+    let tmp_dir = externals_dir.join(&tmp_name);
+    let node_dir_owned = node_dir.clone();
+    let node_bin_display = node_bin.display().to_string();
 
-    // Extract only bin/node, stripping the top-level directory
-    let decoder = flate2::read::GzDecoder::new(bytes.as_ref());
-    let mut archive = tar::Archive::new(decoder);
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&tmp_dir)
+            .with_context(|| format!("creating temp node dir {}", tmp_dir.display()))?;
 
-    for entry in archive.entries().context("reading node tarball entries")? {
-        let mut entry = entry.context("reading node tarball entry")?;
-        let entry_path = entry.path().context("reading entry path")?.into_owned();
+        let decoder = flate2::read::GzDecoder::new(bytes.as_ref());
+        let mut archive = tar::Archive::new(decoder);
 
-        // Strip first component (e.g. "node-v20.18.3-linux-x64/")
-        let stripped: PathBuf = entry_path.components().skip(1).collect();
-        if stripped.as_os_str().is_empty() {
-            continue;
+        for entry in archive.entries().context("reading node tarball entries")? {
+            let mut entry = entry.context("reading node tarball entry")?;
+            let entry_path = entry.path().context("reading entry path")?.into_owned();
+
+            let stripped: PathBuf = entry_path.components().skip(1).collect();
+            if stripped.as_os_str().is_empty() {
+                continue;
+            }
+
+            if stripped != Path::new("bin/node") {
+                continue;
+            }
+
+            if stripped
+                .components()
+                .any(|c| matches!(c, Component::ParentDir))
+            {
+                warn!(path = %entry_path.display(), "skipping tarball entry with path traversal");
+                continue;
+            }
+
+            let target = tmp_dir.join(&stripped);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::File::create(&target)
+                .with_context(|| format!("creating {}", target.display()))?;
+            std::io::copy(&mut entry, &mut file)
+                .with_context(|| format!("writing {}", target.display()))?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+            }
         }
 
-        // Only extract bin/node to save space
-        if stripped != Path::new("bin/node") {
-            continue;
+        if !tmp_dir.join("bin/node").exists() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            anyhow::bail!("node binary not found after extraction at {node_bin_display}");
         }
 
-        let target = node_dir.join(&stripped);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+        match std::fs::rename(&tmp_dir, &node_dir_owned) {
+            Ok(()) => {}
+            Err(e) if node_dir_owned.exists() => {
+                debug!(error = %e, "node dir already exists (concurrent download), using existing");
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return Err(e).context("renaming temp node dir to final location");
+            }
         }
-        let mut file = std::fs::File::create(&target)
-            .with_context(|| format!("creating {}", target.display()))?;
-        std::io::copy(&mut entry, &mut file)
-            .with_context(|| format!("writing {}", target.display()))?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
-        }
-    }
-
-    if !node_bin.exists() {
-        anyhow::bail!(
-            "node binary not found after extraction at {}",
-            node_bin.display()
-        );
-    }
+        Ok(())
+    })
+    .await
+    .context("node extraction task panicked")??;
 
     info!(path = %node_bin.display(), "node binary downloaded and cached");
     Ok(node_bin)

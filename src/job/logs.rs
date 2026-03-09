@@ -263,14 +263,13 @@ async fn flush_to_vss(client: &JobClient, plan_id: &str, log_id: u64, buffer: &m
 /// Mutable state for the incremental blob upload.
 struct BlobUploadState {
     signed_url: Option<super::client::SignedUrlResponse>,
-    uploaded_len: usize,
 }
 
 /// Collects log lines and streams them to an Azure Append Blob incrementally.
 ///
 /// On first content: gets a signed URL, creates the blob, appends content.
-/// On each interval: appends only the new delta since last flush + posts metadata.
-/// On channel close: appends remaining, seals the blob, posts final metadata.
+/// On each interval: flushes the buffer to the blob and clears it to bound memory.
+/// On channel close: flushes remaining, seals the blob, posts final metadata.
 async fn blob_collector_task(
     client: Arc<JobClient>,
     plan_id: String,
@@ -280,10 +279,7 @@ async fn blob_collector_task(
 ) -> (String, i64) {
     let mut buffer = String::new();
     let mut line_count: i64 = 0;
-    let mut blob = BlobUploadState {
-        signed_url: None,
-        uploaded_len: 0,
-    };
+    let mut blob = BlobUploadState { signed_url: None };
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(FLUSH_INTERVAL_MS));
     interval.tick().await;
 
@@ -299,22 +295,24 @@ async fn blob_collector_task(
                 }
             }
             _ = interval.tick() => {
-                if buffer.len() > blob.uploaded_len {
+                if !buffer.is_empty() {
                     flush_to_blob(
                         &client, &plan_id, &job_id, &step_id,
                         &buffer, line_count, &mut blob,
                     ).await;
+                    buffer.clear();
                 }
             }
         }
     }
 
-    // Final flush: append remaining delta + seal
-    if buffer.len() > blob.uploaded_len {
+    // Final flush: append remaining + seal
+    if !buffer.is_empty() {
         flush_to_blob(
             &client, &plan_id, &job_id, &step_id, &buffer, line_count, &mut blob,
         )
         .await;
+        buffer.clear();
     }
     if let Some(ref url) = blob.signed_url {
         if let Err(e) = client.seal_blob(url).await {
@@ -328,7 +326,8 @@ async fn blob_collector_task(
         }
     }
 
-    (buffer, line_count)
+    // Return empty string — content was already streamed to the blob
+    (String::new(), line_count)
 }
 
 async fn flush_to_blob(
@@ -361,12 +360,10 @@ async fn flush_to_blob(
     }
 
     let url = blob.signed_url.as_ref().unwrap();
-    let delta = &buffer[blob.uploaded_len..];
-    if let Err(e) = client.append_blob_block(url, delta).await {
+    if let Err(e) = client.append_blob_block(url, buffer).await {
         warn!(error = %e, "failed to append log block");
         return;
     }
-    blob.uploaded_len = buffer.len();
 
     // Post metadata to notify GitHub that new log data is available
     if let Err(e) = client

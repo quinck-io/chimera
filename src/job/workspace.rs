@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use tracing::warn;
 
 pub struct Workspace {
     workspace_dir: PathBuf,
@@ -145,6 +146,17 @@ impl Workspace {
             std::fs::remove_dir_all(runner_work)
                 .with_context(|| format!("removing workspace {}", runner_work.display()))?;
         }
+
+        if self.runner_temp.exists()
+            && let Err(e) = std::fs::remove_dir_all(&self.runner_temp)
+        {
+            warn!(
+                path = %self.runner_temp.display(),
+                error = %e,
+                "failed to clean up runner temp directory"
+            );
+        }
+
         Ok(())
     }
 }
