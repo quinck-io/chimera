@@ -163,7 +163,76 @@ jobs:
       - name: hashFiles in cache key expression
         run: echo "${{ format('{0}-deps-{1}', runner.os, hashFiles('Cargo.toml', 'Cargo.lock')) }}"
 
-  # ── Job 7: Needs ───────────────────────────────────────────────
+  # ── Job 7: Docker actions ───────────────────────────────────────
+  docker-actions:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Inline docker://alpine echo
+        uses: docker://alpine:3.19
+        with:
+          args: echo "Hello from inline docker action!"
+
+      - name: Inline docker://alpine entrypoint override
+        uses: docker://alpine:3.19
+        with:
+          entrypoint: /bin/sh
+          args: -c "echo Entrypoint override works && uname -a"
+
+      - name: Inline docker://alpine exit code
+        uses: docker://alpine:3.19
+        with:
+          entrypoint: /bin/sh
+          args: -c "exit 0"
+
+      - name: Inline docker://alpine env vars
+        uses: docker://alpine:3.19
+        env:
+          GREETING: hello-from-env
+        with:
+          entrypoint: /bin/sh
+          args: -c "echo $GREETING"
+
+      - name: Inline docker://node
+        uses: docker://node:20-alpine
+        with:
+          entrypoint: node
+          args: -e "console.log('Node ' + process.version + ' inside docker action')"
+
+      - name: Checkout (for repo docker action)
+        uses: actions/checkout@v4
+
+      - name: Repo docker action
+        uses: ./.github/actions/docker-hello
+        with:
+          name: chimera
+
+      - name: Repo docker action with workflow commands
+        uses: ./.github/actions/docker-hello
+        with:
+          name: chimera-output
+        id: docker_out
+
+      - name: Verify docker action output
+        run: |
+          echo "Got greeting: ${{ steps.docker_out.outputs.greeting }}"
+          test -n "${{ steps.docker_out.outputs.greeting }}"
+
+  # ── Job 7b: Docker actions with services ───────────────────────
+  docker-actions-services:
+    runs-on: [self-hosted, chimera]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - name: Docker action on service network
+        uses: docker://alpine:3.19
+        with:
+          entrypoint: /bin/sh
+          args: -c "apk add --no-cache netcat-openbsd && nc -z redis 6379 && echo 'Redis is reachable from docker action!'"
+
+  # ── Job 8: Needs ───────────────────────────────────────────────
   setup:
     runs-on: [self-hosted, chimera]
     outputs:

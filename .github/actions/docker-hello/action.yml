@@ -1,0 +1,15 @@
+name: 'Docker Hello'
+description: 'A local Docker action for testing chimera docker action support'
+inputs:
+  name:
+    description: 'Who to greet'
+    required: true
+    default: 'world'
+runs:
+  using: 'docker'
+  image: 'docker://alpine:3.19'
+  entrypoint: '/github/action/entrypoint.sh'
+  args:
+    - '${{ inputs.name }}'
+  env:
+    ACTION_ENV_TEST: 'from-action-yml'
