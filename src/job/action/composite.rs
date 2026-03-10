@@ -292,10 +292,6 @@ async fn run_nested_action(
         .context("composite step 'uses' is not a string")?;
 
     let source = super::parse_uses(uses)?;
-    let action_dir = action_cache
-        .get_action(&source, workspace.workspace_dir(), access_token)
-        .await?;
-    let metadata = super::metadata::load_action_metadata(&action_dir)?;
 
     let mut inputs = HashMap::new();
     if let Some(serde_yaml::Value::Mapping(with_map)) = step_map.get(ykey("with")) {
@@ -322,6 +318,26 @@ async fn run_nested_action(
         environment: None,
         context_name: None,
     };
+
+    // Handle inline docker://image in composite steps — skip get_action/metadata
+    if let super::resolve::ActionSource::Docker { ref image } = source {
+        return super::docker::run_docker_image_action(
+            image,
+            &nested_step,
+            job_state,
+            workspace,
+            env,
+            log_sender,
+            cancel_token,
+            docker_resources,
+        )
+        .await;
+    }
+
+    let action_dir = action_cache
+        .get_action(&source, workspace.workspace_dir(), access_token)
+        .await?;
+    let metadata = super::metadata::load_action_metadata(&action_dir)?;
 
     if metadata.runs.is_node() {
         super::node::run_node_action(
@@ -356,7 +372,19 @@ async fn run_nested_action(
         )
         .await
     } else if metadata.runs.is_docker() {
-        bail!("Docker actions not supported yet (Phase 3)")
+        super::docker::run_docker_metadata_action(
+            &action_dir,
+            &metadata,
+            "main",
+            &nested_step,
+            job_state,
+            workspace,
+            env,
+            log_sender,
+            cancel_token,
+            docker_resources,
+        )
+        .await
     } else {
         bail!(
             "unsupported action runtime in composite: {}",

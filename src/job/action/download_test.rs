@@ -212,5 +212,10 @@ async fn docker_action_returns_error() {
 
     let result = cache.get_action(&source, tmp.path(), "fake-token").await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Phase 3"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("should be handled before get_action")
+    );
 }

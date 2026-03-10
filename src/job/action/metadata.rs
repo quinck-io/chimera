@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde::de::Deserializer;
 
 #[derive(Debug, Deserialize)]
 pub struct ActionMetadata {
@@ -80,6 +81,61 @@ pub struct ActionRuns {
     pub post: Option<String>,
     #[serde(default)]
     pub steps: Option<Vec<serde_yaml::Value>>,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, rename = "pre-entrypoint")]
+    pub pre_entrypoint: Option<String>,
+    #[serde(default, rename = "post-entrypoint")]
+    pub post_entrypoint: Option<String>,
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+}
+
+fn deserialize_string_or_seq<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrSeq;
+    impl<'de> de::Visitor<'de> for StringOrSeq {
+        type Value = Option<Vec<String>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or sequence of strings")
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v.split_whitespace().map(|s| s.to_string()).collect()))
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                v.push(s);
+            }
+            Ok(Some(v))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrSeq)
 }
 
 impl ActionRuns {

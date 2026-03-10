@@ -104,7 +104,7 @@ impl<'de> Deserialize<'de> for StepReferenceKind {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        match s.as_str() {
+        match s.to_lowercase().as_str() {
             "script" => Ok(Self::Script),
             "repository" => Ok(Self::Repository),
             "containerregistry" => Ok(Self::ContainerRegistry),

@@ -326,6 +326,10 @@ impl JobDockerResources {
         &self.docker
     }
 
+    pub fn network_name(&self) -> Option<&str> {
+        self.network_name.as_deref()
+    }
+
     /// Path to the node binary inside the container.
     /// Falls back to "node" (relying on container PATH) if not mounted from host.
     pub fn node_path(&self) -> &str {
@@ -347,7 +351,7 @@ impl JobDockerResources {
 }
 
 /// Stop a container (SIGTERM -> timeout -> SIGKILL) and remove it with volumes.
-async fn stop_and_remove(docker: &Docker, container_id: &str, label: &str) {
+pub(crate) async fn stop_and_remove(docker: &Docker, container_id: &str, label: &str) {
     let stop_opts = StopContainerOptions {
         t: STOP_TIMEOUT_SECS,
     };

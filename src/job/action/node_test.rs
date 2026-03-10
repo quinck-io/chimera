@@ -52,6 +52,12 @@ fn make_node_metadata(main_script: &str) -> ActionMetadata {
             pre: None,
             post: None,
             steps: None,
+            image: None,
+            entrypoint: None,
+            args: None,
+            pre_entrypoint: None,
+            post_entrypoint: None,
+            env: None,
         },
     }
 }

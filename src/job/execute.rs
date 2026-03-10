@@ -789,7 +789,25 @@ async fn run_action_step(
     docker_resources: Option<&JobDockerResources>,
     node_path: &Path,
 ) -> Result<StepResult> {
+    use super::action::resolve::ActionSource;
+
     let source = resolve_action(step)?;
+
+    // Case 1: inline docker://image — skip metadata, run directly
+    if let ActionSource::Docker { ref image } = source {
+        return super::action::docker::run_docker_image_action(
+            image,
+            step,
+            job_state,
+            workspace,
+            base_env,
+            log_sender,
+            cancel_token,
+            docker_resources,
+        )
+        .await;
+    }
+
     let action_dir = action_cache
         .get_action(&source, workspace.workspace_dir(), access_token)
         .await?;
@@ -829,7 +847,20 @@ async fn run_action_step(
         )
         .await
     } else if metadata.runs.is_docker() {
-        anyhow::bail!("Docker actions not supported yet (Phase 3)")
+        let entry_point = detect_entry_point(step);
+        super::action::docker::run_docker_metadata_action(
+            &action_dir,
+            &metadata,
+            entry_point,
+            step,
+            job_state,
+            workspace,
+            base_env,
+            log_sender,
+            cancel_token,
+            docker_resources,
+        )
+        .await
     } else {
         anyhow::bail!("unsupported action runtime: {}", metadata.runs.using)
     }

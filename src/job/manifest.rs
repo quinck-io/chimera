@@ -83,12 +83,13 @@ pub fn normalize_manifest(raw: &Value) -> Value {
     } else {
         debug!("no jobContainer field in raw manifest");
     }
-    if let Some(sc) = obj.get("jobServiceContainers") {
-        if let Some(arr) = sc.as_array() {
-            let normalized: Vec<Value> = arr.iter().map(normalize_container_spec).collect();
-            result.insert("serviceContainers".into(), Value::Array(normalized));
-        } else {
-            result.insert("serviceContainers".into(), sc.clone());
+    if let Some(sc) = obj
+        .get("jobServiceContainers")
+        .or_else(|| obj.get("serviceContainers"))
+    {
+        let normalized_sc = normalize_service_containers(sc);
+        if !normalized_sc.is_null() {
+            result.insert("serviceContainers".into(), normalized_sc);
         }
     }
 
@@ -306,6 +307,45 @@ fn template_token_to_map(token: &Value) -> Value {
 
     // Fallback: try to convert as a generic token
     template_token_to_value(token)
+}
+
+/// Normalize service containers from the raw manifest.
+///
+/// GitHub sends service containers as either:
+/// - A JSON array of container specs (already normalized)
+/// - A template token map (type=2) where each key is the service alias
+///   and each value is a container spec template token
+fn normalize_service_containers(sc: &Value) -> Value {
+    // Already a plain array
+    if let Some(arr) = sc.as_array() {
+        let normalized: Vec<Value> = arr.iter().map(normalize_container_spec).collect();
+        return Value::Array(normalized);
+    }
+
+    // Template token map: {type: 2, map: [{Key: "redis", Value: {spec...}}]}
+    // Convert to array, injecting the key as the "alias" field.
+    let resolved = template_token_to_map(sc);
+    if let Some(obj) = resolved.as_object() {
+        let normalized: Vec<Value> = obj
+            .iter()
+            .filter_map(|(alias, spec)| {
+                let mut container = normalize_container_spec(spec);
+                if let Some(c) = container.as_object_mut()
+                    && c.contains_key("image")
+                {
+                    c.entry("alias").or_insert(Value::String(alias.clone()));
+                    return Some(container);
+                }
+                None
+            })
+            .collect();
+        if normalized.is_empty() {
+            return Value::Null;
+        }
+        return Value::Array(normalized);
+    }
+
+    Value::Null
 }
 
 /// Normalize a container spec (jobContainer or service container).

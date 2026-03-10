@@ -1,4 +1,5 @@
 pub mod composite;
+pub mod docker;
 pub mod download;
 pub mod metadata;
 pub mod node;

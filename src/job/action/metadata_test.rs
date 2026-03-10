@@ -82,6 +82,77 @@ runs:
 
     let metadata = load_action_metadata(tmp.path()).unwrap();
     assert!(metadata.runs.is_docker());
+    assert_eq!(metadata.runs.image.as_deref(), Some("Dockerfile"));
+}
+
+#[test]
+fn parse_docker_action_full_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("action.yml"),
+        r#"
+name: 'Full Docker Action'
+inputs:
+  greeting:
+    description: 'Who to greet'
+    default: 'World'
+runs:
+  using: 'docker'
+  image: 'docker://node:18-alpine'
+  entrypoint: '/entrypoint.sh'
+  args:
+    - '--name'
+    - '${{ inputs.greeting }}'
+  pre-entrypoint: '/pre.sh'
+  post-entrypoint: '/post.sh'
+  env:
+    MY_VAR: 'hello'
+    ANOTHER: 'world'
+"#,
+    )
+    .unwrap();
+
+    let metadata = load_action_metadata(tmp.path()).unwrap();
+    assert!(metadata.runs.is_docker());
+    assert_eq!(
+        metadata.runs.image.as_deref(),
+        Some("docker://node:18-alpine")
+    );
+    assert_eq!(metadata.runs.entrypoint.as_deref(), Some("/entrypoint.sh"));
+    assert_eq!(
+        metadata.runs.args.as_deref(),
+        Some(&["--name".to_string(), "${{ inputs.greeting }}".to_string()][..])
+    );
+    assert_eq!(metadata.runs.pre_entrypoint.as_deref(), Some("/pre.sh"));
+    assert_eq!(metadata.runs.post_entrypoint.as_deref(), Some("/post.sh"));
+
+    let env = metadata.runs.env.as_ref().unwrap();
+    assert_eq!(env.get("MY_VAR").unwrap(), "hello");
+    assert_eq!(env.get("ANOTHER").unwrap(), "world");
+}
+
+#[test]
+fn parse_docker_action_minimal() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("action.yml"),
+        r#"
+name: 'Minimal Docker Action'
+runs:
+  using: 'docker'
+  image: 'alpine:latest'
+"#,
+    )
+    .unwrap();
+
+    let metadata = load_action_metadata(tmp.path()).unwrap();
+    assert!(metadata.runs.is_docker());
+    assert_eq!(metadata.runs.image.as_deref(), Some("alpine:latest"));
+    assert!(metadata.runs.entrypoint.is_none());
+    assert!(metadata.runs.args.is_none());
+    assert!(metadata.runs.pre_entrypoint.is_none());
+    assert!(metadata.runs.post_entrypoint.is_none());
+    assert!(metadata.runs.env.is_none());
 }
 
 #[test]

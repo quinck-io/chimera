@@ -45,7 +45,7 @@ impl ActionCache {
             }
             ActionSource::Local { path } => Ok(workspace_dir.join(path)),
             ActionSource::Docker { image } => {
-                bail!("Docker action '{image}' not supported yet (Phase 3)")
+                bail!("Docker action '{image}' should be handled before get_action is called")
             }
         }
     }
