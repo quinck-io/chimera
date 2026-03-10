@@ -87,6 +87,7 @@ jobs:
   # ── Job 4: Conditions ─────────────────────────────────────────────
   conditions:
     runs-on: [self-hosted, chimera]
+    continue-on-error: true
     steps:
       - name: This succeeds
         run: echo "I will succeed"

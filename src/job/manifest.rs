@@ -213,9 +213,31 @@ fn template_token_to_value(token: &Value) -> Value {
                 .unwrap_or(Value::String(String::new()))
         }
         1 => {
-            // Sequence
+            // Sequence — either a string template (contains expression tokens)
+            // or a literal array (all elements are non-expression tokens).
             if let Some(seq) = obj.get("seq").and_then(|s| s.as_array()) {
-                Value::Array(seq.iter().map(template_token_to_value).collect())
+                let has_expression = seq.iter().any(|el| {
+                    el.as_object()
+                        .and_then(|o| o.get("type"))
+                        .and_then(|t| t.as_u64())
+                        == Some(3)
+                });
+
+                if has_expression {
+                    // Template string: concatenate all parts into a single string,
+                    // preserving ${{ }} wrappers around expression tokens so that
+                    // resolve_template can evaluate them later.
+                    let concatenated: String = seq
+                        .iter()
+                        .map(|el| match template_token_to_value(el) {
+                            Value::String(s) => s,
+                            other => other.to_string(),
+                        })
+                        .collect();
+                    Value::String(concatenated)
+                } else {
+                    Value::Array(seq.iter().map(template_token_to_value).collect())
+                }
             } else {
                 Value::Array(vec![])
             }

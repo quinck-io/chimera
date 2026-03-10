@@ -87,7 +87,7 @@ pub fn resolve_template(template: &str, ctx: &ExprContext) -> String {
         result.push_str(&rest[..start]);
         let after_open = &rest[start + 3..];
 
-        if let Some(end) = after_open.find("}}") {
+        if let Some(end) = find_closing_braces(after_open) {
             let expr = after_open[..end].trim();
             match parse_and_eval(expr, ctx) {
                 Ok(val) => result.push_str(&val.to_display()),
@@ -104,6 +104,32 @@ pub fn resolve_template(template: &str, ctx: &ExprContext) -> String {
     }
     result.push_str(rest);
     result
+}
+
+/// Find the closing `}}` of a `${{ ... }}` expression, skipping over `}}`
+/// that appears inside single-quoted strings in the expression language.
+pub fn find_closing_braces(s: &str) -> Option<usize> {
+    let mut chars = s.char_indices().peekable();
+    let mut in_string = false;
+
+    while let Some((i, ch)) = chars.next() {
+        match (in_string, ch) {
+            // Inside a string: '' is an escaped quote, lone ' ends the string
+            (true, '\'') => {
+                if chars.peek().is_some_and(|&(_, c)| c == '\'') {
+                    chars.next();
+                } else {
+                    in_string = false;
+                }
+            }
+            (true, _) => {}
+            // Outside a string: ' opens one, }} closes the expression
+            (false, '\'') => in_string = true,
+            (false, '}') if chars.peek().is_some_and(|&(_, c)| c == '}') => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_and_eval(expr: &str, ctx: &ExprContext) -> Result<Value, String> {

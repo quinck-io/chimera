@@ -140,7 +140,8 @@ fn template_token_expression() {
 }
 
 #[test]
-fn template_token_sequence() {
+fn template_token_sequence_literal_stays_array() {
+    // Sequence with only literal tokens → remains a JSON array
     let token = json!({
         "type": 1,
         "seq": [
@@ -149,6 +150,62 @@ fn template_token_sequence() {
         ]
     });
     assert_eq!(template_token_to_value(&token), json!(["a", "b"]));
+}
+
+#[test]
+fn template_token_sequence_with_expression_concatenates() {
+    // Sequence with expression tokens → concatenated into a single string
+    let token = json!({
+        "type": 1,
+        "seq": [
+            { "type": 0, "lit": "echo \"" },
+            { "type": 3, "expr": "hashFiles('Cargo.toml')" },
+            { "type": 0, "lit": "\"" }
+        ]
+    });
+    assert_eq!(
+        template_token_to_value(&token),
+        json!("echo \"${{ hashFiles('Cargo.toml') }}\"")
+    );
+}
+
+#[test]
+fn sequence_token_in_script_input_deserializes() {
+    // When a `run:` script contains ${{ }}, GitHub sends the input value
+    // as a Sequence token. This must deserialize into HashMap<String, String>.
+    let raw = json!({
+        "plan": { "planId": "p" },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "steps": [{
+            "id": "s1",
+            "reference": { "type": "script" },
+            "inputs": {
+                "type": 2,
+                "map": [{
+                    "Key": { "type": 0, "lit": "script" },
+                    "Value": {
+                        "type": 1,
+                        "seq": [
+                            { "type": 0, "lit": "echo \"" },
+                            { "type": 3, "expr": "hashFiles('Cargo.toml')" },
+                            { "type": 0, "lit": "\" | grep -qE '^[0-9a-f]{64}$'" }
+                        ]
+                    }
+                }]
+            }
+        }]
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest =
+        serde_json::from_value(normalized).expect("should deserialize");
+
+    let script = manifest.steps[0].inputs.get("script").unwrap();
+    assert!(
+        script.contains("hashFiles"),
+        "script should contain the expression: {script}"
+    );
 }
 
 #[test]

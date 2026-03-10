@@ -795,3 +795,57 @@ fn hash_files_expression_arg() {
 
     assert_eq!(result, direct);
 }
+
+#[test]
+fn resolve_template_with_format_wrapping_hashfiles() {
+    // GitHub wraps scripts containing ${{ }} into a format() call where braces
+    // like {64} become {{64}} and single quotes become ''. The closing }} of
+    // ${{ }} must not be confused with }} inside the expression string.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), b"[package]").unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        dir.path().to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    // This is what GitHub actually sends for:
+    //   run: echo "${{ hashFiles('Cargo.toml') }}" | grep -qE '^[0-9a-f]{64}$'
+    let template =
+        "${{ format('echo \"{0}\" | grep -qE ''^[0-9a-f]{{64}}$''', hashFiles('Cargo.toml')) }}";
+    let result = resolve_template(template, &ctx);
+
+    assert!(
+        result.contains("| grep -qE"),
+        "should contain the grep command, got: {result}"
+    );
+    assert!(
+        !result.contains("${{"),
+        "should not contain unresolved expression markers, got: {result}"
+    );
+}
+
+#[test]
+fn find_closing_braces_skips_braces_inside_strings() {
+    use super::find_closing_braces;
+
+    // Simple case: no strings
+    assert_eq!(find_closing_braces("abc }}"), Some(4));
+
+    // }} inside single-quoted string should be skipped
+    assert_eq!(find_closing_braces("'}}' }}"), Some(5));
+
+    // Escaped quote '' inside string
+    assert_eq!(find_closing_braces("'a''b}}c' }}"), Some(10));
+
+    // No closing braces
+    assert_eq!(find_closing_braces("abc"), None);
+
+    // The exact pattern from GitHub's format wrapping
+    assert_eq!(
+        find_closing_braces(" format('echo ''^[0-9a-f]{{64}}$''', hashFiles('x')) }}"),
+        Some(53)
+    );
+}

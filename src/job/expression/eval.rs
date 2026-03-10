@@ -212,6 +212,8 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
                 let val = eval(arg, ctx)?.to_display();
                 result = result.replace(&format!("{{{i}}}"), &val);
             }
+            // Unescape doubled braces: {{ → { and }} → }
+            result = result.replace("{{", "{").replace("}}", "}");
             Ok(Value::String(result))
         }
         "join" => {
