@@ -125,16 +125,30 @@ fn resolve_property(parts: &[String], ctx: &ExprContext) -> Result<Value, String
                 .unwrap_or(Value::Null))
         }
         "steps" => {
-            // steps.STEP_ID.outputs.OUTPUT_NAME
-            if rest.len() >= 3 && rest[1] == "outputs" {
-                Ok(ctx
+            if rest.len() < 2 {
+                return Ok(Value::Null);
+            }
+            let step_id = rest[0].as_str();
+            let field = rest[1].as_str();
+
+            match field {
+                "outputs" if rest.len() >= 3 => Ok(ctx
                     .step_outputs
-                    .get(rest[0].as_str())
+                    .get(step_id)
                     .and_then(|m| m.get(rest[2].as_str()))
                     .map(|v| Value::String(v.clone()))
-                    .unwrap_or(Value::Null))
-            } else {
-                Ok(Value::Null)
+                    .unwrap_or(Value::Null)),
+                "outcome" => Ok(ctx
+                    .step_outcomes
+                    .get(step_id)
+                    .map(|s| Value::String(s.outcome.clone()))
+                    .unwrap_or(Value::Null)),
+                "conclusion" => Ok(ctx
+                    .step_outcomes
+                    .get(step_id)
+                    .map(|s| Value::String(s.conclusion.clone()))
+                    .unwrap_or(Value::Null)),
+                _ => Ok(Value::Null),
             }
         }
         "needs" | "matrix" | "strategy" | "job" => resolve_json_path(ctx.context_data, parts),

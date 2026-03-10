@@ -87,7 +87,6 @@ jobs:
   # ── Job 4: Conditions ─────────────────────────────────────────────
   conditions:
     runs-on: [self-hosted, chimera]
-    continue-on-error: true
     steps:
       - name: This succeeds
         run: echo "I will succeed"
@@ -100,8 +99,11 @@ jobs:
       - name: Runs after continue-on-error failure
         run: echo "Still going despite previous failure"
 
-      - name: Verify soft failure was detected
+      - name: Verify soft failure outcome
         run: test "${{ steps.soft_fail.outcome }}" = "failure"
+
+      - name: Verify soft failure conclusion is success
+        run: test "${{ steps.soft_fail.conclusion }}" = "success"
 
       - name: Force failure (continue)
         id: hard_fail

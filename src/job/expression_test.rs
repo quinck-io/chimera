@@ -1,9 +1,13 @@
 use super::*;
 
+use super::super::execute::StepOutcome;
+
 fn empty_ctx() -> ExprContext<'static> {
     static EMPTY_MAP: std::sync::LazyLock<HashMap<String, String>> =
         std::sync::LazyLock::new(HashMap::new);
     static EMPTY_STEPS: std::sync::LazyLock<HashMap<String, HashMap<String, String>>> =
+        std::sync::LazyLock::new(HashMap::new);
+    static EMPTY_OUTCOMES: std::sync::LazyLock<HashMap<String, StepOutcome>> =
         std::sync::LazyLock::new(HashMap::new);
     static NULL_JSON: std::sync::LazyLock<serde_json::Value> =
         std::sync::LazyLock::new(|| serde_json::json!({}));
@@ -12,6 +16,7 @@ fn empty_ctx() -> ExprContext<'static> {
         env: &EMPTY_MAP,
         secrets: &EMPTY_MAP,
         step_outputs: &EMPTY_STEPS,
+        step_outcomes: &EMPTY_OUTCOMES,
         context_data: &NULL_JSON,
         job_failed: false,
         job_cancelled: false,
@@ -23,6 +28,8 @@ fn ctx_with_env(env: &HashMap<String, String>) -> ExprContext<'_> {
         std::sync::LazyLock::new(HashMap::new);
     static EMPTY_STEPS: std::sync::LazyLock<HashMap<String, HashMap<String, String>>> =
         std::sync::LazyLock::new(HashMap::new);
+    static EMPTY_OUTCOMES: std::sync::LazyLock<HashMap<String, StepOutcome>> =
+        std::sync::LazyLock::new(HashMap::new);
     static NULL_JSON: std::sync::LazyLock<serde_json::Value> =
         std::sync::LazyLock::new(|| serde_json::json!({}));
 
@@ -30,6 +37,7 @@ fn ctx_with_env(env: &HashMap<String, String>) -> ExprContext<'_> {
         env,
         secrets: &EMPTY_MAP,
         step_outputs: &EMPTY_STEPS,
+        step_outcomes: &EMPTY_OUTCOMES,
         context_data: &NULL_JSON,
         job_failed: false,
         job_cancelled: false,
@@ -327,10 +335,12 @@ fn secrets_lookup() {
     let empty_steps = HashMap::new();
     let null_json = serde_json::json!({});
 
+    let empty_outcomes = HashMap::new();
     let ctx = ExprContext {
         env: &env,
         secrets: &secrets,
         step_outputs: &empty_steps,
+        step_outcomes: &empty_outcomes,
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
@@ -362,10 +372,12 @@ fn steps_output_lookup() {
     );
     let null_json = serde_json::json!({});
 
+    let empty_outcomes = HashMap::new();
     let ctx = ExprContext {
         env: &env,
         secrets: &secrets,
         step_outputs: &step_outputs,
+        step_outcomes: &empty_outcomes,
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
@@ -386,6 +398,88 @@ fn steps_output_missing() {
     );
 }
 
+#[test]
+fn steps_outcome_success() {
+    let env = HashMap::new();
+    let secrets = HashMap::new();
+    let step_outputs = HashMap::new();
+    let mut step_outcomes = HashMap::new();
+    step_outcomes.insert(
+        "build".into(),
+        StepOutcome {
+            outcome: "success".into(),
+            conclusion: "success".into(),
+        },
+    );
+    let null_json = serde_json::json!({});
+
+    let ctx = ExprContext {
+        env: &env,
+        secrets: &secrets,
+        step_outputs: &step_outputs,
+        step_outcomes: &step_outcomes,
+        context_data: &null_json,
+        job_failed: false,
+        job_cancelled: false,
+    };
+
+    assert_eq!(
+        resolve_expression("${{ steps.build.outcome }}", &ctx),
+        "success"
+    );
+    assert_eq!(
+        resolve_expression("${{ steps.build.conclusion }}", &ctx),
+        "success"
+    );
+}
+
+#[test]
+fn steps_outcome_with_continue_on_error() {
+    // When continue-on-error absorbs a failure:
+    // outcome = "failure" (raw result), conclusion = "success" (after absorption)
+    let env = HashMap::new();
+    let secrets = HashMap::new();
+    let step_outputs = HashMap::new();
+    let mut step_outcomes = HashMap::new();
+    step_outcomes.insert(
+        "flaky".into(),
+        StepOutcome {
+            outcome: "failure".into(),
+            conclusion: "success".into(),
+        },
+    );
+    let null_json = serde_json::json!({});
+
+    let ctx = ExprContext {
+        env: &env,
+        secrets: &secrets,
+        step_outputs: &step_outputs,
+        step_outcomes: &step_outcomes,
+        context_data: &null_json,
+        job_failed: false,
+        job_cancelled: false,
+    };
+
+    assert_eq!(
+        resolve_expression("${{ steps.flaky.outcome }}", &ctx),
+        "failure"
+    );
+    assert_eq!(
+        resolve_expression("${{ steps.flaky.conclusion }}", &ctx),
+        "success"
+    );
+    assert!(evaluate_condition(
+        Some("steps.flaky.outcome == 'failure'"),
+        &ctx,
+    ));
+}
+
+#[test]
+fn steps_outcome_missing_is_null() {
+    let ctx = empty_ctx();
+    assert_eq!(resolve_expression("${{ steps.nope.outcome }}", &ctx), "");
+}
+
 // ── needs ───────────────────────────────────────────────────────────
 
 #[test]
@@ -402,10 +496,12 @@ fn needs_output_lookup() {
         }
     });
 
+    let empty_outcomes = HashMap::new();
     let ctx = ExprContext {
         env: &env,
         secrets: &secrets,
         step_outputs: &empty_steps,
+        step_outcomes: &empty_outcomes,
         context_data: &context_data,
         job_failed: false,
         job_cancelled: false,
@@ -432,10 +528,12 @@ fn needs_condition_check() {
         }
     });
 
+    let empty_outcomes = HashMap::new();
     let ctx = ExprContext {
         env: &env,
         secrets: &secrets,
         step_outputs: &empty_steps,
+        step_outcomes: &empty_outcomes,
         context_data: &context_data,
         job_failed: false,
         job_cancelled: false,

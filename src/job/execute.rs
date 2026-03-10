@@ -25,6 +25,17 @@ use crate::docker::exec::process_output_line;
 use crate::docker::resources::JobDockerResources;
 use crate::utils::{format_results_timestamp, format_timeline_timestamp};
 
+/// Per-step result for `steps.<id>.outcome` and `steps.<id>.conclusion`.
+///
+/// `outcome` is the raw result before `continue-on-error` is applied.
+/// `conclusion` is the final result after `continue-on-error`:
+/// if `continue-on-error: true` and the step failed, outcome="failure" but conclusion="success".
+#[derive(Debug, Clone)]
+pub struct StepOutcome {
+    pub outcome: String,
+    pub conclusion: String,
+}
+
 pub struct JobState {
     pub env: HashMap<String, String>,
     pub path_prepends: Vec<String>,
@@ -35,6 +46,8 @@ pub struct JobState {
     pub action_states: HashMap<String, HashMap<String, String>>,
     /// Per-step outputs for `steps.<id>.outputs.<name>` expression resolution.
     pub step_outputs: HashMap<String, HashMap<String, String>>,
+    /// Per-step outcome/conclusion for `steps.<id>.outcome` / `steps.<id>.conclusion`.
+    pub step_outcomes: HashMap<String, StepOutcome>,
     /// Secret variables (name → value) for `secrets.<name>` expression resolution.
     pub secrets: HashMap<String, String>,
     /// Context data from the job manifest (needs, matrix, job, etc.).
@@ -54,6 +67,7 @@ impl JobState {
             masks,
             action_states: HashMap::new(),
             step_outputs: HashMap::new(),
+            step_outcomes: HashMap::new(),
             secrets,
             context_data,
         }
@@ -65,6 +79,16 @@ pub enum StepConclusion {
     Succeeded,
     Failed,
     Cancelled,
+}
+
+impl StepConclusion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "success",
+            Self::Failed => "failure",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -485,6 +509,16 @@ pub async fn run_all_steps(
             trackers[idx].mark_started();
             trackers[idx].mark_completed(ResultsConclusion::Skipped);
 
+            if let Some(ctx_name) = step.context_name.as_deref() {
+                job_state.step_outcomes.insert(
+                    ctx_name.to_string(),
+                    StepOutcome {
+                        outcome: "skipped".into(),
+                        conclusion: "skipped".into(),
+                    },
+                );
+            }
+
             report_step_completed(
                 use_results,
                 job_client,
@@ -573,6 +607,23 @@ pub async fn run_all_steps(
             job_state
                 .step_outputs
                 .insert(step_key.to_string(), std::mem::take(&mut job_state.outputs));
+        }
+
+        // Save outcome/conclusion for `steps.<id>.outcome` / `steps.<id>.conclusion`
+        if let Some(ctx_name) = step.context_name.as_deref() {
+            let effective_conclusion =
+                if step.continue_on_error && conclusion == StepConclusion::Failed {
+                    StepConclusion::Succeeded
+                } else {
+                    conclusion
+                };
+            job_state.step_outcomes.insert(
+                ctx_name.to_string(),
+                StepOutcome {
+                    outcome: conclusion.as_str().to_string(),
+                    conclusion: effective_conclusion.as_str().to_string(),
+                },
+            );
         }
 
         if conclusion == StepConclusion::Cancelled {
