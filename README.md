@@ -4,6 +4,16 @@ Protocol-compatible GitHub Actions runner replacement, written from scratch in R
 
 Chimera is a single, fast binary that manages multiple runners concurrently. Run it as a systemd service, in a Docker container, or just in a terminal. It speaks the same registration and job execution protocol as the official runner, so it **works with any existing workflow without modification**.
 
+## Why?
+
+Official GitHub Actions runners are slow, resource-heavy, leak memory and difficult to manage. 
+
+Chimera is designed to be a better experience for self-hosted runners, with a focus on performance, reliability and multirunner management, which are especially important for larger organizations. It also serves as a reference implementation of the GitHub Actions runner protocol, which is currently only documented through reverse engineering.
+
+See [docs/gh-protocol.md](docs/gh-protocol.md) for the full spec, API and auth flows of the GitHub Actions runner protocol.
+
+## Usage
+
 Register runners the same way you would with the official runner, then start the daemon. Runners poll for jobs concurrently — each job gets a clean workspace and can use Docker containers as needed.
 
 ```
