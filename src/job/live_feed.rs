@@ -119,7 +119,7 @@ async fn feed_task(
     // Spawn a task to drain the read side — this ensures ping frames from the
     // server are received and pong responses are sent back automatically by
     // the tungstenite codec, keeping the connection alive.
-    let _read_handle = tokio::spawn(async move {
+    let read_handle = tokio::spawn(async move {
         use futures::StreamExt;
         let mut ws_read = ws_read;
         while let Some(msg) = ws_read.next().await {
@@ -160,6 +160,7 @@ async fn feed_task(
                             }
                             let _ = ws_sink.close().await;
                         }
+                        read_handle.abort();
                         return;
                     }
                 }

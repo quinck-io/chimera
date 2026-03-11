@@ -359,7 +359,9 @@ async fn flush_to_blob(
         }
     }
 
-    let url = blob.signed_url.as_ref().unwrap();
+    let Some(url) = blob.signed_url.as_ref() else {
+        return;
+    };
     if let Err(e) = client.append_blob_block(url, buffer).await {
         warn!(error = %e, "failed to append log block");
         return;

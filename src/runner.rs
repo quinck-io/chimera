@@ -280,7 +280,7 @@ impl Runner {
                 .parent()
                 .context("workspace has no parent")?;
 
-            resources
+            if let Err(e) = resources
                 .setup(&SetupParams {
                     runner_name: &self.name,
                     job_id: &manifest.plan.job_id,
@@ -294,7 +294,10 @@ impl Runner {
                     externals_dir: &self.paths.externals_dir(),
                 })
                 .await
-                .context("setting up Docker resources")?;
+            {
+                resources.cleanup().await;
+                return Err(e.context("setting up Docker resources"));
+            }
             Some(resources)
         } else {
             None

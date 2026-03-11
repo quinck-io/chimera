@@ -85,6 +85,7 @@ pub async fn docker_exec(
             }
         }
     });
+    let stream_abort = stream_task.abort_handle();
 
     let timed_stream = tokio::time::timeout(timeout, stream_task);
 
@@ -98,12 +99,14 @@ pub async fn docker_exec(
                 }
                 Err(_) => {
                     warn!("docker exec timed out");
+                    stream_abort.abort();
                     Err(StepConclusion::Failed)
                 }
             }
         }
         _ = cancel_token.cancelled() => {
             warn!("job cancelled, docker exec will be stopped");
+            stream_abort.abort();
             Err(StepConclusion::Cancelled)
         }
     };
