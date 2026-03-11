@@ -1,6 +1,6 @@
 # chimera
 
-Chimera is a complete protocol-compatible GitHub Actions runner replacement, written from scratch in Rust.
+Protocol-compatible GitHub Actions runner replacement, written from scratch in Rust.
 
 Chimera is a single, fast binary that manages multiple runners concurrently. Run it as a systemd service, in a Docker container, or just in a terminal. It speaks the same registration and job execution protocol as the official runner, so it **works with any existing workflow without modification**.
 
