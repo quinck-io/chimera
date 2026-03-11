@@ -19,6 +19,12 @@ pub struct ChimeraConfig {
 pub struct DaemonConfig {
     #[serde(default = "default_log_format")]
     pub log_format: String,
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout_secs: u64,
+}
+
+fn default_shutdown_timeout() -> u64 {
+    300
 }
 
 fn default_log_format() -> String {
@@ -100,10 +106,6 @@ impl ChimeraPaths {
         self.root.join("work")
     }
 
-    pub fn logs_dir(&self) -> PathBuf {
-        self.root.join("logs")
-    }
-
     pub fn tmp_dir(&self) -> PathBuf {
         self.root.join("tmp")
     }
@@ -118,6 +120,14 @@ impl ChimeraPaths {
 
     pub fn externals_dir(&self) -> PathBuf {
         self.root.join("externals")
+    }
+
+    pub fn pid_file(&self) -> PathBuf {
+        self.root.join("chimera.pid")
+    }
+
+    pub fn state_file(&self) -> PathBuf {
+        self.root.join("state.json")
     }
 }
 

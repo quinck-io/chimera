@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{ChimeraPaths, RunnerCredentials, rsa_params_to_private_key};
+use crate::daemon::{DaemonState, JobInfo, RunnerPhase};
 use crate::docker::resources::{JobDockerResources, SetupParams};
 use crate::github::RUNNER_VERSION;
 use crate::github::auth::TokenManager;
@@ -31,14 +33,42 @@ pub struct Runner {
     name: String,
     credentials: RunnerCredentials,
     paths: ChimeraPaths,
+    state: Option<Arc<DaemonState>>,
 }
 
 impl Runner {
-    pub fn new(name: String, credentials: RunnerCredentials, paths: ChimeraPaths) -> Self {
+    pub fn with_state(
+        name: String,
+        credentials: RunnerCredentials,
+        paths: ChimeraPaths,
+        state: Arc<DaemonState>,
+    ) -> Self {
         Self {
             name,
             credentials,
             paths,
+            state: Some(state),
+        }
+    }
+
+    async fn report_phase(&self, phase: RunnerPhase) {
+        if let Some(ref state) = self.state {
+            state.set_phase(&self.name, phase).await;
+        }
+    }
+
+    async fn report_running(&self, repo: &str, job_id: &str) {
+        if let Some(ref state) = self.state {
+            state
+                .set_running(
+                    &self.name,
+                    JobInfo {
+                        repo: repo.to_string(),
+                        job_id: job_id.to_string(),
+                        started_at: Utc::now(),
+                    },
+                )
+                .await;
         }
     }
 
@@ -77,6 +107,7 @@ impl Runner {
         .context("creating broker session")?;
 
         info!(session_id = %broker.session_id(), "broker session created");
+        self.report_phase(RunnerPhase::Idle).await;
         info!("entering poll loop, waiting for jobs...");
 
         loop {
@@ -92,13 +123,16 @@ impl Runner {
 
                     self.handle_job_message(&msg, &broker, &client, token_manager.clone())
                         .await;
+                    self.report_phase(RunnerPhase::Idle).await;
 
                     if *shutdown_rx.borrow() {
+                        self.report_phase(RunnerPhase::Stopping).await;
                         info!("shutdown after job completion");
                         break;
                     }
                 }
                 Ok(None) => {
+                    self.report_phase(RunnerPhase::Stopping).await;
                     info!("poll loop exited (shutdown)");
                     break;
                 }
@@ -214,6 +248,8 @@ impl Runner {
         let repo = manifest
             .repository()
             .unwrap_or_else(|_| "unknown/repo".into());
+
+        self.report_running(&repo, &manifest.plan.job_id).await;
 
         let workspace = Workspace::create(
             &self.paths.work_dir(),

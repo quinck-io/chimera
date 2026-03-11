@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod daemon;
 mod docker;
 mod github;
 mod job;

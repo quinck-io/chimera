@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config::{ChimeraPaths, default_root, load_config, load_runner_credentials};
-use crate::runner::Runner;
+use crate::config::{ChimeraConfig, ChimeraPaths, DaemonConfig, default_root, load_config};
+use crate::daemon::{Daemon, format_status_display, is_process_alive, read_state_file};
 
 #[derive(Parser)]
 #[command(name = "chimera", about = "GitHub Actions self-hosted runner daemon")]
@@ -53,10 +53,6 @@ pub enum Command {
 
     /// Start the runner daemon
     Start {
-        /// Run a specific runner (default: first registered)
-        #[arg(long)]
-        runner: Option<String>,
-
         /// Chimera root directory
         #[arg(long, default_value_os_t = default_root())]
         root: PathBuf,
@@ -79,39 +75,30 @@ pub async fn run(cli: Cli) -> Result<()> {
             labels,
             root,
         } => {
-            init_tracing();
+            init_tracing(None);
             crate::github::registration::register(&url, &token, &name, &labels, &root).await
         }
 
         Command::Unregister { name, root } => {
-            init_tracing();
+            init_tracing(None);
             crate::github::registration::unregister(&name, &root).await
         }
 
-        Command::Start { runner, root } => {
-            init_tracing();
-            run_start(runner, root).await
+        Command::Start { root } => {
+            let paths = ChimeraPaths::new(root);
+            let config = load_config(&paths.config_file()).context("loading config")?;
+            init_tracing(config.daemon.as_ref());
+            run_start(paths, config).await
         }
 
         Command::Status { root } => run_status(root),
     }
 }
 
-async fn run_start(runner_name: Option<String>, root: PathBuf) -> Result<()> {
-    let paths = ChimeraPaths::new(root);
-    let config = load_config(&paths.config_file()).context("loading config")?;
-
+async fn run_start(paths: ChimeraPaths, config: ChimeraConfig) -> Result<()> {
     if config.runners.is_empty() {
         bail!("no runners registered. Use 'chimera register' first.");
     }
-
-    let name = runner_name.unwrap_or_else(|| config.runners[0].clone());
-    if !config.runners.contains(&name) {
-        bail!("runner '{}' not found in config", name);
-    }
-
-    let creds = load_runner_credentials(&paths.runners_dir(), &name)
-        .with_context(|| format!("loading credentials for runner '{name}'"))?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -133,25 +120,32 @@ async fn run_start(runner_name: Option<String>, root: PathBuf) -> Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    let runner = Runner::new(name, creds, paths);
-    runner.start(shutdown_rx).await
+    let daemon = Daemon::new(paths, config);
+    daemon.run(shutdown_rx).await
 }
 
 fn run_status(root: PathBuf) -> Result<()> {
     let paths = ChimeraPaths::new(root);
-    let config_path = paths.config_file();
+    let state_path = paths.state_file();
 
+    if state_path.exists()
+        && let Ok(snapshot) = read_state_file(&state_path)
+        && is_process_alive(snapshot.pid)
+    {
+        print!("{}", format_status_display(&snapshot));
+        return Ok(());
+    }
+
+    println!("Daemon: not running");
+    println!();
+
+    let config_path = paths.config_file();
     if !config_path.exists() {
-        println!(
-            "No chimera configuration found at {}",
-            config_path.display()
-        );
-        println!("Run 'chimera register' to set up a runner.");
+        println!("No chimera configuration found. Run 'chimera register' first.");
         return Ok(());
     }
 
     let config = load_config(&config_path)?;
-
     if config.runners.is_empty() {
         println!("No runners registered.");
         return Ok(());
@@ -159,10 +153,10 @@ fn run_status(root: PathBuf) -> Result<()> {
 
     println!("Root:       {}", paths.root.display());
     println!("Work dir:   {}", paths.work_dir().display());
-    println!("Log dir:    {}", paths.logs_dir().display());
     println!("Temp dir:   {}", paths.tmp_dir().display());
     println!("Tool cache: {}", paths.tool_cache_dir().display());
     println!();
+
     println!("Registered runners:");
     for name in &config.runners {
         let runner_dir = paths.runner_dir(name);
@@ -177,13 +171,23 @@ fn run_status(root: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+fn init_tracing(daemon_config: Option<&DaemonConfig>) {
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    let use_json = daemon_config.is_some_and(|c| c.log_format == "json");
+
+    if use_json {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
 }

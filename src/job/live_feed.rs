@@ -138,33 +138,45 @@ async fn feed_task(
     let mut pending: HashMap<String, (Vec<String>, i64)> = HashMap::new();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
     interval.tick().await;
+    let mut dead = false;
 
     loop {
         tokio::select! {
             maybe_line = rx.recv() => {
                 match maybe_line {
                     Some(line) => {
-                        let entry = pending.entry(line.step_id).or_insert_with(|| (Vec::new(), 0));
-                        entry.0.push(line.content);
+                        if !dead {
+                            let entry = pending.entry(line.step_id).or_insert_with(|| (Vec::new(), 0));
+                            entry.0.push(line.content);
+                        }
                     }
                     None => {
                         // Channel closed — flush remaining and exit
-                        for (step_id, (lines, start_line)) in pending.drain() {
-                            if !lines.is_empty() {
-                                send_batch(&mut ws_sink, &step_id, &lines, start_line).await;
+                        if !dead {
+                            for (step_id, (lines, start_line)) in pending.drain() {
+                                if !lines.is_empty() {
+                                    send_batch(&mut ws_sink, &step_id, &lines, start_line).await;
+                                }
                             }
+                            let _ = ws_sink.close().await;
                         }
-                        let _ = ws_sink.close().await;
                         return;
                     }
                 }
             }
             _ = interval.tick() => {
+                if dead {
+                    continue;
+                }
                 for (step_id, (lines, start_line)) in &mut pending {
                     if !lines.is_empty() {
                         let batch = std::mem::take(lines);
                         let count = batch.len() as i64;
-                        send_batch(&mut ws_sink, step_id, &batch, *start_line).await;
+                        if !send_batch(&mut ws_sink, step_id, &batch, *start_line).await {
+                            warn!("live console feed connection lost, dropping further messages");
+                            dead = true;
+                            break;
+                        }
                         *start_line += count;
                     }
                 }
@@ -173,7 +185,8 @@ async fn feed_task(
     }
 }
 
-async fn send_batch<S>(ws_sink: &mut S, step_id: &str, lines: &[String], start_line: i64)
+/// Returns `true` if all chunks were sent successfully, `false` if the connection is dead.
+async fn send_batch<S>(ws_sink: &mut S, step_id: &str, lines: &[String], start_line: i64) -> bool
 where
     S: futures::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
     S::Error: std::fmt::Display,
@@ -194,10 +207,11 @@ where
             ))
             .await
         {
-            warn!(error = %e, "failed to send live console feed message");
-            return;
+            debug!(error = %e, "live console feed send failed");
+            return false;
         }
     }
+    true
 }
 
 fn truncate_line(s: &str, max_len: usize) -> &str {

@@ -60,6 +60,7 @@ fn config_load_save_roundtrip() {
     let config = ChimeraConfig {
         daemon: Some(DaemonConfig {
             log_format: "json".into(),
+            shutdown_timeout_secs: 300,
         }),
         runners: vec!["runner-0".into(), "runner-1".into()],
     };
@@ -91,6 +92,14 @@ fn path_construction() {
     assert_eq!(
         paths.tool_cache_dir(),
         PathBuf::from("/home/user/.chimera/tool-cache")
+    );
+    assert_eq!(
+        paths.pid_file(),
+        PathBuf::from("/home/user/.chimera/chimera.pid")
+    );
+    assert_eq!(
+        paths.state_file(),
+        PathBuf::from("/home/user/.chimera/state.json")
     );
 }
 
