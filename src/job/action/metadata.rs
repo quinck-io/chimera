@@ -79,6 +79,10 @@ pub struct ActionRuns {
     pub pre: Option<String>,
     #[serde(default)]
     pub post: Option<String>,
+    #[serde(default, rename = "pre-if")]
+    pub pre_if: Option<String>,
+    #[serde(default, rename = "post-if")]
+    pub post_if: Option<String>,
     #[serde(default)]
     pub steps: Option<Vec<serde_yaml::Value>>,
     #[serde(default)]

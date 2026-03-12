@@ -111,6 +111,7 @@ async fn unregister_removes_files() {
     let config = ChimeraConfig {
         daemon: None,
         runners: vec!["test-runner".into(), "other-runner".into()],
+        ..Default::default()
     };
     save_config(&root.join("config.toml"), &config).unwrap();
 

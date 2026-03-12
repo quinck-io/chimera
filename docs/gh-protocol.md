@@ -21,9 +21,10 @@ engineering the official runner and re-implementing it in chimera.
 11. [Heartbeat (Job Renewal)](#11-heartbeat-job-renewal)
 12. [Job Completion](#12-job-completion)
 13. [Workflow Commands](#13-workflow-commands)
-14. [Endpoint Reference Table](#14-endpoint-reference-table)
-15. [Timestamp Formats](#15-timestamp-formats)
-16. [Gotchas & Non-Obvious Behavior](#16-gotchas--non-obvious-behavior)
+14. [Cache API (actions/cache)](#14-cache-api-actionscache)
+15. [Endpoint Reference Table](#15-endpoint-reference-table)
+16. [Timestamp Formats](#16-timestamp-formats)
+17. [Gotchas & Non-Obvious Behavior](#17-gotchas--non-obvious-behavior)
 
 ---
 
@@ -1065,7 +1066,279 @@ Parameters are comma-separated key=value pairs between the command name and `::`
 
 ---
 
-## 14. Endpoint Reference Table
+## 14. Cache API (actions/cache)
+
+The official GitHub Actions runner uses GitHub's remote cache service for
+`actions/cache@v3` and `@v4`. Chimera replaces this with a local HTTP cache
+server that implements the same REST API, giving instant local cache hits with
+zero workflow changes.
+
+### 14.1 How `actions/cache` Discovers the Server
+
+`actions/cache` (both v3 and v4) checks the `ACTIONS_CACHE_URL` environment
+variable. When set, it uses the **REST API** (`_apis/artifactcache/*`) to talk
+to that URL directly, bypassing GitHub's remote cache entirely.
+
+The Twirp protocol (`ACTIONS_CACHE_SERVICE_V2`) is a separate code path that
+chimera never activates. Both v3 and v4 of `actions/cache` support the REST API
+when `ACTIONS_CACHE_URL` is set.
+
+**No authentication** is enforced on the local server. The official runner sends
+a bearer token, but chimera's server ignores it — only local/bridge network
+traffic can reach it.
+
+### 14.2 ACTIONS_CACHE_URL Format
+
+The URL includes scope information encoded in the path so the server can enforce
+repository and ref isolation:
+
+```
+ACTIONS_CACHE_URL=http://{host}:{port}/cache/{scope_repo}/{scope_ref}/{default_ref}/
+```
+
+| Segment | Encoding | Example raw value | Example encoded |
+|---------|----------|-------------------|-----------------|
+| `scope_repo` | base64url (no padding) | `owner/repo` | `b3duZXIvcmVwbw` |
+| `scope_ref` | base64url (no padding) | `refs/heads/main` | `cmVmcy9oZWFkcy9tYWlu` |
+| `default_ref` | base64url (no padding) | `refs/heads/main` | `cmVmcy9oZWFkcy9tYWlu` |
+
+**Host selection**:
+- **Host mode**: `localhost:{cache_port}`
+- **Container mode**: `{gateway_ip}:{cache_port}` — the Docker bridge network
+  gateway IP (e.g. `172.18.0.1`) so the container can reach the host
+
+The scope values are extracted from the job manifest's `contextData`:
+- `scope_repo` = `github.repository`
+- `scope_ref` = `github.ref`
+- `default_ref` = `github.event.repository.default_branch` (prefixed with
+  `refs/heads/` if not already a ref)
+
+### 14.3 REST API Endpoints
+
+All cache API paths are relative to `ACTIONS_CACHE_URL`. Since that URL already
+includes the `/cache/{scope_repo}/{scope_ref}/{default_ref}/` prefix, the
+`actions/cache` client appends its standard paths after the trailing slash.
+
+#### Lookup (cache hit check)
+
+```
+GET {base}/_apis/artifactcache/cache?keys={key1},{key2}&version={version}
+```
+
+The `keys` parameter is a comma-separated list. The first key is the exact
+match; subsequent keys are restore keys (prefix match fallback). The `version`
+is a hash of the cache paths and compression method.
+
+**Scope isolation rules**:
+1. Only entries from the same `scope_repo` are considered
+2. Try `scope_ref` first (exact and prefix matches)
+3. If no match and `scope_ref != default_ref`, fall back to `default_ref`
+   (feature branches can read from the default branch, not vice versa)
+4. Prefix matching: find the longest stored key that is a prefix of the search
+   key, with matching version
+
+**Double-encoding quirk**: `actions/cache` encodes commas in keys with
+`encodeURIComponent` (`%2C`). The HTTP client may re-encode the percent sign,
+producing `%252C` on the wire. Axum's query extractor decodes one layer, leaving
+literal `%2C`. The server decodes this remaining layer before splitting on commas.
+
+**Response (200 — cache hit)**:
+```json
+{
+  "cacheKey": "cargo-Linux-abc123",
+  "archiveLocation": "http://{host}:{port}/download/{blake3_hash}",
+  "scope": "refs/heads/main"
+}
+```
+
+The `archiveLocation` URL is built from the request's `Host` header, making it
+work automatically for both host-mode and container-mode requests. The `scope`
+field returns the actual ref where the cache was found (may differ from
+`scope_ref` if the hit came from `default_ref` fallback).
+
+**Response (204 — cache miss)**: Empty body.
+
+#### Reserve (start upload)
+
+```
+POST {base}/_apis/artifactcache/caches
+Content-Type: application/json
+
+{
+  "key": "cargo-Linux-abc123",
+  "version": "a1b2c3d4..."
+}
+```
+
+Creates an upload session. The server associates it with the scope from the URL
+path.
+
+**Response (200)**:
+```json
+{
+  "cacheId": 1
+}
+```
+
+The `cacheId` is a monotonically increasing integer used to identify this upload
+session for subsequent chunk and commit calls.
+
+#### Upload chunk
+
+```
+PATCH {base}/_apis/artifactcache/caches/{cacheId}
+Content-Range: bytes 0-1048575/*
+
+{binary data}
+```
+
+Writes a chunk to the upload session at the specified byte offset. `actions/cache`
+uploads in chunks up to 32MB (configurable up to 128MB). The server accepts up to
+256MB per chunk.
+
+The `Content-Range` header uses the standard format: `bytes {start}-{end}/*` where
+both start and end are inclusive. The total size (`/*`) is typically unknown at
+upload time.
+
+**Response (204)**: Success, empty body.
+
+**Response (400)**: Missing or malformed `Content-Range` header.
+
+**Response (404)**: Unknown `cacheId` (session expired or never existed).
+
+#### Commit (finalize upload)
+
+```
+POST {base}/_apis/artifactcache/caches/{cacheId}
+Content-Type: application/json
+
+{
+  "size": 1048576
+}
+```
+
+Finalizes the upload. The `size` must exactly match the number of bytes written
+across all chunks. On commit:
+
+1. The uploaded file is hashed with blake3
+2. The blob is moved to content-addressed storage (`data/{hash[0..2]}/{hash}`)
+3. If an identical blob already exists (same hash), the upload is deduplicated
+4. A cache entry is created and persisted to disk as JSON
+5. LRU eviction runs if total cache size exceeds the configured limit
+
+**Response (204)**: Success.
+
+**Response (500)**: Size mismatch or internal error.
+
+#### Download
+
+```
+GET /download/{blake3_hash}
+```
+
+This endpoint is **global** (not scoped) — it lives outside the
+`/cache/{scope}/...` prefix. The `archiveLocation` URL from a lookup response
+points here directly.
+
+The hash is validated to be exactly 64 lowercase hex characters before any
+filesystem access (prevents path traversal). The response streams the blob file
+with `Content-Type: application/octet-stream`.
+
+**Response (200)**: Streaming blob bytes.
+
+**Response (400)**: Invalid hash format (not 64 hex chars).
+
+**Response (404)**: Blob not found on disk.
+
+### 14.4 Storage Layout
+
+```
+~/.chimera/cache/
+├── entries/          # JSON metadata, one file per cache entry
+│   ├── a1b2c3d4e5f6.json
+│   └── ...
+├── data/             # Content-addressed blobs (blake3)
+│   ├── a1/
+│   │   └── a1b2c3...{64 hex chars}
+│   └── ff/
+│       └── ff0a1b...{64 hex chars}
+└── tmp/              # In-progress uploads
+    └── upload-1.tmp
+```
+
+**Entry filenames**: `blake3(repo + "\0" + ref + "\0" + key + "\0" + version)`,
+truncated to 16 hex chars. This deterministic naming ensures a re-committed
+cache with the same scope+key+version overwrites the previous entry file.
+
+**Blob paths**: Two-char prefix subdirectories (`data/{hash[0..2]}/{hash}`)
+prevent directory bloat on filesystems that slow down with many entries in a
+single directory.
+
+**Atomic writes**: Blobs are written to `tmp/` first, then `rename()`'d to the
+final path. On POSIX, rename is atomic — concurrent writers producing the same
+hash are harmless (same content, same destination).
+
+### 14.5 Entry JSON Format
+
+```json
+{
+  "key": "cargo-Linux-abc123",
+  "version": "a1b2c3d4...",
+  "scope_repo": "owner/repo",
+  "scope_ref": "refs/heads/main",
+  "blob_hash": "ff0a1b2c3d4e5f6...",
+  "size_bytes": 1048576,
+  "created_at": "2024-01-15T10:30:00.000Z",
+  "last_accessed_at": "2024-01-15T11:00:00.000Z"
+}
+```
+
+`scope_repo` and `scope_ref` have `#[serde(default)]` for backward compatibility
+with entries created before scoping was added (they default to empty strings).
+
+### 14.6 LRU Eviction
+
+Eviction runs after every `commit`. If total blob size exceeds `max_bytes`
+(default 10 GB, configurable via `[cache] max_gb`):
+
+1. Entries are sorted by `last_accessed_at` (oldest first)
+2. Entries accessed within the last **60 seconds** are protected (in-flight
+   download protection — prevents evicting a blob that a client is currently
+   downloading)
+3. Oldest unprotected entries are removed one by one: entry JSON deleted, blob
+   refcount decremented
+4. Eviction stops when total size is under the limit
+
+**Blob ref counting**: Multiple entries can reference the same blob (dedup).
+A blob is only deleted from disk when its refcount reaches 0. Refcounts are
+rebuilt from entries on startup.
+
+### 14.7 Startup Recovery
+
+On `CacheManager::new()`:
+
+1. Create `entries/`, `data/`, `tmp/` directories if missing
+2. Load all `entries/*.json` files into the in-memory index
+3. Rebuild blob ref counts from loaded entries
+4. Remove entries whose blobs are missing from disk (orphaned entries)
+5. Delete blobs with no entry pointing to them (orphaned blobs)
+6. Clean `tmp/upload-*.tmp` files (stale uploads from a previous crash)
+7. Run initial eviction (handles the case where `max_gb` was lowered)
+
+### 14.8 Configuration
+
+```toml
+[cache]
+max_gb = 10       # Maximum cache size in GB (default: 10)
+cache_port = 9999 # HTTP server port (default: 9999)
+```
+
+The server binds to `0.0.0.0:{cache_port}`, making it reachable from both the
+host and Docker bridge networks.
+
+---
+
+## 15. Endpoint Reference Table
 
 | Purpose | Method | URL | Auth Token |
 |---------|--------|-----|-----------|
@@ -1091,10 +1364,15 @@ Parameters are comma-separated key=value pairs between the command name and `::`
 | Append block | PUT | `{signed_url}&comp=appendblock` | URL-signed (no header) |
 | Seal blob | PUT | `{signed_url}&comp=seal` | URL-signed (no header) |
 | Live feed | WSS | `wss://feed.actions.githubusercontent.com/{id}` | Bearer (job token, in header) |
+| Cache lookup | GET | `{cache_url}/_apis/artifactcache/cache?keys=...&version=...` | None (local) |
+| Cache reserve | POST | `{cache_url}/_apis/artifactcache/caches` | None (local) |
+| Cache upload chunk | PATCH | `{cache_url}/_apis/artifactcache/caches/{id}` | None (local) |
+| Cache commit | POST | `{cache_url}/_apis/artifactcache/caches/{id}` | None (local) |
+| Cache download | GET | `http://{host}:{port}/download/{hash}` | None (local) |
 
 ---
 
-## 15. Timestamp Formats
+## 16. Timestamp Formats
 
 The protocol uses three different timestamp formats depending on the API:
 
@@ -1109,7 +1387,7 @@ display in the GitHub UI.
 
 ---
 
-## 16. Gotchas & Non-Obvious Behavior
+## 17. Gotchas & Non-Obvious Behavior
 
 ### Token confusion
 
@@ -1196,3 +1474,35 @@ logs appear only after the step completes.
 
 The `FeedStreamUrl` in the manifest data comes as an `https://` URL. It must be
 converted to `wss://` for the WebSocket connection.
+
+### Cache: REST vs Twirp
+
+`actions/cache` v3 and v4 both support two protocols: REST (`_apis/artifactcache/*`)
+and Twirp (`CacheService`). The protocol selection depends on environment variables:
+- `ACTIONS_CACHE_URL` set → REST API (what chimera uses)
+- `ACTIONS_CACHE_SERVICE_V2` set → Twirp protocol
+
+Chimera sets only `ACTIONS_CACHE_URL` and never `ACTIONS_CACHE_SERVICE_V2`. If the
+server receives Twirp requests (`/twirp/...CacheService/...`), something has gone
+wrong with environment variable injection.
+
+### Cache: double-encoded commas in lookup keys
+
+`actions/cache` calls `encodeURIComponent` on cache keys before building the query
+string. This encodes commas as `%2C`. Some HTTP clients then percent-encode the
+`%` itself, producing `%252C` on the wire. The server must handle both `%2C` and
+literal `,` as key separators.
+
+### Cache: `archiveLocation` depends on `Host` header
+
+The lookup response's `archiveLocation` URL is constructed from the request's
+`Host` header (e.g. `http://localhost:9999/download/{hash}` or
+`http://172.18.0.1:9999/download/{hash}`). This makes it work transparently for
+both host-mode and container-mode runners without configuration. If the `Host`
+header is missing, it falls back to `localhost:9999`.
+
+### Cache: scope encoding uses base64url without padding
+
+The scope segments in `ACTIONS_CACHE_URL` use base64url encoding (RFC 4648 §5)
+**without** padding characters (`=`). Using standard base64 or including padding
+will produce 400 errors on lookup/reserve.

@@ -1,3 +1,4 @@
+mod cache;
 mod cli;
 mod config;
 mod daemon;

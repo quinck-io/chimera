@@ -34,6 +34,8 @@ fn make_composite_metadata(steps_yaml: &str) -> ActionMetadata {
             main: None,
             pre: None,
             post: None,
+            pre_if: None,
+            post_if: None,
             steps: Some(steps),
             image: None,
             entrypoint: None,

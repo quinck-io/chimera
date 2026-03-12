@@ -202,8 +202,10 @@ runs:
 
     let metadata = load_action_metadata(tmp.path()).unwrap();
     assert_eq!(metadata.runs.pre.as_deref(), Some("dist/pre.js"));
+    assert_eq!(metadata.runs.pre_if.as_deref(), Some("always()"));
     assert_eq!(metadata.runs.main.as_deref(), Some("dist/main.js"));
     assert_eq!(metadata.runs.post.as_deref(), Some("dist/post.js"));
+    assert_eq!(metadata.runs.post_if.as_deref(), Some("success()"));
 }
 
 #[test]

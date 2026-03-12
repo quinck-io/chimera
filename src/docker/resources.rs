@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use super::client::ensure_image;
 use super::container::{JobContainerSpec, ServiceContainerSpec};
-use super::network::{create_job_network, remove_network};
+use super::network::{create_job_network, get_network_gateway, remove_network};
 
 const STOP_TIMEOUT_SECS: i64 = 5;
 
@@ -40,6 +40,10 @@ pub struct JobDockerResources {
     path_mappings: Vec<(PathBuf, String)>,
     /// Path to the node binary inside the container (if mounted from host).
     node_container_path: Option<String>,
+    /// Gateway IP of the job network (host IP from container's perspective).
+    host_gateway_ip: Option<String>,
+    /// Default environment from the job container's Docker image (ENV directives).
+    image_env: HashMap<String, String>,
 }
 
 impl JobDockerResources {
@@ -52,6 +56,8 @@ impl JobDockerResources {
             service_addresses: HashMap::new(),
             path_mappings: Vec::new(),
             node_container_path: None,
+            host_gateway_ip: None,
+            image_env: HashMap::new(),
         }
     }
 
@@ -60,6 +66,12 @@ impl JobDockerResources {
         let network_name =
             create_job_network(&self.docker, params.runner_name, params.job_id).await?;
         self.network_name = Some(network_name.clone());
+
+        // Resolve gateway IP so containers can reach host-bound services (e.g. cache server)
+        match get_network_gateway(&self.docker, &network_name).await {
+            Ok(gw) => self.host_gateway_ip = Some(gw),
+            Err(e) => warn!(error = %e, "could not resolve network gateway"),
+        }
 
         // Start service containers
         for (i, svc) in params.services.iter().enumerate() {
@@ -159,6 +171,18 @@ impl JobDockerResources {
         // Start job container (if present)
         if let Some(spec) = params.job_container {
             ensure_image(&self.docker, &spec.image, spec.credentials.as_ref()).await?;
+
+            // Extract default ENV from the image so we can inherit PATH etc.
+            if let Ok(inspect) = self.docker.inspect_image(&spec.image).await
+                && let Some(config) = inspect.config
+                && let Some(env_list) = config.env
+            {
+                for entry in env_list {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        self.image_env.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
 
             let container_name = format!("chimera-{}-{}-job", params.runner_name, params.job_id);
             let workspace_mount = format!(
@@ -330,10 +354,20 @@ impl JobDockerResources {
         self.network_name.as_deref()
     }
 
+    /// Gateway IP of the job network — the host address from the container's perspective.
+    pub fn host_gateway_ip(&self) -> Option<&str> {
+        self.host_gateway_ip.as_deref()
+    }
+
     /// Path to the node binary inside the container.
     /// Falls back to "node" (relying on container PATH) if not mounted from host.
     pub fn node_path(&self) -> &str {
         self.node_container_path.as_deref().unwrap_or("node")
+    }
+
+    /// Default environment variables from the job container's Docker image.
+    pub fn image_env(&self) -> &HashMap<String, String> {
+        &self.image_env
     }
 
     /// Remap a host path to its container-internal equivalent using bind mount mappings.

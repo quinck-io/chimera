@@ -10,6 +10,8 @@ use tokio::sync::{RwLock, watch};
 use tokio::task::JoinSet;
 use tracing::{Instrument, error, info, warn};
 
+use crate::cache::manager::CacheManager;
+use crate::cache::server as cache_server;
 use crate::config::{ChimeraConfig, ChimeraPaths, load_runner_credentials};
 use crate::runner::Runner;
 
@@ -211,6 +213,24 @@ impl Daemon {
     pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
         let _pid_lock = PidLock::acquire(&self.paths.pid_file()).context("acquiring PID lock")?;
 
+        // Start cache server if configured
+        let cache_config = self.config.cache.clone().unwrap_or_default();
+        let cache_manager = Arc::new(
+            CacheManager::new(
+                self.paths.cache_entries_dir(),
+                self.paths.cache_data_dir(),
+                self.paths.cache_tmp_dir(),
+                cache_config.max_gb * 1024 * 1024 * 1024,
+            )
+            .await
+            .context("initializing cache manager")?,
+        );
+
+        let cache_addr = cache_server::start(cache_manager, cache_config.cache_port)
+            .await
+            .context("starting cache server")?;
+        let cache_port = cache_addr.port();
+
         let state = Arc::new(DaemonState::new(&self.config.runners));
 
         let mut join_set = JoinSet::new();
@@ -226,8 +246,13 @@ impl Daemon {
                 }
             };
 
-            let runner =
-                Runner::with_state(name.clone(), creds, self.paths.clone(), Arc::clone(&state));
+            let runner = Runner::with_state(
+                name.clone(),
+                creds,
+                self.paths.clone(),
+                Arc::clone(&state),
+                cache_port,
+            );
 
             let rx = shutdown_rx.clone();
             let runner_name = name.clone();

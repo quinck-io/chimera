@@ -22,13 +22,16 @@ toml = "0.8"
 hostname = "0.4"
 dirs = "6"
 serde_urlencoded = "0.7.1"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
 serde_repr = "0.1"
 flate2 = "1"
 tar = "0.4"
 serde_yaml = "0.9"
+axum = "0.8"
+blake3 = "1"
 bollard = "0.18"
 futures = "0.3"
+tower-http = { version = "0.6", features = ["trace"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
 glob = "0.3.3"
 libc = "0.2"
@@ -36,3 +39,4 @@ libc = "0.2"
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

@@ -63,6 +63,7 @@ fn config_load_save_roundtrip() {
             shutdown_timeout_secs: 300,
         }),
         runners: vec!["runner-0".into(), "runner-1".into()],
+        ..Default::default()
     };
 
     save_config(&config_path, &config).unwrap();

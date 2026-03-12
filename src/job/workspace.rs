@@ -135,6 +135,23 @@ impl Workspace {
         parse_env_file(&content)
     }
 
+    /// Read GITHUB_STATE file (same format as GITHUB_ENV).
+    /// Used by @actions/core saveState() to persist state for post steps.
+    pub fn read_state_file(&self) -> Result<HashMap<String, String>> {
+        let content = std::fs::read_to_string(&self.state_file)
+            .with_context(|| format!("reading state file {}", self.state_file.display()))?;
+        parse_env_file(&content)
+    }
+
+    /// Clear per-step files between steps so each step starts with empty files.
+    pub fn clear_step_files(&self) {
+        let _ = std::fs::write(&self.output_file, "");
+        let _ = std::fs::write(&self.env_file, "");
+        let _ = std::fs::write(&self.path_file, "");
+        let _ = std::fs::write(&self.state_file, "");
+        let _ = std::fs::write(&self.step_summary_file, "");
+    }
+
     pub fn cleanup(&self) -> Result<()> {
         if self.workspace_dir.exists() {
             // Remove the runner's work directory (parent of parent of workspace)

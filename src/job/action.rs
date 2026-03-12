@@ -17,7 +17,9 @@ pub use metadata::load_action_metadata;
 pub use resolve::{ActionSource, resolve_action};
 
 /// Build INPUT_<NAME> env vars for an action step.
-/// Step inputs override action.yml defaults; defaults are expression-resolved.
+/// Both step inputs and action.yml defaults are expression-resolved, matching
+/// the official runner behavior (expressions like `${{ hashFiles(...) }}` in
+/// `with:` blocks are evaluated by the runner, not the server).
 pub fn build_action_inputs(
     metadata: &ActionMetadata,
     step: &Step,
@@ -27,7 +29,8 @@ pub fn build_action_inputs(
     for (name, input_def) in &metadata.inputs {
         let upper_name = format!("INPUT_{}", name.to_uppercase().replace(' ', "_"));
         if let Some(value) = step.inputs.get(name) {
-            inputs.insert(upper_name, value.clone());
+            let resolved = crate::job::expression::resolve_template(value, expr_ctx);
+            inputs.insert(upper_name, resolved);
         } else if let Some(default) = &input_def.default {
             let resolved = crate::job::expression::resolve_expression(default, expr_ctx);
             inputs.insert(upper_name, resolved);

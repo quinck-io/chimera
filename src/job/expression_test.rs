@@ -20,6 +20,7 @@ fn empty_ctx() -> ExprContext<'static> {
         context_data: &NULL_JSON,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn ctx_with_env(env: &HashMap<String, String>) -> ExprContext<'_> {
         context_data: &NULL_JSON,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     }
 }
 
@@ -344,6 +346,7 @@ fn secrets_lookup() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     };
 
     assert_eq!(
@@ -381,6 +384,7 @@ fn steps_output_lookup() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     };
 
     assert_eq!(
@@ -421,6 +425,7 @@ fn steps_outcome_success() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     };
 
     assert_eq!(
@@ -458,6 +463,7 @@ fn steps_outcome_with_continue_on_error() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     };
 
     assert_eq!(
@@ -505,6 +511,7 @@ fn needs_output_lookup() {
         context_data: &context_data,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     };
 
     assert_eq!(
@@ -537,6 +544,7 @@ fn needs_condition_check() {
         context_data: &context_data,
         job_failed: false,
         job_cancelled: false,
+        workspace_path: None,
     };
 
     assert!(evaluate_condition(

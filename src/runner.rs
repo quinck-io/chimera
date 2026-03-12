@@ -34,6 +34,7 @@ pub struct Runner {
     credentials: RunnerCredentials,
     paths: ChimeraPaths,
     state: Option<Arc<DaemonState>>,
+    cache_port: u16,
 }
 
 impl Runner {
@@ -42,12 +43,14 @@ impl Runner {
         credentials: RunnerCredentials,
         paths: ChimeraPaths,
         state: Arc<DaemonState>,
+        cache_port: u16,
     ) -> Self {
         Self {
             name,
             credentials,
             paths,
             state: Some(state),
+            cache_port,
         }
     }
 
@@ -310,12 +313,72 @@ impl Runner {
             build_base_env(&manifest, &workspace, &self.name)
         };
 
-        // Inject service container addresses into environment for discoverability
+        // Merge the Docker image's default PATH so tools installed via ENV in
+        // the Dockerfile (e.g. rust:1-bookworm sets /usr/local/cargo/bin) are available.
         if let Some(ref resources) = docker_resources {
+            if let Some(image_path) = resources.image_env().get("PATH") {
+                let chimera_default =
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+                if image_path != chimera_default {
+                    base_env.insert("PATH".into(), image_path.clone());
+                }
+            }
+
+            // Inject service container addresses into environment for discoverability
             for (alias, ip) in resources.service_addresses() {
                 let env_key = format!("SERVICE_{}_HOST", alias.to_uppercase().replace('-', "_"));
                 base_env.insert(env_key, ip.clone());
             }
+        }
+
+        // Inject ACTIONS_CACHE_URL for actions/cache support, with scope prefix
+        let git_ref = manifest
+            .context_data
+            .get("github")
+            .and_then(|g| g.get("ref"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("refs/heads/main");
+        let default_branch = manifest
+            .context_data
+            .get("github")
+            .and_then(|g| g.get("event"))
+            .and_then(|e| e.get("repository"))
+            .and_then(|r| r.get("default_branch"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("main");
+        let default_ref = format!("refs/heads/{default_branch}");
+
+        let scope_repo = crate::cache::server::encode_scope(&repo);
+        let scope_ref = crate::cache::server::encode_scope(git_ref);
+        let scope_default = crate::cache::server::encode_scope(&default_ref);
+
+        if manifest.has_container() {
+            // On macOS, Docker Desktop runs in a Linux VM so the bridge gateway IP
+            // doesn't route to the macOS host. Use host.docker.internal instead.
+            let cache_host = if cfg!(target_os = "macos") {
+                "host.docker.internal".to_string()
+            } else {
+                docker_resources
+                    .as_ref()
+                    .and_then(|r| r.host_gateway_ip())
+                    .unwrap_or("172.17.0.1")
+                    .to_string()
+            };
+            base_env.insert(
+                "ACTIONS_CACHE_URL".into(),
+                format!(
+                    "http://{cache_host}:{}/cache/{scope_repo}/{scope_ref}/{scope_default}/",
+                    self.cache_port
+                ),
+            );
+        } else {
+            base_env.insert(
+                "ACTIONS_CACHE_URL".into(),
+                format!(
+                    "http://localhost:{}/cache/{scope_repo}/{scope_ref}/{scope_default}/",
+                    self.cache_port
+                ),
+            );
         }
 
         let action_cache = ActionCache::new(self.paths.actions_dir(), client.clone());

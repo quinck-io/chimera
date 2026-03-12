@@ -274,10 +274,19 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
                 return Err("hashFiles() requires at least 1 argument".into());
             }
 
-            let workspace = ctx
-                .env
-                .get("GITHUB_WORKSPACE")
-                .ok_or("hashFiles() requires GITHUB_WORKSPACE to be set")?;
+            // Use the explicit workspace path (host filesystem) if available,
+            // falling back to GITHUB_WORKSPACE from env. In container mode,
+            // GITHUB_WORKSPACE points to a container path that doesn't exist on the host.
+            let workspace_ref;
+            let workspace = if let Some(ref wp) = ctx.workspace_path {
+                wp.as_str()
+            } else {
+                workspace_ref = ctx
+                    .env
+                    .get("GITHUB_WORKSPACE")
+                    .ok_or("hashFiles() requires GITHUB_WORKSPACE to be set")?;
+                workspace_ref.as_str()
+            };
 
             let mut patterns = Vec::new();
             for arg in args {

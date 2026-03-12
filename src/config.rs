@@ -8,9 +8,12 @@ use rsa::traits::PrivateKeyParts;
 use rsa::traits::PublicKeyParts;
 use serde::{Deserialize, Serialize};
 
+use crate::cache::config::CacheConfig;
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct ChimeraConfig {
     pub daemon: Option<DaemonConfig>,
+    pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub runners: Vec<String>,
 }
@@ -128,6 +131,22 @@ impl ChimeraPaths {
 
     pub fn state_file(&self) -> PathBuf {
         self.root.join("state.json")
+    }
+
+    pub fn cache_dir(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
+    pub fn cache_entries_dir(&self) -> PathBuf {
+        self.cache_dir().join("entries")
+    }
+
+    pub fn cache_data_dir(&self) -> PathBuf {
+        self.cache_dir().join("data")
+    }
+
+    pub fn cache_tmp_dir(&self) -> PathBuf {
+        self.cache_dir().join("tmp")
     }
 }
 

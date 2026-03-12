@@ -52,6 +52,9 @@ pub struct JobState {
     pub secrets: HashMap<String, String>,
     /// Context data from the job manifest (needs, matrix, job, etc.).
     pub context_data: serde_json::Value,
+    /// Host filesystem workspace path for hashFiles(). In container mode, GITHUB_WORKSPACE
+    /// points to the container path (/github/workspace) but file operations need the real path.
+    pub host_workspace: Option<String>,
 }
 
 impl JobState {
@@ -70,6 +73,7 @@ impl JobState {
             step_outcomes: HashMap::new(),
             secrets,
             context_data,
+            host_workspace: None,
         }
     }
 }
@@ -390,6 +394,20 @@ pub fn build_step_env(
         }
     }
 
+    // Inject STATE_* env vars for pre/post steps so @actions/core.getState() works.
+    // The main step writes state to GITHUB_STATE file, we read it into action_states,
+    // and the post step reads it via STATE_<name> env vars.
+    if let Some(ctx_name) = &step.context_name
+        && let Some(base_ctx) = ctx_name
+            .strip_suffix("_post")
+            .or_else(|| ctx_name.strip_suffix("_pre"))
+        && let Some(states) = job_state.action_states.get(base_ctx)
+    {
+        for (k, v) in states {
+            env.insert(format!("STATE_{k}"), v.clone());
+        }
+    }
+
     if let Ok(file_env) = workspace.read_env_file() {
         env.extend(file_env);
     }
@@ -480,6 +498,17 @@ pub async fn run_all_steps(
     }
 
     let mut job_state = JobState::new(masks.clone(), secrets, manifest.context_data.clone());
+
+    // In container mode, GITHUB_WORKSPACE points to /github/workspace (container path).
+    // hashFiles() runs on the host and needs the real filesystem path.
+    if docker_resources
+        .as_ref()
+        .and_then(|r| r.job_container_id())
+        .is_some()
+    {
+        job_state.host_workspace = Some(workspace.workspace_dir().to_string_lossy().into_owned());
+    }
+
     let mut job_failed = false;
     let mut job_cancelled = false;
     let use_results = job_client.has_results_url();
@@ -489,8 +518,169 @@ pub async fn run_all_steps(
 
     let mut job_log_buffer = String::new();
     let mut job_line_count: i64 = 0;
+    let mut pending_post_steps: Vec<(Step, Option<String>)> = Vec::new();
+
+    // --- Pre steps ---
+    // Actions can define a `pre` entry point in their action.yml (e.g.
+    // actions/checkout pre-checks the repository state). Pre steps run
+    // before all main steps, in forward order (matching manifest order).
+    let mut pre_steps = Vec::new();
+    for (idx, step) in manifest.steps.iter().enumerate() {
+        if let Some((orig_step, pre_if)) =
+            collect_pre_step(step, action_cache, workspace.workspace_dir(), access_token).await
+        {
+            let ctx_name = orig_step
+                .context_name
+                .clone()
+                .unwrap_or_else(|| orig_step.id.clone());
+            pre_steps.push(Step {
+                id: uuid::Uuid::new_v4().to_string(),
+                display_name: format!("Pre {}", orig_step.display_name),
+                context_name: Some(format!("{ctx_name}_pre")),
+                order: idx as u32,
+                condition: Some(pre_if.unwrap_or_else(|| "always()".to_string())),
+                ..orig_step
+            });
+        }
+    }
+
+    let pre_step_count = pre_steps.len();
+    if !pre_steps.is_empty() {
+        // Prepend pre step trackers so they appear before main steps in the UI
+        let mut pre_trackers: Vec<StepTracker> =
+            pre_steps.iter().map(StepTracker::from_step).collect();
+        pre_trackers.append(&mut trackers);
+        trackers = pre_trackers;
+
+        for pre_step in &pre_steps {
+            if cancel_token.is_cancelled() {
+                job_cancelled = true;
+            }
+
+            let tracker_idx = trackers
+                .iter()
+                .position(|t| t.id == pre_step.id)
+                .context("pre step tracker not found")?;
+
+            let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
+            if !super::expression::evaluate_condition(pre_step.condition.as_deref(), &condition_ctx)
+            {
+                debug!(step = %pre_step.display_name, "skipping pre step (condition not met)");
+                let now = format_timeline_timestamp(Utc::now());
+                trackers[tracker_idx].mark_started();
+                trackers[tracker_idx].mark_completed(ResultsConclusion::Skipped);
+                report_step_completed(
+                    use_results,
+                    job_client,
+                    manifest,
+                    &trackers,
+                    pre_step,
+                    &now,
+                    &now,
+                    ResultsConclusion::Skipped,
+                    0,
+                )
+                .await;
+                continue;
+            }
+
+            let start_time = format_timeline_timestamp(Utc::now());
+            trackers[tracker_idx].mark_started();
+            report_step_started(
+                use_results,
+                job_client,
+                manifest,
+                &trackers,
+                pre_step,
+                &start_time,
+            )
+            .await;
+
+            let logger = create_step_logger(
+                use_results,
+                job_client,
+                &manifest.plan.plan_id,
+                &manifest.plan.job_id,
+                &pre_step.id,
+                &pre_step.display_name,
+                masks.clone(),
+                feed_sender,
+            )
+            .await;
+
+            let (conclusion, result_conclusion) = execute_step(
+                pre_step,
+                &mut job_state,
+                workspace,
+                base_env,
+                logger.sender(),
+                runner_name,
+                action_cache,
+                access_token,
+                &cancel_token,
+                docker_resources,
+                node_path,
+            )
+            .await;
+
+            let legacy_log_id = logger.log_id();
+            if let Some(collected) = logger.finish().await {
+                if !use_results {
+                    job_log_buffer.push_str(&collected.text);
+                }
+                job_line_count += collected.line_count;
+            }
+
+            let finish_time = format_timeline_timestamp(Utc::now());
+            trackers[tracker_idx].mark_completed(result_conclusion);
+            report_step_completed(
+                use_results,
+                job_client,
+                manifest,
+                &trackers,
+                pre_step,
+                &start_time,
+                &finish_time,
+                result_conclusion,
+                legacy_log_id,
+            )
+            .await;
+
+            // Read file-based outputs/env/path/state after pre steps
+            if let Ok(file_outputs) = workspace.read_output_file() {
+                job_state.outputs.extend(file_outputs);
+            }
+            if let Ok(file_env) = workspace.read_env_file() {
+                job_state.env.extend(file_env);
+            }
+            if let Ok(extra_paths) = workspace.read_path_file() {
+                job_state.path_prepends.extend(extra_paths);
+            }
+            if let Ok(file_state) = workspace.read_state_file() {
+                let key = pre_step.context_name.as_deref().unwrap_or(&pre_step.id);
+                job_state
+                    .action_states
+                    .entry(key.to_string())
+                    .or_default()
+                    .extend(file_state);
+            }
+            workspace.clear_step_files();
+
+            // Pre steps DO affect job conclusion (unlike post steps)
+            if conclusion == StepConclusion::Cancelled {
+                job_cancelled = true;
+            } else if conclusion == StepConclusion::Failed {
+                if pre_step.continue_on_error {
+                    info!(step = %pre_step.display_name, "pre step failed but continue_on_error is set");
+                } else {
+                    job_failed = true;
+                }
+            }
+        }
+    }
 
     for (idx, step) in manifest.steps.iter().enumerate() {
+        let idx = idx + pre_step_count;
         // Check for cancellation between steps
         if cancel_token.is_cancelled() {
             job_cancelled = true;
@@ -601,12 +791,44 @@ pub async fn run_all_steps(
         )
         .await;
 
-        // Save this step's outputs for `steps.<id>.outputs.<name>` resolution
-        if !job_state.outputs.is_empty() {
-            let step_key = step.context_name.as_deref().unwrap_or(&step.id);
+        // Read file-based outputs/env/path/state after each step.
+        // Modern actions use these files instead of legacy :: workflow commands.
+        if let Ok(file_outputs) = workspace.read_output_file() {
+            job_state.outputs.extend(file_outputs);
+        }
+        if let Ok(file_env) = workspace.read_env_file() {
+            job_state.env.extend(file_env);
+        }
+        if let Ok(extra_paths) = workspace.read_path_file() {
+            job_state.path_prepends.extend(extra_paths);
+        }
+        // Read GITHUB_STATE file (used by @actions/core saveState)
+        if let Ok(file_state) = workspace.read_state_file() {
+            let key = step.context_name.as_deref().unwrap_or(&step.id);
+            job_state
+                .action_states
+                .entry(key.to_string())
+                .or_default()
+                .extend(file_state);
+        }
+        // Clear the files so the next step starts fresh
+        workspace.clear_step_files();
+
+        // If this action has a `post` entry point, schedule it for later
+        if let Some(post_info) =
+            collect_post_step(step, action_cache, workspace.workspace_dir(), access_token).await
+        {
+            pending_post_steps.push(post_info);
+        }
+
+        // Save this step's outputs for `steps.<id>.outputs.<name>` resolution.
+        // Always take() to prevent outputs from bleeding into subsequent steps.
+        let step_key = step.context_name.as_deref().unwrap_or(&step.id);
+        let step_outs = std::mem::take(&mut job_state.outputs);
+        if !step_outs.is_empty() {
             job_state
                 .step_outputs
-                .insert(step_key.to_string(), std::mem::take(&mut job_state.outputs));
+                .insert(step_key.to_string(), step_outs);
         }
 
         // Save outcome/conclusion for `steps.<id>.outcome` / `steps.<id>.conclusion`
@@ -637,6 +859,154 @@ pub async fn run_all_steps(
         }
     }
 
+    // --- Post steps ---
+    // Actions can define a `post` entry point in their action.yml (e.g.
+    // actions/cache saves the cache in its post step). The official runner
+    // generates these dynamically; chimera does the same here.
+    // Post steps run in reverse order (last action's post runs first).
+    if !pending_post_steps.is_empty() {
+        let max_order = manifest.steps.iter().map(|s| s.order).max().unwrap_or(0);
+        let mut post_steps = Vec::new();
+        for (rev_idx, (orig_step, post_if)) in pending_post_steps.into_iter().rev().enumerate() {
+            let ctx_name = orig_step
+                .context_name
+                .clone()
+                .unwrap_or_else(|| orig_step.id.clone());
+            post_steps.push(Step {
+                id: uuid::Uuid::new_v4().to_string(),
+                display_name: format!("Post {}", orig_step.display_name),
+                context_name: Some(format!("{ctx_name}_post")),
+                order: max_order + 1 + rev_idx as u32,
+                // Default post-if is always() (not success()), so post steps
+                // run even when the job failed (e.g. to save partial caches).
+                condition: Some(post_if.unwrap_or_else(|| "always()".to_string())),
+                ..orig_step
+            });
+        }
+
+        for ps in &post_steps {
+            trackers.push(StepTracker::from_step(ps));
+        }
+
+        for post_step in &post_steps {
+            let tracker_idx = trackers
+                .iter()
+                .position(|t| t.id == post_step.id)
+                .context("post step tracker not found")?;
+
+            let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
+            if !super::expression::evaluate_condition(
+                post_step.condition.as_deref(),
+                &condition_ctx,
+            ) {
+                debug!(step = %post_step.display_name, "skipping post step (condition not met)");
+                let now = format_timeline_timestamp(Utc::now());
+                trackers[tracker_idx].mark_started();
+                trackers[tracker_idx].mark_completed(ResultsConclusion::Skipped);
+                report_step_completed(
+                    use_results,
+                    job_client,
+                    manifest,
+                    &trackers,
+                    post_step,
+                    &now,
+                    &now,
+                    ResultsConclusion::Skipped,
+                    0,
+                )
+                .await;
+                continue;
+            }
+
+            let start_time = format_timeline_timestamp(Utc::now());
+            trackers[tracker_idx].mark_started();
+            report_step_started(
+                use_results,
+                job_client,
+                manifest,
+                &trackers,
+                post_step,
+                &start_time,
+            )
+            .await;
+
+            let logger = create_step_logger(
+                use_results,
+                job_client,
+                &manifest.plan.plan_id,
+                &manifest.plan.job_id,
+                &post_step.id,
+                &post_step.display_name,
+                masks.clone(),
+                feed_sender,
+            )
+            .await;
+
+            let (conclusion, result_conclusion) = execute_step(
+                post_step,
+                &mut job_state,
+                workspace,
+                base_env,
+                logger.sender(),
+                runner_name,
+                action_cache,
+                access_token,
+                &cancel_token,
+                docker_resources,
+                node_path,
+            )
+            .await;
+
+            let legacy_log_id = logger.log_id();
+            if let Some(collected) = logger.finish().await {
+                if !use_results {
+                    job_log_buffer.push_str(&collected.text);
+                }
+                job_line_count += collected.line_count;
+            }
+
+            let finish_time = format_timeline_timestamp(Utc::now());
+            trackers[tracker_idx].mark_completed(result_conclusion);
+            report_step_completed(
+                use_results,
+                job_client,
+                manifest,
+                &trackers,
+                post_step,
+                &start_time,
+                &finish_time,
+                result_conclusion,
+                legacy_log_id,
+            )
+            .await;
+
+            // Read file-based outputs/env/path/state after post steps too
+            if let Ok(file_outputs) = workspace.read_output_file() {
+                job_state.outputs.extend(file_outputs);
+            }
+            if let Ok(file_env) = workspace.read_env_file() {
+                job_state.env.extend(file_env);
+            }
+            if let Ok(extra_paths) = workspace.read_path_file() {
+                job_state.path_prepends.extend(extra_paths);
+            }
+            if let Ok(file_state) = workspace.read_state_file() {
+                let key = post_step.context_name.as_deref().unwrap_or(&post_step.id);
+                job_state
+                    .action_states
+                    .entry(key.to_string())
+                    .or_default()
+                    .extend(file_state);
+            }
+            workspace.clear_step_files();
+
+            // Post steps don't affect job conclusion
+            if conclusion == StepConclusion::Failed {
+                info!(step = %post_step.display_name, "post step failed (does not affect job conclusion)");
+            }
+        }
+    }
+
     upload_job_log(
         use_results,
         job_client,
@@ -646,8 +1016,13 @@ pub async fn run_all_steps(
     )
     .await;
 
-    if let Ok(file_outputs) = workspace.read_output_file() {
-        job_state.outputs.extend(file_outputs);
+    // Reconstruct job-level outputs from all step outputs.
+    // The server uses these for `needs.X.outputs.Y` resolution in dependent jobs.
+    for step in &manifest.steps {
+        let key = step.context_name.as_deref().unwrap_or(&step.id);
+        if let Some(outs) = job_state.step_outputs.get(key) {
+            job_state.outputs.extend(outs.clone());
+        }
     }
 
     let conclusion = if job_cancelled {
@@ -877,6 +1252,73 @@ fn detect_entry_point(step: &Step) -> &str {
         }
     }
     "main"
+}
+
+/// Check if an action step has a `post` entry point, returning the cloned
+/// step and its `post-if` condition for deferred execution.
+async fn collect_post_step(
+    step: &Step,
+    action_cache: &ActionCache,
+    workspace_dir: &Path,
+    access_token: &str,
+) -> Option<(Step, Option<String>)> {
+    if step.is_script() {
+        return None;
+    }
+
+    use super::action::resolve::ActionSource;
+    let source = resolve_action(step).ok()?;
+
+    // Inline docker://image actions don't have action.yml metadata
+    if matches!(source, ActionSource::Docker { .. }) {
+        return None;
+    }
+
+    let action_dir = action_cache
+        .get_action(&source, workspace_dir, access_token)
+        .await
+        .ok()?;
+    let metadata = load_action_metadata(&action_dir).ok()?;
+
+    let has_post = metadata.runs.post.is_some() || metadata.runs.post_entrypoint.is_some();
+    if has_post {
+        Some((step.clone(), metadata.runs.post_if.clone()))
+    } else {
+        None
+    }
+}
+
+/// Check if an action step has a `pre` entry point, returning the cloned
+/// step and its `pre-if` condition for execution before the main steps.
+async fn collect_pre_step(
+    step: &Step,
+    action_cache: &ActionCache,
+    workspace_dir: &Path,
+    access_token: &str,
+) -> Option<(Step, Option<String>)> {
+    if step.is_script() {
+        return None;
+    }
+
+    use super::action::resolve::ActionSource;
+    let source = resolve_action(step).ok()?;
+
+    if matches!(source, ActionSource::Docker { .. }) {
+        return None;
+    }
+
+    let action_dir = action_cache
+        .get_action(&source, workspace_dir, access_token)
+        .await
+        .ok()?;
+    let metadata = load_action_metadata(&action_dir).ok()?;
+
+    let has_pre = metadata.runs.pre.is_some() || metadata.runs.pre_entrypoint.is_some();
+    if has_pre {
+        Some((step.clone(), metadata.runs.pre_if.clone()))
+    } else {
+        None
+    }
 }
 
 async fn report_step_started(

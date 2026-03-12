@@ -22,6 +22,10 @@ pub struct ExprContext<'a> {
     pub context_data: &'a JsonValue,
     pub job_failed: bool,
     pub job_cancelled: bool,
+    /// Host filesystem workspace path for hashFiles(). In container mode,
+    /// GITHUB_WORKSPACE points to the container path (/github/workspace), but
+    /// hashFiles runs on the host and needs the real path.
+    pub workspace_path: Option<String>,
 }
 
 impl<'a> ExprContext<'a> {
@@ -39,6 +43,7 @@ impl<'a> ExprContext<'a> {
             context_data: &job_state.context_data,
             job_failed,
             job_cancelled,
+            workspace_path: job_state.host_workspace.clone(),
         }
     }
 }
