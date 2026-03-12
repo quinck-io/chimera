@@ -232,7 +232,111 @@ jobs:
           entrypoint: /bin/sh
           args: -c "apk add --no-cache netcat-openbsd && nc -z redis 6379 && echo 'Redis is reachable from docker action!'"
 
-  # ── Job 8: Needs ───────────────────────────────────────────────
+  # ── Job 8: Cache (host mode) ────────────────────────────────────
+  cache-host:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        id: cache-cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-host-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-host-
+
+      - name: Show cache result
+        run: |
+          echo "Cache hit: ${{ steps.cache-cargo.outputs.cache-hit }}"
+          echo "ACTIONS_CACHE_URL=$ACTIONS_CACHE_URL"
+
+      - name: Build (populates cache on miss)
+        run: cargo check
+
+  # ── Job 8b: Cache (host mode, second run verifies hit) ─────────
+  cache-host-verify:
+    runs-on: [self-hosted, chimera]
+    needs: cache-host
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry (should hit)
+        id: cache-cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-host-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-host-
+
+      - name: Verify cache hit
+        run: |
+          echo "Cache hit: ${{ steps.cache-cargo.outputs.cache-hit }}"
+          test "${{ steps.cache-cargo.outputs.cache-hit }}" = "true"
+
+  # ── Job 8c: Cache (container mode) ─────────────────────────────
+  cache-container:
+    runs-on: [self-hosted, chimera]
+    container:
+      image: rust:1-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        id: cache-cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: cargo-container-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-container-
+
+      - name: Show cache result
+        run: |
+          echo "Cache hit: ${{ steps.cache-cargo.outputs.cache-hit }}"
+          echo "ACTIONS_CACHE_URL=$ACTIONS_CACHE_URL"
+
+      - name: Build (populates cache on miss)
+        run: cargo check
+
+  # ── Job 8d: Cache (container mode, second run verifies hit) ────
+  cache-container-verify:
+    runs-on: [self-hosted, chimera]
+    needs: cache-container
+    container:
+      image: rust:1-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry (should hit)
+        id: cache-cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: cargo-container-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-container-
+
+      - name: Verify cache hit
+        run: |
+          echo "Cache hit: ${{ steps.cache-cargo.outputs.cache-hit }}"
+          test "${{ steps.cache-cargo.outputs.cache-hit }}" = "true"
+
+  # ── Job 9: Needs ───────────────────────────────────────────────
   setup:
     runs-on: [self-hosted, chimera]
     outputs:
