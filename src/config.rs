@@ -12,8 +12,10 @@ use crate::cache::config::CacheConfig;
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct ChimeraConfig {
-    pub daemon: Option<DaemonConfig>,
-    pub cache: Option<CacheConfig>,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
     #[serde(default)]
     pub runners: Vec<String>,
 }
@@ -24,6 +26,15 @@ pub struct DaemonConfig {
     pub log_format: String,
     #[serde(default = "default_shutdown_timeout")]
     pub shutdown_timeout_secs: u64,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            log_format: default_log_format(),
+            shutdown_timeout_secs: default_shutdown_timeout(),
+        }
+    }
 }
 
 fn default_shutdown_timeout() -> u64 {
@@ -157,6 +168,12 @@ pub fn default_root() -> PathBuf {
 }
 
 pub fn load_config(path: &Path) -> Result<ChimeraConfig> {
+    if !path.exists() {
+        let config = ChimeraConfig::default();
+        save_config(path, &config)
+            .with_context(|| format!("writing default config to {}", path.display()))?;
+        return Ok(config);
+    }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config from {}", path.display()))?;
     let config: ChimeraConfig =

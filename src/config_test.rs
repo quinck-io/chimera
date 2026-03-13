@@ -58,10 +58,10 @@ fn config_load_save_roundtrip() {
     let config_path = tmp.path().join("config.toml");
 
     let config = ChimeraConfig {
-        daemon: Some(DaemonConfig {
+        daemon: DaemonConfig {
             log_format: "json".into(),
             shutdown_timeout_secs: 300,
-        }),
+        },
         runners: vec!["runner-0".into(), "runner-1".into()],
         ..Default::default()
     };
@@ -71,7 +71,32 @@ fn config_load_save_roundtrip() {
 
     assert_eq!(loaded.runners.len(), 2);
     assert_eq!(loaded.runners[0], "runner-0");
-    assert_eq!(loaded.daemon.unwrap().log_format, "json");
+    assert_eq!(loaded.daemon.log_format, "json");
+}
+
+#[test]
+fn load_config_creates_default_file_when_missing() {
+    let tmp = TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+
+    assert!(!config_path.exists());
+    let config = load_config(&config_path).unwrap();
+    assert!(config_path.exists());
+
+    assert!(config.runners.is_empty());
+    assert_eq!(config.daemon.log_format, "text");
+    assert_eq!(config.daemon.shutdown_timeout_secs, 300);
+    assert_eq!(config.cache.max_gb, 10);
+    assert_eq!(config.cache.cache_port, 9999);
+
+    // Verify the written file contains all sections
+    let contents = std::fs::read_to_string(&config_path).unwrap();
+    assert!(contents.contains("[daemon]"));
+    assert!(contents.contains("[cache]"));
+    assert!(contents.contains("log_format"));
+    assert!(contents.contains("shutdown_timeout_secs"));
+    assert!(contents.contains("max_gb"));
+    assert!(contents.contains("cache_port"));
 }
 
 #[test]

@@ -109,7 +109,6 @@ async fn unregister_removes_files() {
     std::fs::write(runner_dir.join("credentials.json"), "{}").unwrap();
 
     let config = ChimeraConfig {
-        daemon: None,
         runners: vec!["test-runner".into(), "other-runner".into()],
         ..Default::default()
     };

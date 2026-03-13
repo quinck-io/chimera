@@ -75,19 +75,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             labels,
             root,
         } => {
-            init_tracing(None);
+            init_tracing(&DaemonConfig::default());
             crate::github::registration::register(&url, &token, &name, &labels, &root).await
         }
 
         Command::Unregister { name, root } => {
-            init_tracing(None);
+            init_tracing(&DaemonConfig::default());
             crate::github::registration::unregister(&name, &root).await
         }
 
         Command::Start { root } => {
             let paths = ChimeraPaths::new(root);
             let config = load_config(&paths.config_file()).context("loading config")?;
-            init_tracing(config.daemon.as_ref());
+            init_tracing(&config.daemon);
             run_start(paths, config).await
         }
 
@@ -171,12 +171,12 @@ fn run_status(root: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(daemon_config: Option<&DaemonConfig>) {
+fn init_tracing(daemon_config: &DaemonConfig) {
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let use_json = daemon_config.is_some_and(|c| c.log_format == "json");
+    let use_json = daemon_config.log_format == "json";
 
     if use_json {
         tracing_subscriber::fmt()

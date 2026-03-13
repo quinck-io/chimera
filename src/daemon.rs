@@ -214,7 +214,7 @@ impl Daemon {
         let _pid_lock = PidLock::acquire(&self.paths.pid_file()).context("acquiring PID lock")?;
 
         // Start cache server if configured
-        let cache_config = self.config.cache.clone().unwrap_or_default();
+        let cache_config = self.config.cache.clone();
         let cache_manager = Arc::new(
             CacheManager::new(
                 self.paths.cache_entries_dir(),
@@ -300,12 +300,7 @@ impl Daemon {
             warn!(error = %e, "failed to write initial state file");
         }
 
-        let shutdown_timeout = self
-            .config
-            .daemon
-            .as_ref()
-            .map(|d| d.shutdown_timeout_secs)
-            .unwrap_or(300);
+        let shutdown_timeout = self.config.daemon.shutdown_timeout_secs;
 
         info!(runners = started, "daemon started");
 
