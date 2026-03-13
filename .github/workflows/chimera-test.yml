@@ -358,3 +358,111 @@ jobs:
       - name: Check needs result
         if: needs.setup.result == 'success'
         run: echo "Setup job succeeded as expected"
+
+  # ── Job 10: Expression syntax coverage ─────────────────────────────
+  expressions:
+    runs-on: [self-hosted, chimera]
+    needs: [setup, basics]
+    steps:
+      # -- Wildcard: needs.*.result --
+      - name: "Wildcard: contains(needs.*.result, 'success')"
+        run: |
+          echo "All upstream results: ${{ toJSON(needs.*.result) }}"
+          test "${{ contains(needs.*.result, 'success') }}" = "true"
+
+      - name: "Wildcard: no failure in upstream jobs"
+        run: test "${{ contains(needs.*.result, 'failure') }}" = "false"
+
+      # -- Bracket notation --
+      - name: "Bracket notation: needs['setup'].result"
+        run: test "${{ needs['setup'].result }}" = "success"
+
+      - name: "Bracket notation: needs['setup'].outputs['greeting']"
+        run: test "${{ needs['setup'].outputs['greeting'] }}" = "hello from setup"
+
+      # -- Case-insensitive functions --
+      - name: "Case-insensitive: toJson()"
+        run: echo "${{ toJson(needs.setup.result) }}"
+
+      - name: "Case-insensitive: CONTAINS()"
+        run: test "${{ CONTAINS('Hello World', 'hello') }}" = "true"
+
+      - name: "Case-insensitive: startswith()"
+        run: test "${{ startswith('Hello', 'hel') }}" = "true"
+
+      - name: "Case-insensitive: EndsWith()"
+        run: test "${{ EndsWith('Hello', 'llo') }}" = "true"
+
+      # -- toJSON on objects/arrays --
+      - name: "toJSON on object"
+        run: |
+          json='${{ toJSON(needs.setup) }}'
+          echo "$json" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['result']=='success'"
+
+      - name: "toJSON on wildcard array"
+        run: |
+          json='${{ toJSON(needs.*.result) }}'
+          echo "$json" | python3 -c "import sys,json; d=json.load(sys.stdin); assert isinstance(d, list)"
+
+      # -- join on arrays --
+      - name: "join(needs.*.result, ', ')"
+        run: |
+          joined="${{ join(needs.*.result, ', ') }}"
+          echo "Joined: $joined"
+          echo "$joined" | grep -q "success"
+
+      - name: "join with default separator"
+        run: |
+          joined="${{ join(needs.*.result) }}"
+          echo "Joined: $joined"
+          echo "$joined" | grep -q ","
+
+      # -- Hex and scientific number literals --
+      - name: "Hex literal: 0xFF == 255"
+        run: test "${{ 0xFF == 255 }}" = "true"
+
+      - name: "Scientific notation: 1e3 == 1000"
+        run: test "${{ 1e3 == 1000 }}" = "true"
+
+      # -- vars context (will be empty/null if no vars configured) --
+      - name: "vars context: missing var is empty"
+        run: test -z "${{ vars.NONEXISTENT_VAR }}"
+
+      # -- Existing syntax still works --
+      - name: "Comparison operators"
+        run: |
+          test "${{ 42 > 10 }}" = "true"
+          test "${{ 10 <= 10 }}" = "true"
+          test "${{ 10 != 20 }}" = "true"
+
+      - name: "Boolean logic"
+        run: |
+          test "${{ true && true }}" = "true"
+          test "${{ false || true }}" = "true"
+          test "${{ !false }}" = "true"
+
+      - name: "String functions"
+        run: |
+          test "${{ contains('Hello World', 'world') }}" = "true"
+          test "${{ startsWith('foobar', 'foo') }}" = "true"
+          test "${{ endsWith('foobar', 'bar') }}" = "true"
+
+      - name: "format() function"
+        run: |
+          result="${{ format('Hello {0}, you are {1}!', 'World', 'great') }}"
+          test "$result" = "Hello World, you are great!"
+
+      - name: "Null is falsy"
+        run: test "${{ null || 'fallback' }}" = "fallback"
+
+      - name: "Parentheses grouping"
+        run: test "${{ (true || false) && true }}" = "true"
+
+      # -- Complex real-world patterns --
+      - name: "Real-world: always() && contains(needs.*.result, 'success')"
+        if: always() && contains(needs.*.result, 'success')
+        run: echo "Conditional with wildcard works"
+
+      - name: "Real-world: !contains(needs.*.result, 'failure')"
+        if: "!contains(needs.*.result, 'failure')"
+        run: echo "No failures detected via wildcard"
