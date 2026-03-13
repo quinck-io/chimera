@@ -2,9 +2,16 @@ use super::token::Token;
 use super::value::Value;
 
 #[derive(Debug)]
+pub(crate) enum PropertySegment {
+    Dot(String),
+    Bracket(Box<Expr>),
+    Wildcard,
+}
+
+#[derive(Debug)]
 pub(crate) enum Expr {
     Literal(Value),
-    Property(Vec<String>),
+    Property(Vec<PropertySegment>),
     Call(String, Vec<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
@@ -138,31 +145,62 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_property_or_call(&mut self) -> Result<Expr, String> {
-        let mut parts = Vec::new();
+        let mut segments = Vec::new();
         if let Some(Token::Ident(name)) = self.advance().cloned() {
-            parts.push(name);
+            segments.push(PropertySegment::Dot(name));
         } else {
             return Err("expected identifier".into());
         }
 
-        while self.peek() == Some(&Token::Dot) {
-            self.advance();
-            match self.advance().cloned() {
-                Some(Token::Ident(name)) => parts.push(name),
-                Some(Token::Num(n)) => {
-                    parts.push(if n == (n as i64) as f64 {
-                        (n as i64).to_string()
-                    } else {
-                        n.to_string()
-                    });
+        loop {
+            match self.peek() {
+                Some(Token::Dot) => {
+                    self.advance();
+                    match self.peek().cloned() {
+                        Some(Token::Star) => {
+                            self.advance();
+                            segments.push(PropertySegment::Wildcard);
+                        }
+                        Some(Token::Ident(name)) => {
+                            self.advance();
+                            segments.push(PropertySegment::Dot(name));
+                        }
+                        Some(Token::Num(n)) => {
+                            self.advance();
+                            segments.push(PropertySegment::Dot(if n == (n as i64) as f64 {
+                                (n as i64).to_string()
+                            } else {
+                                n.to_string()
+                            }));
+                        }
+                        other => {
+                            return Err(format!(
+                                "expected identifier or '*' after '.', got {other:?}"
+                            ));
+                        }
+                    }
                 }
-                other => return Err(format!("expected identifier after '.', got {other:?}")),
+                Some(Token::LBracket) => {
+                    self.advance();
+                    let expr = self.parse_or()?;
+                    self.expect(&Token::RBracket)?;
+                    segments.push(PropertySegment::Bracket(Box::new(expr)));
+                }
+                _ => break,
             }
         }
 
+        // If followed by '(' it's a function call — join Dot segments as name
         if self.peek() == Some(&Token::LParen) {
             self.advance();
-            let func_name = parts.join(".");
+            let func_name: String = segments
+                .iter()
+                .filter_map(|s| match s {
+                    PropertySegment::Dot(name) => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(".");
             let mut args = Vec::new();
             if self.peek() != Some(&Token::RParen) {
                 args.push(self.parse_or()?);
@@ -174,7 +212,7 @@ impl<'a> Parser<'a> {
             self.expect(&Token::RParen)?;
             Ok(Expr::Call(func_name, args))
         } else {
-            Ok(Expr::Property(parts))
+            Ok(Expr::Property(segments))
         }
     }
 }

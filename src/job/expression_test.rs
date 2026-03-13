@@ -955,3 +955,504 @@ fn find_closing_braces_skips_braces_inside_strings() {
         Some(53)
     );
 }
+
+// ── Wildcard ────────────────────────────────────────────────────────
+
+fn ctx_with_json(data: &serde_json::Value) -> ExprContext<'_> {
+    static EMPTY_MAP: std::sync::LazyLock<HashMap<String, String>> =
+        std::sync::LazyLock::new(HashMap::new);
+    static EMPTY_STEPS: std::sync::LazyLock<HashMap<String, HashMap<String, String>>> =
+        std::sync::LazyLock::new(HashMap::new);
+    static EMPTY_OUTCOMES: std::sync::LazyLock<HashMap<String, StepOutcome>> =
+        std::sync::LazyLock::new(HashMap::new);
+
+    ExprContext {
+        env: &EMPTY_MAP,
+        secrets: &EMPTY_MAP,
+        step_outputs: &EMPTY_STEPS,
+        step_outcomes: &EMPTY_OUTCOMES,
+        context_data: data,
+        job_failed: false,
+        job_cancelled: false,
+        workspace_path: None,
+    }
+}
+
+#[test]
+fn wildcard_needs_star_result() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "success" },
+            "test": { "result": "failure" },
+            "lint": { "result": "success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    let result = parse_and_eval("needs.*.result", &ctx).unwrap();
+    match &result {
+        Value::Array(items) => {
+            let mut strs: Vec<String> = items.iter().map(|v| v.to_display()).collect();
+            strs.sort();
+            assert_eq!(strs, vec!["failure", "success", "success"]);
+        }
+        _ => panic!("expected Array, got {result:?}"),
+    }
+}
+
+#[test]
+fn wildcard_needs_star_outputs_key() {
+    let data = serde_json::json!({
+        "needs": {
+            "setup": { "outputs": { "version": "1.0" } },
+            "config": { "outputs": { "version": "2.0" } }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    let result = parse_and_eval("needs.*.outputs.version", &ctx).unwrap();
+    match &result {
+        Value::Array(items) => {
+            let mut strs: Vec<String> = items.iter().map(|v| v.to_display()).collect();
+            strs.sort();
+            assert_eq!(strs, vec!["1.0", "2.0"]);
+        }
+        _ => panic!("expected Array, got {result:?}"),
+    }
+}
+
+// ── contains on arrays ──────────────────────────────────────────────
+
+#[test]
+fn contains_array_with_failure() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "success" },
+            "test": { "result": "failure" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert!(
+        parse_and_eval("contains(needs.*.result, 'failure')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+#[test]
+fn contains_array_without_failure() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "success" },
+            "test": { "result": "success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert!(
+        !parse_and_eval("contains(needs.*.result, 'failure')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+#[test]
+fn contains_array_case_insensitive() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "Success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert!(
+        parse_and_eval("contains(needs.*.result, 'success')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+// ── Bracket notation ────────────────────────────────────────────────
+
+#[test]
+fn bracket_notation_needs() {
+    let data = serde_json::json!({
+        "needs": {
+            "my-job": { "result": "success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("needs['my-job'].result", &ctx)
+            .unwrap()
+            .to_display(),
+        "success"
+    );
+}
+
+#[test]
+fn bracket_notation_steps() {
+    let env = HashMap::new();
+    let secrets = HashMap::new();
+    let mut step_outputs = HashMap::new();
+    step_outputs.insert(
+        "my-step".into(),
+        HashMap::from([("key".into(), "value123".into())]),
+    );
+    let null_json = serde_json::json!({});
+    let empty_outcomes = HashMap::new();
+
+    let ctx = ExprContext {
+        env: &env,
+        secrets: &secrets,
+        step_outputs: &step_outputs,
+        step_outcomes: &empty_outcomes,
+        context_data: &null_json,
+        job_failed: false,
+        job_cancelled: false,
+        workspace_path: None,
+    };
+
+    assert_eq!(
+        resolve_expression("${{ steps['my-step'].outputs.key }}", &ctx),
+        "value123"
+    );
+}
+
+#[test]
+fn bracket_notation_matrix() {
+    let data = serde_json::json!({
+        "matrix": {
+            "os": "ubuntu-latest"
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("matrix['os']", &ctx).unwrap().to_display(),
+        "ubuntu-latest"
+    );
+}
+
+#[test]
+fn bracket_notation_numeric_index() {
+    let data = serde_json::json!({
+        "matrix": {
+            "include": ["a", "b", "c"]
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("matrix.include[0]", &ctx)
+            .unwrap()
+            .to_display(),
+        "a"
+    );
+    assert_eq!(
+        parse_and_eval("matrix.include[2]", &ctx)
+            .unwrap()
+            .to_display(),
+        "c"
+    );
+}
+
+// ── Case-insensitive functions ──────────────────────────────────────
+
+#[test]
+fn function_tojson_lowercase() {
+    let ctx = empty_ctx();
+    let result = parse_and_eval("toJson('hello')", &ctx)
+        .unwrap()
+        .to_display();
+    assert_eq!(result, "\"hello\"");
+}
+
+#[test]
+fn function_contains_uppercase() {
+    let ctx = empty_ctx();
+    assert!(
+        parse_and_eval("CONTAINS('Hello World', 'hello')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+#[test]
+fn function_startswith_mixed_case() {
+    let ctx = empty_ctx();
+    assert!(
+        parse_and_eval("startswith('Hello', 'hel')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+#[test]
+fn function_endswith_mixed_case() {
+    let ctx = empty_ctx();
+    assert!(
+        parse_and_eval("EndsWith('Hello', 'llo')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+// ── toJSON on objects/arrays ────────────────────────────────────────
+
+#[test]
+fn tojson_object() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    let result = parse_and_eval("toJSON(needs.build)", &ctx)
+        .unwrap()
+        .to_display();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["result"], "success");
+}
+
+#[test]
+fn tojson_array() {
+    let data = serde_json::json!({
+        "needs": {
+            "a": { "result": "success" },
+            "b": { "result": "failure" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    let result = parse_and_eval("toJSON(needs.*.result)", &ctx)
+        .unwrap()
+        .to_display();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert!(parsed.is_array());
+}
+
+// ── join on arrays ──────────────────────────────────────────────────
+
+#[test]
+fn join_array_value() {
+    let data = serde_json::json!({
+        "needs": {
+            "a": { "result": "success" },
+            "b": { "result": "failure" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    let result = parse_and_eval("join(needs.*.result, ', ')", &ctx)
+        .unwrap()
+        .to_display();
+    // Order depends on JSON map iteration
+    assert!(result.contains("success"));
+    assert!(result.contains("failure"));
+    assert!(result.contains(", "));
+}
+
+#[test]
+fn join_array_default_separator() {
+    let data = serde_json::json!({
+        "needs": {
+            "a": { "result": "x" },
+            "b": { "result": "y" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    let result = parse_and_eval("join(needs.*.result)", &ctx)
+        .unwrap()
+        .to_display();
+    assert!(result.contains(","));
+}
+
+// ── Hex / scientific numbers ────────────────────────────────────────
+
+#[test]
+fn hex_number_literal() {
+    let ctx = empty_ctx();
+    assert!(parse_and_eval("0xFF == 255", &ctx).unwrap().is_truthy());
+}
+
+#[test]
+fn hex_number_uppercase() {
+    let ctx = empty_ctx();
+    assert!(parse_and_eval("0XA0 == 160", &ctx).unwrap().is_truthy());
+}
+
+#[test]
+fn scientific_notation() {
+    let ctx = empty_ctx();
+    assert!(parse_and_eval("1e3 == 1000", &ctx).unwrap().is_truthy());
+}
+
+#[test]
+fn scientific_notation_negative_exponent() {
+    let ctx = empty_ctx();
+    // 5e-1 = 0.5
+    assert!(parse_and_eval("5e-1 == 0.5", &ctx).unwrap().is_truthy());
+}
+
+#[test]
+fn scientific_notation_positive_sign() {
+    let ctx = empty_ctx();
+    assert!(parse_and_eval("1E+2 == 100", &ctx).unwrap().is_truthy());
+}
+
+// ── vars context ────────────────────────────────────────────────────
+
+#[test]
+fn vars_lookup() {
+    let data = serde_json::json!({
+        "vars": {
+            "MY_VAR": "hello"
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("vars.MY_VAR", &ctx).unwrap().to_display(),
+        "hello"
+    );
+}
+
+#[test]
+fn vars_missing_is_null() {
+    let ctx = empty_ctx();
+    assert_eq!(parse_and_eval("vars.NOPE", &ctx).unwrap().to_display(), "");
+}
+
+#[test]
+fn vars_bracket_notation() {
+    let data = serde_json::json!({
+        "vars": {
+            "my-var": "world"
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("vars['my-var']", &ctx).unwrap().to_display(),
+        "world"
+    );
+}
+
+// ── Value::Array / Object truthiness ────────────────────────────────
+
+#[test]
+fn array_is_truthy() {
+    let data = serde_json::json!({
+        "needs": {
+            "a": { "result": "success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert!(parse_and_eval("needs.*.result", &ctx).unwrap().is_truthy());
+}
+
+#[test]
+fn empty_array_is_truthy() {
+    // Even an empty array is truthy in GitHub Actions
+    let val = Value::Array(vec![]);
+    assert!(val.is_truthy());
+}
+
+// ── Full workflow expression patterns ───────────────────────────────
+
+#[test]
+fn workflow_pattern_any_job_failed() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "success" },
+            "test": { "result": "failure" },
+            "lint": { "result": "success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert!(
+        parse_and_eval("contains(needs.*.result, 'failure')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+#[test]
+fn workflow_pattern_all_jobs_succeeded() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "success" },
+            "test": { "result": "success" }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert!(
+        parse_and_eval("!contains(needs.*.result, 'failure')", &ctx)
+            .unwrap()
+            .is_truthy()
+    );
+}
+
+#[test]
+fn workflow_pattern_needs_bracket_and_wildcard() {
+    let data = serde_json::json!({
+        "needs": {
+            "my-job": {
+                "result": "success",
+                "outputs": { "version": "3.0" }
+            }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("needs['my-job'].result", &ctx)
+            .unwrap()
+            .to_display(),
+        "success"
+    );
+    assert_eq!(
+        parse_and_eval("needs['my-job'].outputs.version", &ctx)
+            .unwrap()
+            .to_display(),
+        "3.0"
+    );
+}
+
+#[test]
+fn workflow_pattern_condition_with_wildcard() {
+    let data = serde_json::json!({
+        "needs": {
+            "build": { "result": "success" },
+            "test": { "result": "failure" }
+        }
+    });
+
+    let env = HashMap::new();
+    let secrets = HashMap::new();
+    let step_outputs = HashMap::new();
+    let empty_outcomes = HashMap::new();
+    let ctx = ExprContext {
+        env: &env,
+        secrets: &secrets,
+        step_outputs: &step_outputs,
+        step_outcomes: &empty_outcomes,
+        context_data: &data,
+        job_failed: false,
+        job_cancelled: false,
+        workspace_path: None,
+    };
+
+    assert!(evaluate_condition(
+        Some("always() && contains(needs.*.result, 'failure')"),
+        &ctx,
+    ));
+}

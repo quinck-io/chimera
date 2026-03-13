@@ -3,13 +3,13 @@ use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use super::ExprContext;
-use super::parser::{BinOp, Expr};
+use super::parser::{BinOp, Expr, PropertySegment};
 use super::value::Value;
 
 pub(crate) fn eval(expr: &Expr, ctx: &ExprContext) -> Result<Value, String> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
-        Expr::Property(parts) => resolve_property(parts, ctx),
+        Expr::Property(segments) => resolve_property(segments, ctx),
         Expr::Call(name, args) => eval_function(name, args, ctx),
         Expr::Binary(op, left, right) => eval_binary(op, left, right, ctx),
         Expr::Not(inner) => {
@@ -20,7 +20,6 @@ pub(crate) fn eval(expr: &Expr, ctx: &ExprContext) -> Result<Value, String> {
 }
 
 fn eval_binary(op: &BinOp, left: &Expr, right: &Expr, ctx: &ExprContext) -> Result<Value, String> {
-    // Short-circuit for && and ||
     match op {
         BinOp::And => {
             let l = eval(left, ctx)?;
@@ -72,25 +71,48 @@ fn eval_binary(op: &BinOp, left: &Expr, right: &Expr, ctx: &ExprContext) -> Resu
 
 // ── Property resolution ─────────────────────────────────────────────
 
-fn resolve_property(parts: &[String], ctx: &ExprContext) -> Result<Value, String> {
-    if parts.is_empty() {
+fn segment_to_key(seg: &PropertySegment, ctx: &ExprContext) -> Result<String, String> {
+    match seg {
+        PropertySegment::Dot(name) => Ok(name.clone()),
+        PropertySegment::Bracket(expr) => {
+            let val = eval(expr, ctx)?;
+            Ok(val.to_display())
+        }
+        PropertySegment::Wildcard => Err("wildcard cannot be used as a key".into()),
+    }
+}
+
+fn resolve_property(segments: &[PropertySegment], ctx: &ExprContext) -> Result<Value, String> {
+    if segments.is_empty() {
         return Ok(Value::Null);
     }
 
-    let rest = &parts[1..];
+    let root = match &segments[0] {
+        PropertySegment::Dot(name) => name.as_str(),
+        _ => return Ok(Value::Null),
+    };
+    let rest = &segments[1..];
 
-    match parts[0].as_str() {
+    match root {
         "github" => {
-            if let Some(key) = rest.first() {
+            // Try env lookup for the first key
+            if let Some(seg) = rest.first()
+                && let Ok(key) = segment_to_key(seg, ctx)
+            {
                 let env_key = format!("GITHUB_{}", key.to_uppercase().replace(['.', '-'], "_"));
                 if let Some(val) = ctx.env.get(&env_key) {
-                    return Ok(Value::String(val.clone()));
+                    if rest.len() == 1 {
+                        return Ok(Value::String(val.clone()));
+                    }
+                    return Ok(Value::Null);
                 }
             }
-            resolve_json_path(ctx.context_data, parts)
+            walk_json(ctx.context_data, segments, ctx)
         }
         "runner" => {
-            if let Some(key) = rest.first() {
+            if let Some(seg) = rest.first()
+                && let Ok(key) = segment_to_key(seg, ctx)
+            {
                 let env_key = format!("RUNNER_{}", key.to_uppercase().replace(['.', '-'], "_"));
                 if let Some(val) = ctx.env.get(&env_key) {
                     return Ok(Value::String(val.clone()));
@@ -99,15 +121,20 @@ fn resolve_property(parts: &[String], ctx: &ExprContext) -> Result<Value, String
             Ok(Value::Null)
         }
         "env" => {
-            let key = rest.first().map(|s| s.as_str()).unwrap_or("");
+            let key = rest
+                .first()
+                .map(|s| segment_to_key(s, ctx))
+                .transpose()?
+                .unwrap_or_default();
             Ok(ctx
                 .env
-                .get(key)
+                .get(&key)
                 .map(|v| Value::String(v.clone()))
                 .unwrap_or(Value::Null))
         }
         "inputs" => {
-            if let Some(key) = rest.first() {
+            if let Some(seg) = rest.first() {
+                let key = segment_to_key(seg, ctx)?;
                 let env_key = format!("INPUT_{}", key.to_uppercase().replace([' ', '-'], "_"));
                 Ok(Value::String(
                     ctx.env.get(&env_key).cloned().unwrap_or_default(),
@@ -117,67 +144,122 @@ fn resolve_property(parts: &[String], ctx: &ExprContext) -> Result<Value, String
             }
         }
         "secrets" => {
-            let key = rest.first().map(|s| s.as_str()).unwrap_or("");
+            let key = rest
+                .first()
+                .map(|s| segment_to_key(s, ctx))
+                .transpose()?
+                .unwrap_or_default();
             Ok(ctx
                 .secrets
-                .get(key)
+                .get(&key)
                 .map(|v| Value::String(v.clone()))
                 .unwrap_or(Value::Null))
         }
-        "steps" => {
-            if rest.len() < 2 {
-                return Ok(Value::Null);
+        "steps" => resolve_steps(rest, ctx),
+        "vars" => {
+            if let Some(seg) = rest.first() {
+                let key = segment_to_key(seg, ctx)?;
+                if let Some(vars) = ctx.context_data.get("vars")
+                    && let Some(val) = vars.get(&key)
+                {
+                    return Ok(json_to_value(val));
+                }
             }
-            let step_id = rest[0].as_str();
-            let field = rest[1].as_str();
-
-            match field {
-                "outputs" if rest.len() >= 3 => Ok(ctx
-                    .step_outputs
-                    .get(step_id)
-                    .and_then(|m| m.get(rest[2].as_str()))
-                    .map(|v| Value::String(v.clone()))
-                    .unwrap_or(Value::Null)),
-                "outcome" => Ok(ctx
-                    .step_outcomes
-                    .get(step_id)
-                    .map(|s| Value::String(s.outcome.clone()))
-                    .unwrap_or(Value::Null)),
-                "conclusion" => Ok(ctx
-                    .step_outcomes
-                    .get(step_id)
-                    .map(|s| Value::String(s.conclusion.clone()))
-                    .unwrap_or(Value::Null)),
-                _ => Ok(Value::Null),
-            }
+            Ok(Value::Null)
         }
-        "needs" | "matrix" | "strategy" | "job" => resolve_json_path(ctx.context_data, parts),
+        "needs" | "matrix" | "strategy" | "job" => walk_json(ctx.context_data, segments, ctx),
         _ => {
-            debug!(context = parts[0].as_str(), "unknown expression context");
+            debug!(context = root, "unknown expression context");
             Ok(Value::Null)
         }
     }
 }
 
-fn resolve_json_path(data: &JsonValue, parts: &[String]) -> Result<Value, String> {
-    let mut current = data;
-    for part in parts {
-        match current {
-            JsonValue::Object(map) => match map.get(part.as_str()) {
-                Some(v) => current = v,
-                None => return Ok(Value::Null),
-            },
-            JsonValue::Array(arr) => match part.parse::<usize>() {
-                Ok(idx) => match arr.get(idx) {
-                    Some(v) => current = v,
-                    None => return Ok(Value::Null),
+fn resolve_steps(rest: &[PropertySegment], ctx: &ExprContext) -> Result<Value, String> {
+    if rest.len() < 2 {
+        return Ok(Value::Null);
+    }
+    let step_id = segment_to_key(&rest[0], ctx)?;
+    let field = segment_to_key(&rest[1], ctx)?;
+
+    match field.as_str() {
+        "outputs" if rest.len() >= 3 => {
+            let output_key = segment_to_key(&rest[2], ctx)?;
+            Ok(ctx
+                .step_outputs
+                .get(&step_id)
+                .and_then(|m| m.get(&output_key))
+                .map(|v| Value::String(v.clone()))
+                .unwrap_or(Value::Null))
+        }
+        "outcome" => Ok(ctx
+            .step_outcomes
+            .get(&step_id)
+            .map(|s| Value::String(s.outcome.clone()))
+            .unwrap_or(Value::Null)),
+        "conclusion" => Ok(ctx
+            .step_outcomes
+            .get(&step_id)
+            .map(|s| Value::String(s.conclusion.clone()))
+            .unwrap_or(Value::Null)),
+        _ => Ok(Value::Null),
+    }
+}
+
+/// Walk a JSON tree following PropertySegments, supporting wildcards.
+fn walk_json(
+    data: &JsonValue,
+    segments: &[PropertySegment],
+    ctx: &ExprContext,
+) -> Result<Value, String> {
+    walk_json_inner(data, segments, ctx)
+}
+
+fn walk_json_inner(
+    current: &JsonValue,
+    segments: &[PropertySegment],
+    ctx: &ExprContext,
+) -> Result<Value, String> {
+    if segments.is_empty() {
+        return Ok(json_to_value(current));
+    }
+
+    let seg = &segments[0];
+    let rest = &segments[1..];
+
+    match seg {
+        PropertySegment::Wildcard => {
+            // Fan out over all children, collect results
+            let children: Vec<&JsonValue> = match current {
+                JsonValue::Object(map) => map.values().collect(),
+                JsonValue::Array(arr) => arr.iter().collect(),
+                _ => return Ok(Value::Null),
+            };
+            let mut results = Vec::new();
+            for child in children {
+                let val = walk_json_inner(child, rest, ctx)?;
+                results.push(val);
+            }
+            Ok(Value::Array(results))
+        }
+        _ => {
+            let key = segment_to_key(seg, ctx)?;
+            match current {
+                JsonValue::Object(map) => match map.get(&key) {
+                    Some(v) => walk_json_inner(v, rest, ctx),
+                    None => Ok(Value::Null),
                 },
-                Err(_) => return Ok(Value::Null),
-            },
-            _ => return Ok(Value::Null),
+                JsonValue::Array(arr) => match key.parse::<usize>() {
+                    Ok(idx) => match arr.get(idx) {
+                        Some(v) => walk_json_inner(v, rest, ctx),
+                        None => Ok(Value::Null),
+                    },
+                    Err(_) => Ok(Value::Null),
+                },
+                _ => Ok(Value::Null),
+            }
         }
     }
-    Ok(json_to_value(current))
 }
 
 fn json_to_value(v: &JsonValue) -> Value {
@@ -186,32 +268,51 @@ fn json_to_value(v: &JsonValue) -> Value {
         JsonValue::Number(n) => Value::Number(n.as_f64().unwrap_or(0.0)),
         JsonValue::Bool(b) => Value::Bool(*b),
         JsonValue::Null => Value::Null,
-        other => Value::String(other.to_string()),
+        JsonValue::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
+        JsonValue::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect(),
+        ),
     }
 }
 
 // ── Built-in Functions ──────────────────────────────────────────────
 
 fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, String> {
+    // Status functions are not case-insensitive (always lowercase in practice)
     match name {
-        "success" => Ok(Value::Bool(!ctx.job_failed && !ctx.job_cancelled)),
-        "failure" => Ok(Value::Bool(ctx.job_failed)),
-        "always" => Ok(Value::Bool(true)),
-        "cancelled" => Ok(Value::Bool(ctx.job_cancelled)),
+        "success" => return Ok(Value::Bool(!ctx.job_failed && !ctx.job_cancelled)),
+        "failure" => return Ok(Value::Bool(ctx.job_failed)),
+        "always" => return Ok(Value::Bool(true)),
+        "cancelled" => return Ok(Value::Bool(ctx.job_cancelled)),
+        _ => {}
+    }
 
+    match name.to_ascii_lowercase().as_str() {
         "contains" => {
             check_args(name, args, 2)?;
-            let haystack = eval(&args[0], ctx)?.to_display().to_lowercase();
+            let haystack = eval(&args[0], ctx)?;
             let needle = eval(&args[1], ctx)?.to_display().to_lowercase();
-            Ok(Value::Bool(haystack.contains(&needle)))
+            match haystack {
+                Value::Array(items) => Ok(Value::Bool(
+                    items
+                        .iter()
+                        .any(|item| item.to_display().to_lowercase() == needle),
+                )),
+                other => {
+                    let h = other.to_display().to_lowercase();
+                    Ok(Value::Bool(h.contains(&needle)))
+                }
+            }
         }
-        "startsWith" => {
+        "startswith" => {
             check_args(name, args, 2)?;
             let s = eval(&args[0], ctx)?.to_display().to_lowercase();
             let prefix = eval(&args[1], ctx)?.to_display().to_lowercase();
             Ok(Value::Bool(s.starts_with(&prefix)))
         }
-        "endsWith" => {
+        "endswith" => {
             check_args(name, args, 2)?;
             let s = eval(&args[0], ctx)?.to_display().to_lowercase();
             let suffix = eval(&args[1], ctx)?.to_display().to_lowercase();
@@ -226,7 +327,6 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
                 let val = eval(arg, ctx)?.to_display();
                 result = result.replace(&format!("{{{i}}}"), &val);
             }
-            // Unescape doubled braces: {{ → { and }} → }
             result = result.replace("{{", "{").replace("}}", "}");
             Ok(Value::String(result))
         }
@@ -234,34 +334,44 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
             if args.is_empty() || args.len() > 2 {
                 return Err("join() requires 1-2 arguments".into());
             }
-            let val = eval(&args[0], ctx)?.to_display();
+            let val = eval(&args[0], ctx)?;
             let sep = if args.len() == 2 {
                 eval(&args[1], ctx)?.to_display()
             } else {
                 ",".into()
             };
-            if let Ok(JsonValue::Array(arr)) = serde_json::from_str::<JsonValue>(&val) {
-                let items: Vec<String> = arr
-                    .iter()
-                    .map(|v| match v {
-                        JsonValue::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .collect();
-                Ok(Value::String(items.join(&sep)))
-            } else {
-                Ok(Value::String(val))
+            match val {
+                Value::Array(items) => {
+                    let strs: Vec<String> = items.iter().map(|v| v.to_display()).collect();
+                    Ok(Value::String(strs.join(&sep)))
+                }
+                other => {
+                    let s = other.to_display();
+                    // Backward compat: try parsing as JSON array
+                    if let Ok(JsonValue::Array(arr)) = serde_json::from_str::<JsonValue>(&s) {
+                        let items: Vec<String> = arr
+                            .iter()
+                            .map(|v| match v {
+                                JsonValue::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .collect();
+                        Ok(Value::String(items.join(&sep)))
+                    } else {
+                        Ok(Value::String(s))
+                    }
+                }
             }
         }
-        "toJSON" => {
+        "tojson" => {
             check_args(name, args, 1)?;
             let val = eval(&args[0], ctx)?;
-            Ok(Value::String(match &val {
-                Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| s.clone()),
-                other => other.to_display(),
-            }))
+            let json_val = val.to_json();
+            let pretty =
+                serde_json::to_string_pretty(&json_val).unwrap_or_else(|_| val.to_display());
+            Ok(Value::String(pretty))
         }
-        "fromJSON" => {
+        "fromjson" => {
             check_args(name, args, 1)?;
             let s = eval(&args[0], ctx)?.to_display();
             match serde_json::from_str::<JsonValue>(&s) {
@@ -269,14 +379,11 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
                 Err(_) => Ok(Value::String(s)),
             }
         }
-        "hashFiles" => {
+        "hashfiles" => {
             if args.is_empty() {
                 return Err("hashFiles() requires at least 1 argument".into());
             }
 
-            // Use the explicit workspace path (host filesystem) if available,
-            // falling back to GITHUB_WORKSPACE from env. In container mode,
-            // GITHUB_WORKSPACE points to a container path that doesn't exist on the host.
             let workspace_ref;
             let workspace = if let Some(ref wp) = ctx.workspace_path {
                 wp.as_str()
