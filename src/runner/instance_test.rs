@@ -1,11 +1,15 @@
-use super::*;
-use crate::config::ChimeraPaths;
-use crate::github::auth::TokenManager;
-use crate::github::broker::BrokerClient;
-use rsa::RsaPrivateKey;
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::watch;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use crate::config::ChimeraPaths;
+use crate::github::auth::TokenManager;
+use crate::github::broker::{BrokerClient, MessageType};
+
+use super::*;
 
 async fn setup() -> (MockServer, Arc<TokenManager>, watch::Sender<bool>) {
     let mock_server = MockServer::start().await;
@@ -19,7 +23,7 @@ async fn setup() -> (MockServer, Arc<TokenManager>, watch::Sender<bool>) {
         .mount(&mock_server)
         .await;
 
-    let private_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    let private_key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
 
     let tm = Arc::new(TokenManager::new(
         reqwest::Client::new(),
@@ -36,7 +40,7 @@ async fn setup() -> (MockServer, Arc<TokenManager>, watch::Sender<bool>) {
 fn make_runner() -> Runner {
     Runner {
         name: "test-runner".into(),
-        credentials: RunnerCredentials {
+        credentials: crate::config::RunnerCredentials {
             info: crate::config::RunnerInfo {
                 agent_id: 1,
                 agent_name: "test".into(),
@@ -114,8 +118,6 @@ async fn poll_loop_skips_control_then_returns_job() {
         .mount(&mock_server)
         .await;
 
-    // Control messages are no longer deleted (they're ephemeral)
-
     Mock::given(method("GET"))
         .and(path("/message"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -126,7 +128,6 @@ async fn poll_loop_skips_control_then_returns_job() {
         .mount(&mock_server)
         .await;
 
-    // Mock DELETE for the job message (RunnerJobRequest gets deleted)
     Mock::given(method("DELETE"))
         .and(path("/message/2"))
         .respond_with(ResponseTemplate::new(200))
@@ -177,7 +178,6 @@ async fn poll_loop_shutdown_returns_none() {
 async fn poll_loop_backoff_on_error() {
     let (mock_server, tm, shutdown_tx) = setup().await;
 
-    // First request: 500 error
     Mock::given(method("GET"))
         .and(path("/message"))
         .respond_with(ResponseTemplate::new(500).set_body_string("error"))
@@ -185,7 +185,6 @@ async fn poll_loop_backoff_on_error() {
         .mount(&mock_server)
         .await;
 
-    // Second request (after backoff): 202 → then shutdown
     Mock::given(method("GET"))
         .and(path("/message"))
         .respond_with(ResponseTemplate::new(202))
@@ -225,7 +224,6 @@ async fn poll_loop_refreshes_token_on_401() {
         .mount(&mock_server)
         .await;
 
-    // After token refresh, return 202
     Mock::given(method("GET"))
         .and(path("/message"))
         .respond_with(ResponseTemplate::new(202))
@@ -242,72 +240,5 @@ async fn poll_loop_refreshes_token_on_401() {
     let runner = make_runner();
     let mut rx = shutdown_tx.subscribe();
     let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
-    // After 401 → invalidate → retry → 202 (None) → return Ok(None)
     assert!(result.is_none());
-}
-
-#[tokio::test]
-async fn cancel_poller_triggers_token_on_cancellation() {
-    let (mock_server, tm, _shutdown_tx) = setup().await;
-
-    // First poll: return a JobCancellation message
-    Mock::given(method("GET"))
-        .and(path("/message"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "messageId": 42,
-            "messageType": "JobCancellation",
-            "body": "{\"jobId\": \"job-123\"}"
-        })))
-        .expect(1)
-        .mount(&mock_server)
-        .await;
-
-    let broker = BrokerClient::new(
-        reqwest::Client::new(),
-        mock_server.uri(),
-        "session-123".into(),
-        tm,
-    );
-
-    let cancel_token = CancellationToken::new();
-    let handle = spawn_cancel_poller(&broker, cancel_token.clone());
-
-    // Wait for the poller to trigger
-    tokio::time::timeout(Duration::from_secs(5), cancel_token.cancelled())
-        .await
-        .expect("cancel token should be triggered within 5s");
-
-    assert!(cancel_token.is_cancelled());
-    let _ = handle.await;
-}
-
-#[tokio::test]
-async fn cancel_poller_stops_when_token_cancelled_externally() {
-    let (mock_server, tm, _shutdown_tx) = setup().await;
-
-    // Return 202 (no messages) indefinitely
-    Mock::given(method("GET"))
-        .and(path("/message"))
-        .respond_with(ResponseTemplate::new(202))
-        .mount(&mock_server)
-        .await;
-
-    let broker = BrokerClient::new(
-        reqwest::Client::new(),
-        mock_server.uri(),
-        "session-123".into(),
-        tm,
-    );
-
-    let cancel_token = CancellationToken::new();
-    let handle = spawn_cancel_poller(&broker, cancel_token.clone());
-
-    // Cancel externally (simulating job finished normally)
-    cancel_token.cancel();
-
-    // Poller should exit promptly
-    tokio::time::timeout(Duration::from_secs(5), handle)
-        .await
-        .expect("poller should exit within 5s")
-        .expect("poller task should not panic");
 }
