@@ -160,10 +160,10 @@ fn make_unsafe_tarball(files: &[(&str, &[u8])]) -> Vec<u8> {
         tar_bytes.extend_from_slice(content);
         // Pad to 512-byte boundary
         let padding = (512 - (content.len() % 512)) % 512;
-        tar_bytes.extend(std::iter::repeat(0u8).take(padding));
+        tar_bytes.extend(std::iter::repeat_n(0u8, padding));
     }
     // End-of-archive: two 512-byte blocks of zeros
-    tar_bytes.extend(std::iter::repeat(0u8).take(1024));
+    tar_bytes.extend(std::iter::repeat_n(0u8, 1024));
 
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&tar_bytes).unwrap();

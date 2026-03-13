@@ -239,6 +239,7 @@ async fn run_nested_script(
             log_sender,
             timeout,
             cancel_token,
+            job_state.debug_enabled,
         )
         .await;
     }

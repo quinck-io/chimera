@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -13,7 +12,7 @@ use tracing::{debug, warn};
 
 use super::build_action_inputs;
 use super::metadata::ActionMetadata;
-use crate::docker::exec::process_output_line;
+use crate::docker::output::OutputProcessor;
 use crate::docker::resources::{JobDockerResources, stop_and_remove};
 use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env};
 use crate::job::expression::ExprContext;
@@ -307,6 +306,7 @@ async fn run_docker_container(params: RunDockerParams<'_>) -> Result<StepResult>
         params.job_state,
         params.log_sender,
         params.cancel_token,
+        params.job_state.debug_enabled,
     )
     .await;
 
@@ -358,6 +358,7 @@ async fn start_and_stream_logs(
     job_state: &mut JobState,
     log_sender: &LogSender,
     cancel_token: &CancellationToken,
+    debug_enabled: bool,
 ) -> Result<StepResult> {
     docker
         .start_container::<String>(container_id, None)
@@ -366,18 +367,11 @@ async fn start_and_stream_logs(
 
     let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
 
-    let collected_env = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let collected_paths = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
-    let collected_outputs = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let collected_state = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let processor =
+        OutputProcessor::new(log_sender.clone(), job_state.masks.clone(), debug_enabled);
 
     let stream_task = {
-        let sender = log_sender.clone();
-        let masks = job_state.masks.clone();
-        let env_buf = collected_env.clone();
-        let path_buf = collected_paths.clone();
-        let output_buf = collected_outputs.clone();
-        let state_buf = collected_state.clone();
+        let processor = processor.clone();
         let docker = docker.clone();
         let cid = container_id.to_string();
 
@@ -394,16 +388,7 @@ async fn start_and_stream_logs(
             while let Some(Ok(output)) = stream.next().await {
                 let text = output.to_string();
                 for line in text.lines() {
-                    process_output_line(
-                        line,
-                        &sender,
-                        &masks,
-                        &env_buf,
-                        &path_buf,
-                        &output_buf,
-                        &state_buf,
-                    )
-                    .await;
+                    processor.process_line(line).await;
                 }
             }
         })
@@ -433,14 +418,7 @@ async fn start_and_stream_logs(
         return Ok(StepResult { conclusion });
     }
 
-    apply_collected_mutations(
-        job_state,
-        &collected_env,
-        &collected_paths,
-        &collected_outputs,
-        &collected_state,
-    )
-    .await;
+    processor.apply_to_job_state(job_state).await;
 
     let exit_code = docker
         .inspect_container(container_id, None)
@@ -457,31 +435,6 @@ async fn start_and_stream_logs(
             StepConclusion::Failed
         },
     })
-}
-
-async fn apply_collected_mutations(
-    job_state: &mut JobState,
-    env_buf: &Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
-    path_buf: &Arc<tokio::sync::Mutex<Vec<String>>>,
-    output_buf: &Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
-    state_buf: &Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
-) {
-    for (k, v) in env_buf.lock().await.drain(..) {
-        job_state.env.insert(k, v);
-    }
-    job_state
-        .path_prepends
-        .extend(path_buf.lock().await.drain(..));
-    for (k, v) in output_buf.lock().await.drain(..) {
-        job_state.outputs.insert(k, v);
-    }
-    for (k, v) in state_buf.lock().await.drain(..) {
-        job_state
-            .action_states
-            .entry(String::new())
-            .or_default()
-            .insert(k, v);
-    }
 }
 
 // ── Utilities ───────────────────────────────────────────────────

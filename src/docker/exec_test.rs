@@ -1,4 +1,13 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+
 use super::*;
+use crate::job::execute::{JobState, StepConclusion};
+use crate::job::logs::LogSender;
 
 /// Integration test: requires Docker daemon running.
 #[tokio::test]
@@ -48,6 +57,7 @@ async fn exec_echo_in_container() {
         &sender,
         Duration::from_secs(30),
         &CancellationToken::new(),
+        false,
     )
     .await
     .unwrap();
@@ -115,6 +125,7 @@ async fn exec_failing_command() {
         &sender,
         Duration::from_secs(30),
         &CancellationToken::new(),
+        false,
     )
     .await
     .unwrap();

@@ -64,9 +64,15 @@ shutdown_timeout_secs = 300
 - Step conditions, timeouts, `continue-on-error`, cancellation
 - Per-job Docker network, port mapping, volumes, `--privileged`/`--cap-add`
 - Live log streaming, job outputs, heartbeats
-- Multi-runner concurrency with independent error isolation
+- Support for `actions/cache/v4`
 
-## Unsupported features
+Chimera-only features:
+- Multi-runner concurrency with independent error isolation
+- Local `actions/cache` server for faster caching and no external dependencies
+- Automatic cleanup of old workspaces, containers and orphaned processes
+- Configurable LRU cache (default 10GB)
+
+## Out of scope or unsupported features
 
 - GHES (GitHub Enterprise Server)
 - Windows — not in scope but may work (untested)

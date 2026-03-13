@@ -297,13 +297,22 @@ async fn handle_download(
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
 
+    let metadata = match tokio::fs::metadata(&blob_path).await {
+        Ok(m) => m,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let content_length = metadata.len().to_string();
+
     match tokio::fs::File::open(&blob_path).await {
         Ok(file) => {
             let stream = tokio_util::io::ReaderStream::new(file);
             let body = Body::from_stream(stream);
             (
                 StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+                    (axum::http::header::CONTENT_LENGTH, content_length.as_str()),
+                ],
                 body,
             )
                 .into_response()

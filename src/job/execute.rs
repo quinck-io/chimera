@@ -21,7 +21,7 @@ use super::logs::{LogSender, StepLogger};
 use super::schema::{JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
-use crate::docker::exec::process_output_line;
+use crate::docker::output::OutputProcessor;
 use crate::docker::resources::JobDockerResources;
 use crate::utils::{format_results_timestamp, format_timeline_timestamp};
 
@@ -55,6 +55,9 @@ pub struct JobState {
     /// Host filesystem workspace path for hashFiles(). In container mode, GITHUB_WORKSPACE
     /// points to the container path (/github/workspace) but file operations need the real path.
     pub host_workspace: Option<String>,
+    /// Whether `::debug::` workflow commands should be emitted to the log stream.
+    /// Only true when the `ACTIONS_STEP_DEBUG` secret is set to `"true"`.
+    pub debug_enabled: bool,
 }
 
 impl JobState {
@@ -63,6 +66,9 @@ impl JobState {
         secrets: HashMap<String, String>,
         context_data: serde_json::Value,
     ) -> Self {
+        let debug_enabled = secrets
+            .get("ACTIONS_STEP_DEBUG")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
         Self {
             env: HashMap::new(),
             path_prepends: Vec::new(),
@@ -74,6 +80,7 @@ impl JobState {
             secrets,
             context_data,
             host_workspace: None,
+            debug_enabled,
         }
     }
 }
@@ -301,6 +308,7 @@ pub async fn run_container_step(
         "running container step"
     );
 
+    let debug_enabled = job_state.debug_enabled;
     let result = crate::docker::exec::docker_exec(
         docker_resources.docker(),
         container_id,
@@ -311,6 +319,7 @@ pub async fn run_container_step(
         log_sender,
         timeout,
         cancel_token,
+        debug_enabled,
     )
     .await;
 
@@ -351,20 +360,13 @@ pub async fn run_process(
     let stdout = child.stdout.take().context("no stdout")?;
     let stderr = child.stderr.take().context("no stderr")?;
 
-    let collected_env = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let collected_paths = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
-    let collected_outputs = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let collected_state = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
-
-    let stdout_task = spawn_stdout_reader(
-        stdout,
+    let processor = OutputProcessor::new(
         log_sender.clone(),
         job_state.masks.clone(),
-        collected_env.clone(),
-        collected_paths.clone(),
-        collected_outputs.clone(),
-        collected_state.clone(),
+        job_state.debug_enabled,
     );
+
+    let stdout_task = spawn_stdout_reader(stdout, processor.clone());
 
     let stderr_sender = log_sender.clone();
     let stderr_task = tokio::spawn(async move {
@@ -405,23 +407,7 @@ pub async fn run_process(
         }
     };
 
-    // Apply collected state mutations
-    for (k, v) in collected_env.lock().await.drain(..) {
-        job_state.env.insert(k, v);
-    }
-    job_state
-        .path_prepends
-        .extend(collected_paths.lock().await.drain(..));
-    for (k, v) in collected_outputs.lock().await.drain(..) {
-        job_state.outputs.insert(k, v);
-    }
-    for (k, v) in collected_state.lock().await.drain(..) {
-        job_state
-            .action_states
-            .entry(String::new())
-            .or_default()
-            .insert(k, v);
-    }
+    processor.apply_to_job_state(job_state).await;
 
     let conclusion = if status.success() {
         StepConclusion::Succeeded
@@ -486,27 +472,13 @@ pub fn build_step_env(
 /// Spawn a task that reads stdout, parses workflow commands, and forwards log lines.
 fn spawn_stdout_reader(
     stdout: tokio::process::ChildStdout,
-    sender: LogSender,
-    masks: Arc<RwLock<Vec<String>>>,
-    env_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
-    path_buf: Arc<tokio::sync::Mutex<Vec<String>>>,
-    output_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
-    state_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
+    processor: OutputProcessor,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            process_output_line(
-                &line,
-                &sender,
-                &masks,
-                &env_buf,
-                &path_buf,
-                &output_buf,
-                &state_buf,
-            )
-            .await;
+            processor.process_line(&line).await;
         }
     })
 }
