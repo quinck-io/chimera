@@ -389,6 +389,11 @@ jobs:
           echo "Cache hit: ${{ steps.cache-cargo.outputs.cache-hit }}"
           test "${{ steps.cache-cargo.outputs.cache-hit }}" = "true"
 
+      - name: Verify restored content exists
+        run: |
+          test -d ~/.cargo/registry
+          echo "Cargo registry directory restored"
+
   # ── Job 8c: Cache (container mode) ─────────────────────────────
   cache-container:
     runs-on: [self-hosted, chimera]
@@ -442,6 +447,11 @@ jobs:
         run: |
           echo "Cache hit: ${{ steps.cache-cargo.outputs.cache-hit }}"
           test "${{ steps.cache-cargo.outputs.cache-hit }}" = "true"
+
+      - name: Verify restored content exists
+        run: |
+          test -d /usr/local/cargo/registry
+          echo "Cargo registry directory restored"
 
   # ── Job 9: Needs ───────────────────────────────────────────────
   setup:
