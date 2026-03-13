@@ -150,6 +150,11 @@ impl JobDockerResources {
                 .await
                 .with_context(|| format!("creating service container {container_name}"))?;
 
+            // Track immediately so cleanup can remove it even if start/health check fails
+            self.service_container_ids.push(container.id.clone());
+            self.service_container_map
+                .insert(alias.clone(), container.id.clone());
+
             self.docker
                 .start_container::<String>(&container.id, None)
                 .await
@@ -189,10 +194,6 @@ impl JobDockerResources {
                 alias = %alias,
                 "service container started"
             );
-
-            self.service_container_map
-                .insert(alias.clone(), container.id.clone());
-            self.service_container_ids.push(container.id);
         }
 
         // Start job container (if present)
@@ -306,6 +307,9 @@ impl JobDockerResources {
                 .await
                 .with_context(|| format!("creating job container {container_name}"))?;
 
+            // Track immediately so cleanup can remove it even if start fails
+            self.job_container_id = Some(container.id.clone());
+
             self.docker
                 .start_container::<String>(&container.id, None)
                 .await
@@ -316,8 +320,6 @@ impl JobDockerResources {
                 image = %spec.image,
                 "job container started"
             );
-
-            self.job_container_id = Some(container.id);
 
             // Store path mappings for host→container remapping
             self.path_mappings = vec![

@@ -224,7 +224,7 @@ jobs:
       redis:
         image: redis:7-alpine
         ports:
-          - 6379:6379
+          - 6380:6379
     steps:
       - name: Docker action on service network
         uses: docker://alpine:3.19
@@ -247,7 +247,7 @@ jobs:
       redis:
         image: redis:7-alpine
         ports:
-          - 6379:6379
+          - 6381:6379
         options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 5
     steps:
       - name: Services are healthy (postgres)
@@ -258,7 +258,7 @@ jobs:
 
       - name: Services are healthy (redis)
         run: |
-          command -v redis-cli > /dev/null 2>&1 && redis-cli -h localhost -p 6379 ping || echo "redis-cli not available, skipping direct check"
+          command -v redis-cli > /dev/null 2>&1 && redis-cli -h localhost -p 6381 ping || echo "redis-cli not available, skipping direct check"
           echo "Redis service started and healthy"
 
       - name: "job.status is success"
@@ -297,7 +297,7 @@ jobs:
       redis:
         image: redis:7-alpine
         ports:
-          - 6379:6379
+          - 6382:6379
         options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 5
     steps:
       - name: "job.status is success"
