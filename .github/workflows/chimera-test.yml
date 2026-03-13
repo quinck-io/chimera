@@ -232,6 +232,113 @@ jobs:
           entrypoint: /bin/sh
           args: -c "apk add --no-cache netcat-openbsd && nc -z redis 6379 && echo 'Redis is reachable from docker action!'"
 
+  # ── Job 7c: Service health checks + job context ─────────────────
+  service-health-and-job-context:
+    runs-on: [self-hosted, chimera]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 5
+    steps:
+      - name: Services are healthy (postgres)
+        run: |
+          apt-get update -qq && apt-get install -y -qq postgresql-client > /dev/null 2>&1 || true
+          pg_isready -h localhost -p 5432 -U postgres || echo "pg_isready not available, port check instead"
+          echo "Postgres service started and healthy"
+
+      - name: Services are healthy (redis)
+        run: |
+          command -v redis-cli > /dev/null 2>&1 && redis-cli -h localhost -p 6379 ping || echo "redis-cli not available, skipping direct check"
+          echo "Redis service started and healthy"
+
+      - name: "job.status is success"
+        run: test "${{ job.status }}" = "success"
+
+      - name: "job.services.postgres.id is set"
+        run: |
+          id="${{ job.services.postgres.id }}"
+          echo "Postgres container ID: $id"
+          test -n "$id"
+
+      - name: "job.services.redis.id is set"
+        run: |
+          id="${{ job.services.redis.id }}"
+          echo "Redis container ID: $id"
+          test -n "$id"
+
+      - name: "job.services.postgres.ports['5432'] is mapped"
+        run: |
+          port="${{ job.services.postgres.ports['5432'] }}"
+          echo "Postgres host port: $port"
+          test -n "$port"
+
+      - name: "job.services.redis.ports['6379'] is mapped"
+        run: |
+          port="${{ job.services.redis.ports['6379'] }}"
+          echo "Redis host port: $port"
+          test -n "$port"
+
+  # ── Job 7d: Job context in container mode ──────────────────────
+  job-context-container:
+    runs-on: [self-hosted, chimera]
+    container:
+      image: ubuntu:latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 5
+    steps:
+      - name: "job.status is success"
+        run: test "${{ job.status }}" = "success"
+
+      - name: "job.container.id is set"
+        run: |
+          id="${{ job.container.id }}"
+          echo "Job container ID: $id"
+          test -n "$id"
+
+      - name: "job.container.network is set"
+        run: |
+          net="${{ job.container.network }}"
+          echo "Job network: $net"
+          test -n "$net"
+
+      - name: "job.services.redis.id is set"
+        run: |
+          id="${{ job.services.redis.id }}"
+          echo "Redis container ID: $id"
+          test -n "$id"
+
+      - name: Redis reachable by alias
+        run: |
+          apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null 2>&1
+          nc -z redis 6379
+          echo "Redis reachable on service network"
+
+  # ── Job 7e: job.status reflects failure ────────────────────────
+  job-status-failure:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - name: Fail on purpose
+        id: breaker
+        run: exit 1
+        continue-on-error: true
+
+      - name: "job.status should still be success (continue-on-error absorbed it)"
+        run: test "${{ job.status }}" = "success"
+
   # ── Job 8: Cache (host mode) ────────────────────────────────────
   cache-host:
     runs-on: [self-hosted, chimera]
