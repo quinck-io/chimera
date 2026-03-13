@@ -32,30 +32,6 @@ fn parse_port_bindings_empty() {
 }
 
 #[test]
-fn apply_options_privileged() {
-    let mut hc = HostConfig::default();
-    apply_options(&mut hc, Some("--privileged"));
-    assert_eq!(hc.privileged, Some(true));
-}
-
-#[test]
-fn apply_options_cap_add() {
-    let mut hc = HostConfig::default();
-    apply_options(&mut hc, Some("--cap-add SYS_PTRACE --cap-add NET_ADMIN"));
-    assert_eq!(
-        hc.cap_add.as_deref(),
-        Some(&["SYS_PTRACE".to_string(), "NET_ADMIN".to_string()] as &[String])
-    );
-}
-
-#[test]
-fn apply_options_empty() {
-    let mut hc = HostConfig::default();
-    apply_options(&mut hc, None);
-    assert_eq!(hc.privileged, None);
-}
-
-#[test]
 fn remap_to_container_path_works() {
     use std::path::PathBuf;
     let docker = bollard::Docker::connect_with_http_defaults().expect("create bollard HTTP client");
@@ -235,9 +211,14 @@ async fn setup_and_cleanup_with_service() {
         "service should have an IP: {:?}",
         resources.service_addresses()
     );
+    assert!(
+        resources.service_container_map().contains_key("web"),
+        "service should have a container ID mapping"
+    );
 
     resources.cleanup().await;
 
     assert!(resources.job_container_id().is_none());
     assert!(resources.service_addresses().is_empty());
+    assert!(resources.service_container_map().is_empty());
 }

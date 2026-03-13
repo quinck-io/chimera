@@ -78,6 +78,61 @@ impl JobState {
     }
 }
 
+/// Build the `job` context object for expression evaluation.
+/// Contains `status`, and optionally `container` and `services` when Docker is in use.
+fn build_job_context(docker_resources: Option<&JobDockerResources>) -> serde_json::Value {
+    let mut job = serde_json::json!({
+        "status": "success"
+    });
+
+    if let Some(resources) = docker_resources {
+        if let Some(container_id) = resources.job_container_id() {
+            let mut container = serde_json::json!({
+                "id": container_id
+            });
+            if let Some(network) = resources.network_name() {
+                container["network"] = serde_json::json!(network);
+            }
+            job["container"] = container;
+        }
+
+        let svc_map = resources.service_container_map();
+        if !svc_map.is_empty() {
+            let mut services = serde_json::Map::new();
+            for (alias, container_id) in svc_map {
+                let mut svc = serde_json::json!({
+                    "id": container_id
+                });
+                if let Some(network) = resources.network_name() {
+                    svc["network"] = serde_json::json!(network);
+                }
+                if let Some(ports) = resources.service_ports().get(alias) {
+                    svc["ports"] = serde_json::json!(ports);
+                }
+                services.insert(alias.clone(), svc);
+            }
+            job["services"] = serde_json::Value::Object(services);
+        }
+    }
+
+    job
+}
+
+/// Update `context_data["job"]["status"]` based on current job state.
+fn update_job_status(context_data: &mut serde_json::Value, failed: bool, cancelled: bool) {
+    let status = if cancelled {
+        "cancelled"
+    } else if failed {
+        "failure"
+    } else {
+        "success"
+    };
+
+    if let Some(job) = context_data.get_mut("job") {
+        job["status"] = serde_json::json!(status);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StepConclusion {
     Succeeded,
@@ -499,6 +554,11 @@ pub async fn run_all_steps(
 
     let mut job_state = JobState::new(masks.clone(), secrets, manifest.context_data.clone());
 
+    // Populate the `job` context for expression evaluation
+    if let serde_json::Value::Object(ref mut map) = job_state.context_data {
+        map.insert("job".to_string(), build_job_context(docker_resources));
+    }
+
     // In container mode, GITHUB_WORKSPACE points to /github/workspace (container path).
     // hashFiles() runs on the host and needs the real filesystem path.
     if docker_resources
@@ -562,6 +622,7 @@ pub async fn run_all_steps(
                 .position(|t| t.id == pre_step.id)
                 .context("pre step tracker not found")?;
 
+            update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
             if !super::expression::evaluate_condition(pre_step.condition.as_deref(), &condition_ctx)
             {
@@ -692,6 +753,7 @@ pub async fn run_all_steps(
 
         // Check condition before starting the step — skipped steps get no
         // logs and are reported as completed immediately.
+        update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
         let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
         if !super::expression::evaluate_condition(step.condition.as_deref(), &condition_ctx) {
             debug!(step = %step.display_name, "skipping step (condition not met)");
@@ -894,6 +956,7 @@ pub async fn run_all_steps(
                 .position(|t| t.id == post_step.id)
                 .context("post step tracker not found")?;
 
+            update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
             if !super::expression::evaluate_condition(
                 post_step.condition.as_deref(),

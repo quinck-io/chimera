@@ -579,3 +579,38 @@ fn step_is_script_detection() {
     };
     assert!(!action_step.is_script());
 }
+
+#[test]
+fn build_job_context_no_docker() {
+    let ctx = build_job_context(None);
+    assert_eq!(ctx["status"], "success");
+    assert!(ctx.get("container").is_none());
+    assert!(ctx.get("services").is_none());
+}
+
+#[test]
+fn update_job_status_transitions() {
+    let mut data = serde_json::json!({
+        "job": { "status": "success" }
+    });
+
+    // Initially success
+    update_job_status(&mut data, false, false);
+    assert_eq!(data["job"]["status"], "success");
+
+    // After failure
+    update_job_status(&mut data, true, false);
+    assert_eq!(data["job"]["status"], "failure");
+
+    // Cancelled takes priority
+    update_job_status(&mut data, true, true);
+    assert_eq!(data["job"]["status"], "cancelled");
+
+    // Cancelled without failure
+    update_job_status(&mut data, false, true);
+    assert_eq!(data["job"]["status"], "cancelled");
+
+    // Back to success
+    update_job_status(&mut data, false, false);
+    assert_eq!(data["job"]["status"], "success");
+}

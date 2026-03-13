@@ -1,19 +1,25 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
+    Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
+    StopContainerOptions,
 };
-use bollard::models::{EndpointSettings, HostConfig, PortBinding};
-use tracing::{debug, info, warn};
+use bollard::models::{EndpointSettings, HealthStatusEnum, HostConfig, PortBinding};
+use futures::StreamExt;
+use tracing::{debug, error, info, warn};
 
 use super::client::ensure_image;
 use super::container::{JobContainerSpec, ServiceContainerSpec};
 use super::network::{create_job_network, get_network_gateway, remove_network};
+use super::options::parse_options;
 
 const STOP_TIMEOUT_SECS: i64 = 5;
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(300);
+const HEALTH_CHECK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Parameters for setting up Docker resources for a job.
 pub struct SetupParams<'a> {
@@ -36,6 +42,10 @@ pub struct JobDockerResources {
     job_container_id: Option<String>,
     service_container_ids: Vec<String>,
     service_addresses: HashMap<String, String>,
+    /// Service alias → container ID mapping for `job.services.<alias>.id`.
+    service_container_map: HashMap<String, String>,
+    /// Service alias → { container_port → host_port } for `job.services.<alias>.ports`.
+    service_ports: HashMap<String, HashMap<String, String>>,
     /// Host→container path mappings for remapping paths when running inside the container.
     path_mappings: Vec<(PathBuf, String)>,
     /// Path to the node binary inside the container (if mounted from host).
@@ -54,6 +64,8 @@ impl JobDockerResources {
             job_container_id: None,
             service_container_ids: Vec::new(),
             service_addresses: HashMap::new(),
+            service_container_map: HashMap::new(),
+            service_ports: HashMap::new(),
             path_mappings: Vec::new(),
             node_container_path: None,
             host_gateway_ip: None,
@@ -90,6 +102,7 @@ impl JobDockerResources {
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();
 
+            let opts = parse_options(svc.options.as_deref());
             let mut host_config = HostConfig {
                 network_mode: Some(network_name.clone()),
                 port_bindings: if port_bindings.is_empty() {
@@ -105,11 +118,13 @@ impl JobDockerResources {
                 security_opt: Some(vec!["no-new-privileges:true".into()]),
                 ..Default::default()
             };
-            apply_options(&mut host_config, svc.options.as_deref());
+            opts.apply_to_host_config(&mut host_config);
 
             let config = Config {
                 image: Some(svc.image.as_str()),
                 env: Some(env_list.iter().map(|s| s.as_str()).collect()),
+                healthcheck: opts.health_check.clone(),
+                user: opts.user.as_deref(),
                 host_config: Some(host_config),
                 networking_config: Some(bollard::container::NetworkingConfig {
                     endpoints_config: HashMap::from([(
@@ -140,7 +155,11 @@ impl JobDockerResources {
                 .await
                 .with_context(|| format!("starting service container {container_name}"))?;
 
-            // Get the container's IP on the bridge network
+            if opts.health_check.is_some() {
+                wait_for_healthy(&self.docker, &container.id, &container_name).await?;
+            }
+
+            // Get the container's IP and port mappings
             let inspect = self
                 .docker
                 .inspect_container(&container.id, None)
@@ -158,6 +177,12 @@ impl JobDockerResources {
                 self.service_addresses.insert(alias.clone(), ip.clone());
             }
 
+            // Extract port mappings (container_port → host_port)
+            let port_map = extract_port_mappings(&inspect);
+            if !port_map.is_empty() {
+                self.service_ports.insert(alias.clone(), port_map);
+            }
+
             info!(
                 container = %container_name,
                 image = %svc.image,
@@ -165,6 +190,8 @@ impl JobDockerResources {
                 "service container started"
             );
 
+            self.service_container_map
+                .insert(alias.clone(), container.id.clone());
             self.service_container_ids.push(container.id);
         }
 
@@ -236,6 +263,7 @@ impl JobDockerResources {
 
             let port_bindings = parse_port_bindings(&spec.ports);
 
+            let opts = parse_options(spec.options.as_deref());
             let mut host_config = HostConfig {
                 network_mode: Some(network_name.clone()),
                 binds: Some(binds),
@@ -247,12 +275,14 @@ impl JobDockerResources {
                 security_opt: Some(vec!["no-new-privileges:true".into()]),
                 ..Default::default()
             };
-            apply_options(&mut host_config, spec.options.as_deref());
+            opts.apply_to_host_config(&mut host_config);
 
             let config = Config {
                 image: Some(spec.image.as_str()),
                 cmd: Some(vec!["tail", "-f", "/dev/null"]),
                 env: Some(env_list.iter().map(|s| s.as_str()).collect()),
+                healthcheck: opts.health_check.clone(),
+                user: opts.user.as_deref(),
                 host_config: Some(host_config),
                 working_dir: Some("/github/workspace"),
                 networking_config: Some(bollard::container::NetworkingConfig {
@@ -336,6 +366,8 @@ impl JobDockerResources {
         }
 
         self.service_addresses.clear();
+        self.service_container_map.clear();
+        self.service_ports.clear();
     }
 
     pub fn job_container_id(&self) -> Option<&str> {
@@ -344,6 +376,14 @@ impl JobDockerResources {
 
     pub fn service_addresses(&self) -> &HashMap<String, String> {
         &self.service_addresses
+    }
+
+    pub fn service_container_map(&self) -> &HashMap<String, String> {
+        &self.service_container_map
+    }
+
+    pub fn service_ports(&self) -> &HashMap<String, HashMap<String, String>> {
+        &self.service_ports
     }
 
     pub fn docker(&self) -> &Docker {
@@ -408,45 +448,155 @@ pub(crate) async fn stop_and_remove(docker: &Docker, container_id: &str, label: 
     }
 }
 
-/// Apply user-specified `--options` string to host config.
-/// Supports common flags like `--privileged`, `--cap-add`, `--cpus`, `--memory`.
-fn apply_options(host_config: &mut HostConfig, options: Option<&str>) {
-    let options = match options {
-        Some(o) if !o.is_empty() => o,
-        _ => return,
+/// Wait for a container's health check to report healthy.
+async fn wait_for_healthy(docker: &Docker, container_id: &str, container_name: &str) -> Result<()> {
+    info!(container = %container_name, "waiting for health check");
+    let deadline = tokio::time::Instant::now() + HEALTH_CHECK_TIMEOUT;
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            log_container_tail(docker, container_id, container_name).await;
+            bail!(
+                "health check timed out after {:?} for {container_name}",
+                HEALTH_CHECK_TIMEOUT
+            );
+        }
+
+        let inspect = docker
+            .inspect_container(container_id, None)
+            .await
+            .with_context(|| format!("inspecting container {container_name} for health check"))?;
+
+        let health_status = inspect
+            .state
+            .as_ref()
+            .and_then(|s| s.health.as_ref())
+            .and_then(|h| h.status.as_ref());
+
+        // Check if the container has exited first
+        let running = inspect
+            .state
+            .as_ref()
+            .and_then(|s| s.running)
+            .unwrap_or(false);
+        if !running {
+            let exit_code = inspect
+                .state
+                .as_ref()
+                .and_then(|s| s.exit_code)
+                .unwrap_or(-1);
+            log_container_tail(docker, container_id, container_name).await;
+            log_health_check_results(&inspect, container_name);
+            bail!(
+                "container {container_name} exited (code {exit_code}) while waiting for health check"
+            );
+        }
+
+        match health_status {
+            Some(HealthStatusEnum::HEALTHY) => {
+                info!(container = %container_name, "health check passed");
+                return Ok(());
+            }
+            // UNHEALTHY during startup is normal — Docker marks containers UNHEALTHY
+            // after the first failed probe, before all retries are exhausted. The
+            // official runner keeps polling until the overall timeout elapses, so we
+            // do the same: only give up when the container exits or our deadline hits.
+            Some(HealthStatusEnum::UNHEALTHY) => {
+                debug!(container = %container_name, "health check reports unhealthy, retrying...");
+            }
+            _ => {}
+        }
+
+        debug!(container = %container_name, "health check not ready yet, polling...");
+        tokio::time::sleep(HEALTH_CHECK_POLL_INTERVAL).await;
+    }
+}
+
+/// Fetch and log the last 50 lines from a container's stdout/stderr.
+async fn log_container_tail(docker: &Docker, container_id: &str, container_name: &str) {
+    let opts = LogsOptions::<String> {
+        stdout: true,
+        stderr: true,
+        tail: "50".into(),
+        ..Default::default()
+    };
+    let mut stream = docker.logs(container_id, Some(opts));
+    let mut lines = Vec::new();
+    while let Some(Ok(chunk)) = stream.next().await {
+        let text = match &chunk {
+            LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
+                String::from_utf8_lossy(message).to_string()
+            }
+            _ => continue,
+        };
+        lines.push(text);
+    }
+    if lines.is_empty() {
+        error!(container = %container_name, "no container logs available");
+    } else {
+        error!(
+            container = %container_name,
+            logs = %lines.join(""),
+            "container logs (last 50 lines)"
+        );
+    }
+}
+
+/// Log the most recent health check probe results from container inspect.
+fn log_health_check_results(
+    inspect: &bollard::models::ContainerInspectResponse,
+    container_name: &str,
+) {
+    let Some(health_log) = inspect
+        .state
+        .as_ref()
+        .and_then(|s| s.health.as_ref())
+        .and_then(|h| h.log.as_ref())
+    else {
+        return;
+    };
+    for entry in health_log.iter().rev().take(3).rev() {
+        let output = entry.output.as_deref().unwrap_or("");
+        let exit_code = entry.exit_code.unwrap_or(-1);
+        error!(
+            container = %container_name,
+            exit_code = exit_code,
+            output = %output.trim(),
+            "health check probe result"
+        );
+    }
+}
+
+/// Extract port mappings from an inspected container.
+/// Returns a map of container_port (without /tcp suffix) → host_port.
+fn extract_port_mappings(
+    inspect: &bollard::models::ContainerInspectResponse,
+) -> HashMap<String, String> {
+    let mut port_map = HashMap::new();
+    let Some(ports) = inspect
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.ports.as_ref())
+    else {
+        return port_map;
     };
 
-    let parts: Vec<&str> = options.split_whitespace().collect();
-    let mut i = 0;
-    while i < parts.len() {
-        match parts[i] {
-            "--privileged" => {
-                host_config.privileged = Some(true);
-            }
-            "--cap-add" => {
-                if i + 1 < parts.len() {
-                    i += 1;
-                    host_config
-                        .cap_add
-                        .get_or_insert_with(Vec::new)
-                        .push(parts[i].to_string());
-                }
-            }
-            "--cap-drop" => {
-                if i + 1 < parts.len() {
-                    i += 1;
-                    host_config
-                        .cap_drop
-                        .get_or_insert_with(Vec::new)
-                        .push(parts[i].to_string());
-                }
-            }
-            _ => {
-                debug!(option = parts[i], "ignoring unrecognized container option");
+    for (container_port_key, bindings) in ports {
+        let Some(bindings) = bindings else { continue };
+        // Strip /tcp, /udp suffix: "6379/tcp" → "6379"
+        let clean_port = container_port_key
+            .split('/')
+            .next()
+            .unwrap_or(container_port_key);
+
+        for binding in bindings {
+            if let Some(host_port) = &binding.host_port {
+                port_map.insert(clean_port.to_string(), host_port.clone());
+                break; // Take the first binding
             }
         }
-        i += 1;
     }
+    port_map
 }
 
 /// Parse port binding strings like "8080:8080" or "8080:8080/tcp" into bollard format.

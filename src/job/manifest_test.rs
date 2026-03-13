@@ -534,6 +534,51 @@ fn normalize_container_fields_plain_passthrough() {
 }
 
 #[test]
+fn normalize_service_containers_env_key() {
+    // GitHub sends service container environment as "env", not "environment".
+    // The template token format uses "env" as the key name.
+    let raw = json!({
+        "plan": { "planId": "p" },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "jobServiceContainers": {
+            "type": 2,
+            "map": [
+                {
+                    "Key": { "type": 0, "lit": "postgres" },
+                    "Value": {
+                        "type": 2,
+                        "map": [
+                            { "Key": { "type": 0, "lit": "image" }, "Value": { "type": 0, "lit": "postgres:16" } },
+                            { "Key": { "type": 0, "lit": "env" }, "Value": {
+                                "type": 2,
+                                "map": [
+                                    { "Key": { "type": 0, "lit": "POSTGRES_PASSWORD" }, "Value": { "type": 0, "lit": "testpass" } },
+                                    { "Key": { "type": 0, "lit": "POSTGRES_DB" }, "Value": { "type": 0, "lit": "testdb" } }
+                                ]
+                            }}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest =
+        serde_json::from_value(normalized).expect("should deserialize");
+
+    let svcs = manifest.service_containers.as_ref().unwrap();
+    assert_eq!(svcs.len(), 1);
+    assert_eq!(svcs[0].image, "postgres:16");
+    assert_eq!(
+        svcs[0].environment.get("POSTGRES_PASSWORD").unwrap(),
+        "testpass"
+    );
+    assert_eq!(svcs[0].environment.get("POSTGRES_DB").unwrap(), "testdb");
+}
+
+#[test]
 fn normalize_job_container_as_mapping_template_token() {
     // Real GitHub manifest format: jobContainer is a type=2 mapping token
     let raw = json!({

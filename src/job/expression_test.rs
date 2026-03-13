@@ -1456,3 +1456,113 @@ fn workflow_pattern_condition_with_wildcard() {
         &ctx,
     ));
 }
+
+// ── job context ─────────────────────────────────────────────────────
+
+#[test]
+fn job_status_lookup() {
+    let data = serde_json::json!({
+        "job": {
+            "status": "success"
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("job.status", &ctx).unwrap().to_display(),
+        "success"
+    );
+}
+
+#[test]
+fn job_status_failure() {
+    let data = serde_json::json!({
+        "job": {
+            "status": "failure"
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert!(evaluate_condition(Some("job.status == 'failure'"), &ctx,));
+}
+
+#[test]
+fn job_container_id() {
+    let data = serde_json::json!({
+        "job": {
+            "status": "success",
+            "container": {
+                "id": "abc123def456",
+                "network": "chimera-net"
+            }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("job.container.id", &ctx)
+            .unwrap()
+            .to_display(),
+        "abc123def456"
+    );
+    assert_eq!(
+        parse_and_eval("job.container.network", &ctx)
+            .unwrap()
+            .to_display(),
+        "chimera-net"
+    );
+}
+
+#[test]
+fn job_services_port() {
+    let data = serde_json::json!({
+        "job": {
+            "status": "success",
+            "services": {
+                "redis": {
+                    "id": "redis-container-id",
+                    "network": "chimera-net",
+                    "ports": {
+                        "6379": "6379"
+                    }
+                }
+            }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        parse_and_eval("job.services.redis.id", &ctx)
+            .unwrap()
+            .to_display(),
+        "redis-container-id"
+    );
+    assert_eq!(
+        parse_and_eval("job.services.redis.ports['6379']", &ctx)
+            .unwrap()
+            .to_display(),
+        "6379"
+    );
+}
+
+#[test]
+fn job_services_port_numeric_bracket() {
+    let data = serde_json::json!({
+        "job": {
+            "status": "success",
+            "services": {
+                "postgres": {
+                    "id": "pg-id",
+                    "ports": { "5432": "5432" }
+                }
+            }
+        }
+    });
+    let ctx = ctx_with_json(&data);
+
+    // Numeric bracket access should also work as JSON keys are strings
+    assert_eq!(
+        resolve_expression("${{ job.services.postgres.ports['5432'] }}", &ctx),
+        "5432"
+    );
+}

@@ -379,7 +379,7 @@ fn normalize_container_spec(spec: &Value) -> Value {
         result.insert("image".into(), template_token_to_value(image));
     }
 
-    if let Some(env) = obj.get("environment") {
+    if let Some(env) = obj.get("environment").or_else(|| obj.get("env")) {
         result.insert("environment".into(), template_token_to_map(env));
     }
 
