@@ -95,6 +95,48 @@ Chimera-only features:
 - Automatic cleanup of old workspaces, containers and orphaned processes
 - Configurable LRU cache (default 10GB)
 
+## Running as a systemd service
+
+Create the unit file:
+
+```bash
+sudo tee /etc/systemd/system/chimera.service > /dev/null <<'EOF'
+[Unit]
+Description=Chimera GitHub Actions Runner
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=chimera
+ExecStart=/usr/local/bin/chimera start
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Then enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable chimera
+sudo systemctl start chimera
+```
+
+Check status and logs:
+
+```bash
+sudo systemctl status chimera
+journalctl -u chimera -f
+```
+
+> Set `log_format = "json"` in `config.toml` for structured journald output.
+
 ## Out of scope or unsupported features
 
 - GHES (GitHub Enterprise Server)
