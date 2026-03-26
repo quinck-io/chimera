@@ -4,6 +4,29 @@ Protocol-compatible GitHub Actions runner replacement, written from scratch in R
 
 Chimera is a single, fast binary that manages multiple runners concurrently. Run it as a systemd service, in a Docker container, or just in a terminal. It speaks the same registration and job execution protocol as the official runner, so it **works with any existing workflow without modification**.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/quinck-io/chimera/main/install.sh | sh
+```
+
+Or install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/quinck-io/chimera/main/install.sh | sh -s -- v0.1.0
+```
+
+Prebuilt binaries are available for Linux and macOS (x86_64 and aarch64) on the [releases page](https://github.com/quinck-io/chimera/releases).
+
+### Build from source
+
+```bash
+git clone https://github.com/quinck-io/chimera.git
+cd chimera
+cargo build --release
+# binary is at target/release/chimera
+```
+
 ## Why?
 
 Official GitHub Actions runners are slow, resource-heavy, leak memory and difficult to manage. 
@@ -77,6 +100,10 @@ Chimera-only features:
 - GHES (GitHub Enterprise Server)
 - Windows — not in scope but may work (untested)
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-MIT
+[MIT](LICENSE)

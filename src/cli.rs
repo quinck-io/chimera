@@ -9,7 +9,7 @@ use crate::config::{ChimeraConfig, ChimeraPaths, DaemonConfig, default_root, loa
 use crate::daemon::{Daemon, format_status_display, is_process_alive, read_state_file};
 
 #[derive(Parser)]
-#[command(name = "chimera", about = "GitHub Actions self-hosted runner daemon")]
+#[command(name = "chimera", about = "GitHub Actions self-hosted runner daemon", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
