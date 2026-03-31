@@ -1,4 +1,5 @@
-# chimera
+# chimera 🐉
+
 
 Protocol-compatible GitHub Actions runner replacement, written from scratch in Rust.
 
