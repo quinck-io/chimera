@@ -62,9 +62,8 @@ impl Workspace {
             format!("creating step summary file {}", step_summary_file.display())
         })?;
         // Event file starts as empty JSON object — overwritten by write_event_file()
-        std::fs::write(&event_file, "{}").with_context(|| {
-            format!("creating event file {}", event_file.display())
-        })?;
+        std::fs::write(&event_file, "{}")
+            .with_context(|| format!("creating event file {}", event_file.display()))?;
 
         Ok(Self {
             workspace_dir,
@@ -118,8 +117,7 @@ impl Workspace {
     /// Write the GitHub event payload JSON to the event file.
     /// Actions read this via GITHUB_EVENT_PATH.
     pub fn write_event_file(&self, event: &serde_json::Value) -> Result<()> {
-        let json = serde_json::to_string_pretty(event)
-            .context("serializing event payload")?;
+        let json = serde_json::to_string_pretty(event).context("serializing event payload")?;
         std::fs::write(&self.event_file, json)
             .with_context(|| format!("writing event file {}", self.event_file.display()))?;
         Ok(())
