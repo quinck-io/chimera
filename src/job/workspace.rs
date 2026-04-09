@@ -13,6 +13,7 @@ pub struct Workspace {
     output_file: PathBuf,
     state_file: PathBuf,
     step_summary_file: PathBuf,
+    event_file: PathBuf,
 }
 
 impl Workspace {
@@ -39,6 +40,7 @@ impl Workspace {
         let output_file = parent.join("_output");
         let state_file = parent.join("_state");
         let step_summary_file = parent.join("_step_summary");
+        let event_file = parent.join("_event.json");
 
         std::fs::create_dir_all(&workspace_dir)
             .with_context(|| format!("creating workspace dir {}", workspace_dir.display()))?;
@@ -59,6 +61,10 @@ impl Workspace {
         std::fs::write(&step_summary_file, "").with_context(|| {
             format!("creating step summary file {}", step_summary_file.display())
         })?;
+        // Event file starts as empty JSON object — overwritten by write_event_file()
+        std::fs::write(&event_file, "{}").with_context(|| {
+            format!("creating event file {}", event_file.display())
+        })?;
 
         Ok(Self {
             workspace_dir,
@@ -69,6 +75,7 @@ impl Workspace {
             output_file,
             state_file,
             step_summary_file,
+            event_file,
         })
     }
 
@@ -102,6 +109,20 @@ impl Workspace {
 
     pub fn step_summary_file(&self) -> &Path {
         &self.step_summary_file
+    }
+
+    pub fn event_file(&self) -> &Path {
+        &self.event_file
+    }
+
+    /// Write the GitHub event payload JSON to the event file.
+    /// Actions read this via GITHUB_EVENT_PATH.
+    pub fn write_event_file(&self, event: &serde_json::Value) -> Result<()> {
+        let json = serde_json::to_string_pretty(event)
+            .context("serializing event payload")?;
+        std::fs::write(&self.event_file, json)
+            .with_context(|| format!("writing event file {}", self.event_file.display()))?;
+        Ok(())
     }
 
     /// Read GITHUB_ENV file. Supports `KEY=VALUE` and heredoc format:

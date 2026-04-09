@@ -20,6 +20,7 @@ fn creates_all_directories() {
     assert!(ws.env_file().exists());
     assert!(ws.path_file().exists());
     assert!(ws.output_file().exists());
+    assert!(ws.event_file().exists());
 
     // Verify workspace path structure
     let ws_str = ws.workspace_dir().to_string_lossy();
@@ -62,6 +63,23 @@ fn read_path_file_one_per_line() {
 
     let paths = ws.read_path_file().unwrap();
     assert_eq!(paths, vec!["/usr/local/bin", "/opt/bin"]);
+}
+
+#[test]
+fn write_event_file_writes_json() {
+    let (_tmp, ws) = make_workspace();
+
+    let event = serde_json::json!({
+        "pull_request": {
+            "number": 42,
+            "head": { "ref": "feature-branch" }
+        }
+    });
+    ws.write_event_file(&event).unwrap();
+
+    let content = std::fs::read_to_string(ws.event_file()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(parsed["pull_request"]["number"], 42);
 }
 
 #[test]
