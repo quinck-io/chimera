@@ -293,7 +293,7 @@ impl Runner {
             .get("github")
             .and_then(|g| g.get("event"))
             .cloned()
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            .unwrap_or_default();
         workspace
             .write_event_file(&event_data)
             .context("writing event payload")?;
