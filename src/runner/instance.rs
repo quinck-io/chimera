@@ -287,6 +287,17 @@ impl Runner {
         )
         .context("creating workspace")?;
 
+        // Write the event payload so actions can read it via GITHUB_EVENT_PATH
+        let event_data = manifest
+            .context_data
+            .get("github")
+            .and_then(|g| g.get("event"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        workspace
+            .write_event_file(&event_data)
+            .context("writing event payload")?;
+
         // Ensure a node binary is available for the host platform.
         // Used by node actions in host mode; container mode downloads its own Linux binary.
         let node_path = crate::node::ensure_node(&self.paths.externals_dir())

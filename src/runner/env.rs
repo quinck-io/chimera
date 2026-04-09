@@ -41,6 +41,10 @@ pub fn build_base_env(
         "GITHUB_STEP_SUMMARY".into(),
         workspace.step_summary_file().to_string_lossy().into_owned(),
     );
+    env.insert(
+        "GITHUB_EVENT_PATH".into(),
+        workspace.event_file().to_string_lossy().into_owned(),
+    );
     env.insert("RUNNER_OS".into(), os_label().into());
     env.insert("RUNNER_ARCH".into(), arch_label().into());
     env.insert("RUNNER_NAME".into(), runner_name.into());
@@ -129,6 +133,10 @@ pub fn build_container_env(
     env.insert(
         "GITHUB_STEP_SUMMARY".into(),
         "/github/workflow/_step_summary".into(),
+    );
+    env.insert(
+        "GITHUB_EVENT_PATH".into(),
+        "/github/workflow/_event.json".into(),
     );
     env.insert("RUNNER_TEMP".into(), "/github/tmp".into());
     env.insert("RUNNER_TOOL_CACHE".into(), "/github/tool-cache".into());

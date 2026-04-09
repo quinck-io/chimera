@@ -106,6 +106,7 @@ fn sets_workspace_paths() {
     assert!(env.contains_key("GITHUB_OUTPUT"));
     assert!(env.contains_key("GITHUB_STATE"));
     assert!(env.contains_key("GITHUB_STEP_SUMMARY"));
+    assert!(env.contains_key("GITHUB_EVENT_PATH"));
 }
 
 #[test]
@@ -152,6 +153,10 @@ fn container_env_remaps_paths() {
     assert_eq!(
         env.get("GITHUB_STEP_SUMMARY").unwrap(),
         "/github/workflow/_step_summary"
+    );
+    assert_eq!(
+        env.get("GITHUB_EVENT_PATH").unwrap(),
+        "/github/workflow/_event.json"
     );
     assert_eq!(env.get("RUNNER_TEMP").unwrap(), "/github/tmp");
     assert_eq!(env.get("RUNNER_TOOL_CACHE").unwrap(), "/github/tool-cache");
