@@ -40,3 +40,6 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      - name: Run Docker integration tests
+        run: cargo test -- --ignored

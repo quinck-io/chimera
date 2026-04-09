@@ -1,5 +1,5 @@
 mod cancel;
-mod env;
+pub mod env;
 mod instance;
 mod report;
 

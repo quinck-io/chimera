@@ -46,6 +46,7 @@ fn entry_filename(repo: &str, git_ref: &str, key: &str, version: &str) -> String
 }
 
 /// In-memory index for fast cache entry lookup, scoped by repository and ref.
+#[derive(Default)]
 pub struct EntryIndex {
     /// Keyed by (repo, scope_ref, key, version)
     exact: HashMap<(String, String, String, String), CacheEntry>,
@@ -55,10 +56,7 @@ pub struct EntryIndex {
 
 impl EntryIndex {
     pub fn new() -> Self {
-        Self {
-            exact: HashMap::new(),
-            by_repo_version: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn insert(&mut self, entry: CacheEntry) {
