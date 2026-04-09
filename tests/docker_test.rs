@@ -258,7 +258,7 @@ async fn inline_docker_entrypoint_override() {
                 "image": "alpine:3.19"
             },
             "inputs": {
-                "entryPoint": "/bin/sh",
+                "entrypoint": "/bin/sh",
                 "args": "-c uname"
             },
             "condition": null,
@@ -288,7 +288,7 @@ async fn inline_docker_env_vars() {
                 "image": "alpine:3.19"
             },
             "inputs": {
-                "entryPoint": "/bin/sh",
+                "entrypoint": "/bin/sh",
                 "args": "-c echo $GREETING"
             },
             "condition": null,

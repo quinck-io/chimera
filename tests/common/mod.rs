@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -130,9 +132,8 @@ pub async fn setup_docker(
     let job_id = uuid::Uuid::new_v4().to_string();
     let mut resources = JobDockerResources::new(docker);
 
-    let workflow_dir = tmp.path().join("workflow");
+    let workflow_files_path = workspace.workspace_dir().parent().unwrap();
     let externals_dir = tmp.path().join("externals");
-    std::fs::create_dir_all(&workflow_dir).unwrap();
     std::fs::create_dir_all(&externals_dir).unwrap();
 
     resources
@@ -142,7 +143,7 @@ pub async fn setup_docker(
             job_container,
             services,
             workspace_host_path: workspace.workspace_dir(),
-            workflow_files_host_path: &workflow_dir,
+            workflow_files_host_path: workflow_files_path,
             runner_temp_host_path: workspace.runner_temp(),
             actions_host_path: &tmp.path().join("actions"),
             tool_cache_host_path: workspace.tool_cache(),

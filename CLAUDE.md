@@ -92,9 +92,9 @@ Write unit tests for almost everything that has logic. If a function has a branc
 
 Don't mock internal modules. Test them directly. Mock only external HTTP APIs using `wiremock`.
 
-Integration or e2e tests only when explicitly requested. Default to unit tests.
+Integration tests live in `tests/` and exercise the execution engine end-to-end. When adding a new feature that affects job execution (new expression function, workflow command, step type, etc.), add integration tests using the harness in `tests/common/mod.rs`.
 
-Tests live in a separate file next to the module they test, named `{module}_test.rs`. For example, `src/config.rs` has tests in `src/config_test.rs`, and `src/broker/auth.rs` has tests in `src/broker/auth_test.rs`. Each test file is included at the bottom of the main module file using the `#[path]` attribute:
+Unit tests live in a separate file next to the module they test, named `{module}_test.rs`. For example, `src/config.rs` has tests in `src/config_test.rs`, and `src/broker/auth.rs` has tests in `src/broker/auth_test.rs`. Each test file is included at the bottom of the main module file using the `#[path]` attribute:
 
 ```rust
 #[cfg(test)]
@@ -104,7 +104,7 @@ mod auth_test;
 
 The `#[path]` attribute is required because Rust's module system would otherwise look for the file in a subdirectory.
 
-Tests that require Docker are tagged `#[ignore]` so they don't run in environments without a socket, but do run in CI.
+Tests that require Docker are tagged `#[ignore]` so they don't run in environments without a socket, but do run in CI. When modifying Docker-related code (`src/docker/`, `src/job/action/docker.rs`, container mode logic) or Docker integration tests, run `cargo test -- --ignored` locally to verify.
 
 Keep tests readable. A test should be obvious about what it's checking. Arrange / Act / Assert with a blank line between sections is a good default structure.
 
@@ -115,5 +115,6 @@ Keep tests readable. A test should be obvious about what it's checking. Arrange 
 1. Run `cargo build` — must compile with zero errors.
 2. Run `cargo clippy -- -D warnings` — must pass with zero warnings.
 3. Run `cargo test` — all tests must pass.
+4. If you changed Docker-related code or tests, also run `cargo test -- --ignored`.
 
 If any of these fail, fix the issues before declaring the task complete. Do not leave `#[allow(dead_code)]` or `#[allow(unused)]` as a workaround — fix the underlying issue.
