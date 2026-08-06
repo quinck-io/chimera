@@ -724,11 +724,10 @@ Timeout: 15s
 
 | Value | Meaning |
 |-------|---------|
-| 0 | Pending |
-| 1 | InProgress |
-| 3 | Completed |
-
-**Note**: Value 2 is skipped.
+| 0 | Unknown |
+| 3 | InProgress |
+| 5 | Pending |
+| 6 | Completed |
 
 **Conclusion values** (`ResultsConclusion`):
 
@@ -738,9 +737,13 @@ Timeout: 15s
 | 2 | Success |
 | 3 | Failure |
 | 4 | Cancelled |
-| 5 | Skipped |
+| 7 | Skipped |
 
-**Note**: Value 1 is skipped.
+Both enums are sparse, and the unused values are not free: they belong to other
+members GitHub still understands. Sending 5 as a conclusion gets rendered as
+`action_required`, and 3 as a status means InProgress. The authoritative list is
+the official runner's `Status` and `Conclusion` enums in
+`src/Sdk/WebApi/WebApi/Contracts.cs`.
 
 **`change_order`**: An incrementing counter per job. Each call must use a strictly
 higher value than the previous. The runner uses an `AtomicI64` starting at 0,

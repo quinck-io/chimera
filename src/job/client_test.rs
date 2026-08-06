@@ -203,3 +203,24 @@ async fn update_timeline_sends_patch() {
         .await
         .unwrap();
 }
+
+#[test]
+fn results_status_wire_values_match_official_runner() {
+    let json = |s: ResultsStatus| serde_json::to_string(&s).unwrap();
+
+    assert_eq!(json(ResultsStatus::InProgress), "3");
+    assert_eq!(json(ResultsStatus::Pending), "5");
+    assert_eq!(json(ResultsStatus::Completed), "6");
+}
+
+#[test]
+fn results_conclusion_wire_values_match_official_runner() {
+    let json = |c: ResultsConclusion| serde_json::to_string(&c).unwrap();
+
+    assert_eq!(json(ResultsConclusion::Unknown), "0");
+    assert_eq!(json(ResultsConclusion::Success), "2");
+    assert_eq!(json(ResultsConclusion::Failure), "3");
+    assert_eq!(json(ResultsConclusion::Cancelled), "4");
+    // Not 5 — GitHub renders 5 as `action_required`.
+    assert_eq!(json(ResultsConclusion::Skipped), "7");
+}
