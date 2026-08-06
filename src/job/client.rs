@@ -627,16 +627,22 @@ pub struct ResultsStep {
     pub conclusion: ResultsConclusion,
 }
 
+/// Wire values from the official runner's `Status` enum
+/// (`src/Sdk/WebApi/WebApi/Contracts.cs`). They are not contiguous, and the gaps
+/// are meaningful: 3 is InProgress, not Completed.
 #[derive(
     Debug, Clone, Copy, PartialEq, serde_repr::Serialize_repr, serde_repr::Deserialize_repr,
 )]
 #[repr(i32)]
 pub enum ResultsStatus {
-    Pending = 0,
-    InProgress = 1,
-    Completed = 3,
+    InProgress = 3,
+    Pending = 5,
+    Completed = 6,
 }
 
+/// Wire values from the official runner's `Conclusion` enum
+/// (`src/Sdk/WebApi/WebApi/Contracts.cs`). 5 and 6 are not skipped — GitHub reads
+/// 5 as `action_required`.
 #[derive(
     Debug, Clone, Copy, PartialEq, serde_repr::Serialize_repr, serde_repr::Deserialize_repr,
 )]
@@ -646,7 +652,7 @@ pub enum ResultsConclusion {
     Success = 2,
     Failure = 3,
     Cancelled = 4,
-    Skipped = 5,
+    Skipped = 7,
 }
 
 /// High-level job conclusion passed to `complete_job`.
