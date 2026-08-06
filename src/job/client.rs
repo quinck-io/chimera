@@ -72,6 +72,11 @@ impl JobClient {
         self.job_access_token = Some(token);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_results_url(&mut self, url: String) {
+        self.results_url = Some(url);
+    }
+
     pub fn has_results_url(&self) -> bool {
         self.results_url.is_some()
     }
@@ -252,43 +257,28 @@ impl JobClient {
         Ok(())
     }
 
-    pub async fn upload_job_log(
+    // ─── Append Blob Operations (incremental log streaming) ────────
+
+    /// Get a signed URL for the job-level log blob. This is the log GitHub serves
+    /// as the job's downloadable archive; without it the run has no logs to
+    /// download even when every step blob uploaded fine.
+    pub async fn get_job_log_signed_url(
         &self,
         plan_id: &str,
         job_id: &str,
-        content: &str,
-        line_count: i64,
-    ) -> Result<()> {
+    ) -> Result<SignedUrlResponse> {
         let token = self.job_token()?;
         let base = self.results_base_url()?.trim_end_matches('/');
-
-        let signed_url = self
-            .get_signed_url(
-                token,
-                &format!("{base}/twirp/results.services.receiver.Receiver/GetJobLogsSignedBlobURL"),
-                &serde_json::json!({
-                    "workflow_run_backend_id": plan_id,
-                    "workflow_job_run_backend_id": job_id,
-                }),
-            )
-            .await?;
-
-        self.upload_to_blob_sealed(&signed_url, content).await?;
-
-        self.post_log_metadata(
+        self.get_signed_url(
             token,
-            &format!("{base}/twirp/results.services.receiver.Receiver/CreateJobLogsMetadata"),
+            &format!("{base}/twirp/results.services.receiver.Receiver/GetJobLogsSignedBlobURL"),
             &serde_json::json!({
                 "workflow_run_backend_id": plan_id,
                 "workflow_job_run_backend_id": job_id,
-                "uploaded_at": format_results_timestamp(Utc::now()),
-                "line_count": line_count,
             }),
         )
         .await
     }
-
-    // ─── Append Blob Operations (incremental log streaming) ────────
 
     /// Get a signed URL for step log blob upload.
     pub async fn get_step_log_signed_url(
@@ -371,6 +361,28 @@ impl JobClient {
         Ok(())
     }
 
+    /// Post job log metadata once the job blob is sealed.
+    pub async fn create_job_log_metadata(
+        &self,
+        plan_id: &str,
+        job_id: &str,
+        line_count: i64,
+    ) -> Result<()> {
+        let token = self.job_token()?;
+        let base = self.results_base_url()?.trim_end_matches('/');
+        self.post_log_metadata(
+            token,
+            &format!("{base}/twirp/results.services.receiver.Receiver/CreateJobLogsMetadata"),
+            &serde_json::json!({
+                "workflow_run_backend_id": plan_id,
+                "workflow_job_run_backend_id": job_id,
+                "uploaded_at": format_results_timestamp(Utc::now()),
+                "line_count": line_count,
+            }),
+        )
+        .await
+    }
+
     /// Post step log metadata to signal GitHub that new log data is available.
     pub async fn create_step_log_metadata(
         &self,
@@ -394,8 +406,6 @@ impl JobClient {
         )
         .await
     }
-
-    // ─── Bulk Blob Upload (used for job-level log + legacy step upload) ──
 
     /// Get a signed URL from the Results API for blob upload.
     async fn get_signed_url(
@@ -426,30 +436,6 @@ impl JobClient {
         }
 
         Ok(signed)
-    }
-
-    /// Upload all content in one shot: create blob, append, seal.
-    /// Used for job-level log (single upload at end of job).
-    async fn upload_to_blob_sealed(&self, signed: &SignedUrlResponse, content: &str) -> Result<()> {
-        self.create_append_blob(signed).await?;
-        let is_azure = signed.blob_storage_type == "BLOB_STORAGE_TYPE_AZURE";
-        let url = format!("{}&comp=appendblock&seal=true", signed.logs_url);
-        let mut req = self.client.put(&url).body(content.to_string());
-        if is_azure {
-            req = req
-                .header("x-ms-blob-sealed", "true")
-                .header("Content-Length", content.len().to_string());
-        }
-        let resp = req
-            .timeout(Duration::from_secs(60))
-            .send()
-            .await
-            .context("uploading blob content")?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("upload blob content failed: {body}");
-        }
-        Ok(())
     }
 
     /// Post log metadata to the Results API after blob upload.

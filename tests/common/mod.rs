@@ -59,6 +59,15 @@ impl TestEnv {
         }
     }
 
+    /// Point the client at the manifest's Results endpoint. Without this a run
+    /// takes the legacy VSS path and never touches the blob APIs.
+    pub fn configure_from_manifest(&mut self, manifest: &JobManifest) {
+        Arc::get_mut(&mut self.job_client)
+            .expect("job client already shared")
+            .configure_from_manifest(manifest)
+            .unwrap();
+    }
+
     /// Run a manifest in host mode and return (conclusion, outputs).
     pub async fn run(
         &self,
@@ -206,10 +215,35 @@ pub fn manifest_with_steps_and_context(
     server_url: &str,
     context_data: serde_json::Value,
 ) -> JobManifest {
+    manifest_with_variables(steps, server_url, context_data, serde_json::json!({}))
+}
+
+/// Manifest carrying a Results endpoint, so a client configured from it uses the
+/// Results API rather than the legacy VSS fallback.
+pub fn manifest_with_results_endpoint(
+    steps: Vec<serde_json::Value>,
+    server_url: &str,
+) -> JobManifest {
+    manifest_with_variables(
+        steps,
+        server_url,
+        serde_json::json!({}),
+        serde_json::json!({
+            "system.github.results_endpoint": { "value": server_url, "isSecret": false }
+        }),
+    )
+}
+
+fn manifest_with_variables(
+    steps: Vec<serde_json::Value>,
+    server_url: &str,
+    context_data: serde_json::Value,
+    variables: serde_json::Value,
+) -> JobManifest {
     let manifest_json = serde_json::json!({
         "plan": { "planId": "p", "jobId": "j", "timelineId": "t" },
         "steps": steps,
-        "variables": {},
+        "variables": variables,
         "resources": {
             "endpoints": [{
                 "name": "SystemVssConnection",

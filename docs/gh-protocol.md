@@ -889,7 +889,13 @@ Sealing prevents further appends and signals that the log is complete.
 
 ### 9.4 Job-Level Log Upload
 
-At the end of a job, the complete job log can be uploaded as a single blob:
+**This is not optional.** The step blobs are what the web UI renders per step;
+the job blob is what GitHub turns into the downloadable log archive. Skip it and
+the run page still looks fine while `GET /repos/{o}/{r}/actions/jobs/{id}/logs`
+returns `BlobNotFound` and the job is missing entirely from the run's log zip.
+
+It holds the whole job's output — every step's lines, concatenated in order, in
+the same timestamped format.
 
 ```
 POST {results_url}/twirp/results.services.receiver.Receiver/GetJobLogsSignedBlobURL
@@ -898,16 +904,12 @@ Authorization: Bearer {job_access_token}
 { "workflow_run_backend_id": "{plan_id}", "workflow_job_run_backend_id": "{job_id}" }
 ```
 
-Then create, append+seal in one shot:
-```
-PUT {logs_url}&comp=appendblock&seal=true
-x-ms-blob-sealed: true
-Content-Length: {byte_count}
+The blob then takes the same create → append → seal sequence as a step blob
+(9.3), so the content can be streamed instead of held in memory for the length
+of the job.
 
-{full log content}
-```
-
-Followed by metadata:
+Metadata is published once, after the seal — unlike step logs, nothing reads
+this blob until the job is over:
 ```
 POST {results_url}/twirp/results.services.receiver.Receiver/CreateJobLogsMetadata
 
