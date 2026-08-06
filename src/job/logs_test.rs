@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::*;
 use crate::github::auth::TokenManager;
 use crate::utils::format_log_timestamp;
@@ -34,6 +36,15 @@ async fn setup_log_server() -> (MockServer, Arc<JobClient>) {
     job_client.set_job_access_token("test-job-token".into());
 
     (mock_server, Arc::new(job_client))
+}
+
+/// Same as `setup_log_server`, but with the Results API configured so the blob
+/// collectors have somewhere to upload to.
+async fn setup_results_server() -> (MockServer, Arc<JobClient>) {
+    let (mock_server, client) = setup_log_server().await;
+    let mut client = Arc::try_unwrap(client).ok().expect("sole owner");
+    client.set_results_url(mock_server.uri());
+    (mock_server, Arc::new(client))
 }
 
 /// Mount a mock for creating a legacy log (returns log ID 1).
@@ -181,4 +192,132 @@ async fn collector_masks_secrets() {
     let collected = logger.finish().await.expect("should collect lines");
     assert!(!collected.text.contains("secret123"));
     assert!(collected.text.contains("***"));
+}
+
+/// Mount the Results endpoints a blob collector needs, recording every line that
+/// reaches the blob and counting the metadata publishes.
+async fn mount_results_blob(
+    mock_server: &MockServer,
+    signed_url_path: &str,
+    metadata_path: &str,
+) -> (Arc<tokio::sync::Mutex<String>>, Arc<AtomicUsize>) {
+    let appended = Arc::new(tokio::sync::Mutex::new(String::new()));
+    let metadata_calls = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("POST"))
+        .and(path_regex(format!(".*{signed_url_path}$")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "logs_url": format!("{}/blob?sig=x", mock_server.uri()),
+            "blob_storage_type": "BLOB_STORAGE_TYPE_AZURE",
+        })))
+        .mount(mock_server)
+        .await;
+
+    let sink = appended.clone();
+    Mock::given(method("PUT"))
+        .and(path_regex(r"/blob$"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body = String::from_utf8_lossy(&req.body).to_string();
+            let sink = sink.clone();
+            tokio::spawn(async move { sink.lock().await.push_str(&body) });
+            ResponseTemplate::new(201)
+        })
+        .mount(mock_server)
+        .await;
+
+    let counter = metadata_calls.clone();
+    Mock::given(method("POST"))
+        .and(path_regex(format!(".*{metadata_path}$")))
+        .respond_with(move |_: &wiremock::Request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200)
+        })
+        .mount(mock_server)
+        .await;
+
+    (appended, metadata_calls)
+}
+
+#[tokio::test]
+async fn job_logger_streams_and_publishes_once() {
+    let (mock_server, client) = setup_results_server().await;
+    let (appended, metadata_calls) = mount_results_blob(
+        &mock_server,
+        "GetJobLogsSignedBlobURL",
+        "CreateJobLogsMetadata",
+    )
+    .await;
+
+    let job_logger = JobLogger::new(client.clone(), "plan-1".into(), "job-1".into());
+    let masks = Arc::new(RwLock::new(Vec::new()));
+    let step = StepLogger::results(
+        client,
+        "plan-1".into(),
+        "job-1".into(),
+        "step-1".into(),
+        masks,
+        None,
+        Some(job_logger.sender()),
+    );
+
+    step.sender().send("hello from the step".into()).await;
+    step.finish().await;
+    job_logger.finish().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let content = appended.lock().await;
+    assert!(
+        content.contains("hello from the step"),
+        "step line should reach the job log blob, got: {content}"
+    );
+    // Once for the job log; the step blob publishes as it streams and is mounted
+    // on a different path, so it does not land in this counter.
+    assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn job_logger_skips_upload_when_no_output() {
+    let (mock_server, client) = setup_results_server().await;
+    let (_, metadata_calls) = mount_results_blob(
+        &mock_server,
+        "GetJobLogsSignedBlobURL",
+        "CreateJobLogsMetadata",
+    )
+    .await;
+
+    JobLogger::new(client, "plan-1".into(), "job-1".into())
+        .finish()
+        .await;
+
+    assert_eq!(metadata_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn step_without_job_logger_still_uploads_its_own_blob() {
+    let (mock_server, client) = setup_results_server().await;
+    let (appended, _) = mount_results_blob(
+        &mock_server,
+        "GetStepLogsSignedBlobURL",
+        "CreateStepLogsMetadata",
+    )
+    .await;
+
+    let masks = Arc::new(RwLock::new(Vec::new()));
+    let step = StepLogger::results(
+        client,
+        "plan-1".into(),
+        "job-1".into(),
+        "step-1".into(),
+        masks,
+        None,
+        None,
+    );
+
+    step.sender().send("step only".into()).await;
+    step.finish().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    assert!(appended.lock().await.contains("step only"));
 }

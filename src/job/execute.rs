@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -17,7 +17,7 @@ use super::action::{ActionCache, load_action_metadata, resolve_action};
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
 use super::expression::ExprContext;
 use super::live_feed::FeedSender;
-use super::logs::{LogSender, StepLogger};
+use super::logs::{JobLogger, LogLine, LogSender, StepLogger};
 use super::schema::{JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
@@ -548,8 +548,17 @@ pub async fn run_all_steps(
     let mut trackers: Vec<StepTracker> =
         manifest.steps.iter().map(StepTracker::from_step).collect();
 
-    let mut job_log_buffer = String::new();
-    let mut job_line_count: i64 = 0;
+    // The job-level log is what GitHub serves as the downloadable archive, and it
+    // only exists on the Results API — legacy runs have no equivalent.
+    let job_logger = use_results.then(|| {
+        JobLogger::new(
+            job_client.clone(),
+            manifest.plan.plan_id.clone(),
+            manifest.plan.job_id.clone(),
+        )
+    });
+    let job_log_tx = job_logger.as_ref().map(JobLogger::sender);
+
     let mut pending_post_steps: Vec<(Step, Option<String>)> = Vec::new();
 
     // --- Pre steps ---
@@ -638,6 +647,7 @@ pub async fn run_all_steps(
                 &pre_step.display_name,
                 masks.clone(),
                 feed_sender,
+                job_log_tx.as_ref(),
             )
             .await;
 
@@ -657,12 +667,7 @@ pub async fn run_all_steps(
             .await;
 
             let legacy_log_id = logger.log_id();
-            if let Some(collected) = logger.finish().await {
-                if !use_results {
-                    job_log_buffer.push_str(&collected.text);
-                }
-                job_line_count += collected.line_count;
-            }
+            logger.finish().await;
 
             let finish_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_completed(result_conclusion);
@@ -780,6 +785,7 @@ pub async fn run_all_steps(
             &step.display_name,
             masks.clone(),
             feed_sender,
+            job_log_tx.as_ref(),
         )
         .await;
 
@@ -800,14 +806,7 @@ pub async fn run_all_steps(
 
         let legacy_log_id = logger.log_id();
 
-        if let Some(collected) = logger.finish().await {
-            // In Results mode, step logs are already uploaded to the blob — only
-            // accumulate text for the job-level log in legacy mode.
-            if !use_results {
-                job_log_buffer.push_str(&collected.text);
-            }
-            job_line_count += collected.line_count;
-        }
+        logger.finish().await;
 
         let finish_time = format_timeline_timestamp(Utc::now());
         trackers[idx].mark_completed(result_conclusion);
@@ -974,6 +973,7 @@ pub async fn run_all_steps(
                 &post_step.display_name,
                 masks.clone(),
                 feed_sender,
+                job_log_tx.as_ref(),
             )
             .await;
 
@@ -993,12 +993,7 @@ pub async fn run_all_steps(
             .await;
 
             let legacy_log_id = logger.log_id();
-            if let Some(collected) = logger.finish().await {
-                if !use_results {
-                    job_log_buffer.push_str(&collected.text);
-                }
-                job_line_count += collected.line_count;
-            }
+            logger.finish().await;
 
             let finish_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_completed(result_conclusion);
@@ -1042,14 +1037,12 @@ pub async fn run_all_steps(
         }
     }
 
-    upload_job_log(
-        use_results,
-        job_client,
-        manifest,
-        &job_log_buffer,
-        job_line_count,
-    )
-    .await;
+    // Every step's sender is dropped by now, so this seals the job blob on the
+    // complete log rather than a partial one.
+    drop(job_log_tx);
+    if let Some(logger) = job_logger {
+        logger.finish().await;
+    }
 
     // Reconstruct job-level outputs from all step outputs.
     // The server uses these for `needs.X.outputs.Y` resolution in dependent jobs.
@@ -1090,6 +1083,7 @@ async fn create_step_logger(
     step_name: &str,
     masks: Arc<RwLock<Vec<String>>>,
     feed_sender: Option<&FeedSender>,
+    job_log_tx: Option<&mpsc::Sender<LogLine>>,
 ) -> StepLogger {
     let feed = feed_sender.map(|f| (f.clone(), step_id.to_string()));
     if use_results {
@@ -1100,6 +1094,7 @@ async fn create_step_logger(
             step_id.to_string(),
             masks,
             feed,
+            job_log_tx.cloned(),
         )
     } else {
         StepLogger::legacy(client.clone(), plan_id, step_name, masks, feed).await
@@ -1430,28 +1425,6 @@ async fn report_step_completed(
                 }],
             )
             .await;
-    }
-}
-
-async fn upload_job_log(
-    use_results: bool,
-    client: &Arc<JobClient>,
-    manifest: &JobManifest,
-    buffer: &str,
-    line_count: i64,
-) {
-    if use_results
-        && !buffer.is_empty()
-        && let Err(e) = client
-            .upload_job_log(
-                &manifest.plan.plan_id,
-                &manifest.plan.job_id,
-                buffer,
-                line_count,
-            )
-            .await
-    {
-        warn!(error = %e, "failed to upload job log");
     }
 }
 

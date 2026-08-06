@@ -8,6 +8,7 @@ use tracing::warn;
 use super::JobClient;
 use crate::utils::format_log_timestamp;
 
+#[derive(Clone)]
 pub struct LogLine {
     pub timestamp: chrono::DateTime<Utc>,
     pub content: String,
@@ -16,6 +17,7 @@ pub struct LogLine {
 #[derive(Clone)]
 pub struct LogSender {
     tx: mpsc::Sender<LogLine>,
+    job_tx: Option<mpsc::Sender<LogLine>>,
     masks: Arc<RwLock<Vec<String>>>,
     feed: Option<(super::live_feed::FeedSender, String)>,
 }
@@ -25,6 +27,7 @@ impl LogSender {
     pub fn new_for_test(tx: mpsc::Sender<LogLine>, masks: Arc<RwLock<Vec<String>>>) -> Self {
         Self {
             tx,
+            job_tx: None,
             masks,
             feed: None,
         }
@@ -39,6 +42,11 @@ impl LogSender {
             timestamp: Utc::now(),
             content: masked,
         };
+        if let Some(job_tx) = &self.job_tx
+            && job_tx.send(line.clone()).await.is_err()
+        {
+            warn!("job log channel closed, dropping line");
+        }
         if self.tx.send(line).await.is_err() {
             warn!("log channel closed, dropping line");
         }
@@ -122,10 +130,24 @@ impl StepLogger {
         step_id: String,
         masks: Arc<RwLock<Vec<String>>>,
         feed: Option<(super::live_feed::FeedSender, String)>,
+        job_tx: Option<mpsc::Sender<LogLine>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<LogLine>(256);
-        let sender = LogSender { tx, masks, feed };
-        let handle = tokio::spawn(blob_collector_task(client, plan_id, job_id, step_id, rx));
+        let sender = LogSender {
+            tx,
+            job_tx,
+            masks,
+            feed,
+        };
+        let target = BlobTarget::Step {
+            plan_id,
+            job_id,
+            step_id,
+        };
+        let handle = tokio::spawn(async move {
+            let line_count = blob_collector_task(client, target, rx).await;
+            (String::new(), line_count)
+        });
         Self::Results { sender, handle }
     }
 
@@ -145,7 +167,12 @@ impl StepLogger {
                 0
             });
         let (tx, rx) = mpsc::channel::<LogLine>(256);
-        let sender = LogSender { tx, masks, feed };
+        let sender = LogSender {
+            tx,
+            job_tx: None,
+            masks,
+            feed,
+        };
         let handle = tokio::spawn(vss_upload_task(client, plan_id.to_string(), log_id, rx));
         Self::Legacy {
             sender,
@@ -192,6 +219,7 @@ impl StepLogger {
         let (tx, rx) = mpsc::channel::<LogLine>(256);
         let sender = LogSender {
             tx,
+            job_tx: None,
             masks,
             feed: None,
         };
@@ -257,8 +285,105 @@ async fn flush_to_vss(client: &JobClient, plan_id: &str, log_id: u64, buffer: &m
 }
 
 // ---------------------------------------------------------------------------
+// Job log lifecycle
+// ---------------------------------------------------------------------------
+
+/// Streams the whole job's output to the job-level blob.
+///
+/// This is a separate artifact from the per-step blobs: GitHub serves it as the
+/// job's downloadable log, and a job without it has nothing to download even
+/// though the web UI still renders the step logs. Every `LogSender` created for
+/// the job holds a clone of this collector's channel, so lines are tee'd here as
+/// they are written to their step.
+pub struct JobLogger {
+    tx: mpsc::Sender<LogLine>,
+    handle: JoinHandle<i64>,
+}
+
+impl JobLogger {
+    pub fn new(client: Arc<JobClient>, plan_id: String, job_id: String) -> Self {
+        let (tx, rx) = mpsc::channel::<LogLine>(256);
+        let target = BlobTarget::Job { plan_id, job_id };
+        let handle = tokio::spawn(blob_collector_task(client, target, rx));
+        Self { tx, handle }
+    }
+
+    pub fn sender(&self) -> mpsc::Sender<LogLine> {
+        self.tx.clone()
+    }
+
+    /// Flush what is left, seal the blob and publish its metadata.
+    pub async fn finish(self) {
+        let Self { tx, handle } = self;
+        drop(tx);
+        if let Err(e) = handle.await {
+            warn!(error = %e, "job log collector task panicked");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Results blob collector (incremental append blob streaming)
 // ---------------------------------------------------------------------------
+
+/// Which Results blob a collector streams into.
+enum BlobTarget {
+    Step {
+        plan_id: String,
+        job_id: String,
+        step_id: String,
+    },
+    Job {
+        plan_id: String,
+        job_id: String,
+    },
+}
+
+impl BlobTarget {
+    async fn signed_url(
+        &self,
+        client: &JobClient,
+    ) -> anyhow::Result<super::client::SignedUrlResponse> {
+        match self {
+            Self::Step {
+                plan_id,
+                job_id,
+                step_id,
+            } => {
+                client
+                    .get_step_log_signed_url(plan_id, job_id, step_id)
+                    .await
+            }
+            Self::Job { plan_id, job_id } => client.get_job_log_signed_url(plan_id, job_id).await,
+        }
+    }
+
+    async fn write_metadata(&self, client: &JobClient, line_count: i64) -> anyhow::Result<()> {
+        match self {
+            Self::Step {
+                plan_id,
+                job_id,
+                step_id,
+            } => {
+                client
+                    .create_step_log_metadata(plan_id, job_id, step_id, line_count)
+                    .await
+            }
+            Self::Job { plan_id, job_id } => {
+                client
+                    .create_job_log_metadata(plan_id, job_id, line_count)
+                    .await
+            }
+        }
+    }
+
+    /// Step metadata is republished on every flush so the UI can follow a running
+    /// step. The job log is a single artifact GitHub only reads once sealed, so it
+    /// is published once at the end.
+    fn publishes_while_streaming(&self) -> bool {
+        matches!(self, Self::Step { .. })
+    }
+}
 
 /// Mutable state for the incremental blob upload.
 struct BlobUploadState {
@@ -272,11 +397,9 @@ struct BlobUploadState {
 /// On channel close: flushes remaining, seals the blob, posts final metadata.
 async fn blob_collector_task(
     client: Arc<JobClient>,
-    plan_id: String,
-    job_id: String,
-    step_id: String,
+    target: BlobTarget,
     mut rx: mpsc::Receiver<LogLine>,
-) -> (String, i64) {
+) -> i64 {
     let mut buffer = String::new();
     let mut line_count: i64 = 0;
     let mut blob = BlobUploadState { signed_url: None };
@@ -296,10 +419,7 @@ async fn blob_collector_task(
             }
             _ = interval.tick() => {
                 if !buffer.is_empty() {
-                    flush_to_blob(
-                        &client, &plan_id, &job_id, &step_id,
-                        &buffer, line_count, &mut blob,
-                    ).await;
+                    flush_to_blob(&client, &target, &buffer, line_count, &mut blob).await;
                     buffer.clear();
                 }
             }
@@ -308,43 +428,31 @@ async fn blob_collector_task(
 
     // Final flush: append remaining + seal
     if !buffer.is_empty() {
-        flush_to_blob(
-            &client, &plan_id, &job_id, &step_id, &buffer, line_count, &mut blob,
-        )
-        .await;
+        flush_to_blob(&client, &target, &buffer, line_count, &mut blob).await;
         buffer.clear();
     }
     if let Some(ref url) = blob.signed_url {
         if let Err(e) = client.seal_blob(url).await {
-            warn!(error = %e, "failed to seal step log blob");
+            warn!(error = %e, "failed to seal log blob");
         }
-        if let Err(e) = client
-            .create_step_log_metadata(&plan_id, &job_id, &step_id, line_count)
-            .await
-        {
-            warn!(error = %e, "failed to create final step log metadata");
+        if let Err(e) = target.write_metadata(&client, line_count).await {
+            warn!(error = %e, "failed to create final log metadata");
         }
     }
 
-    // Return empty string — content was already streamed to the blob
-    (String::new(), line_count)
+    line_count
 }
 
 async fn flush_to_blob(
     client: &JobClient,
-    plan_id: &str,
-    job_id: &str,
-    step_id: &str,
+    target: &BlobTarget,
     buffer: &str,
     line_count: i64,
     blob: &mut BlobUploadState,
 ) {
     // Create the blob on first flush
     if blob.signed_url.is_none() {
-        match client
-            .get_step_log_signed_url(plan_id, job_id, step_id)
-            .await
-        {
+        match target.signed_url(client).await {
             Ok(url) => {
                 if let Err(e) = client.create_append_blob(&url).await {
                     warn!(error = %e, "failed to create append blob");
@@ -353,7 +461,7 @@ async fn flush_to_blob(
                 blob.signed_url = Some(url);
             }
             Err(e) => {
-                warn!(error = %e, "failed to get signed URL for step log");
+                warn!(error = %e, "failed to get signed URL for log blob");
                 return;
             }
         }
@@ -368,9 +476,8 @@ async fn flush_to_blob(
     }
 
     // Post metadata to notify GitHub that new log data is available
-    if let Err(e) = client
-        .create_step_log_metadata(plan_id, job_id, step_id, line_count)
-        .await
+    if target.publishes_while_streaming()
+        && let Err(e) = target.write_metadata(client, line_count).await
     {
         warn!(error = %e, "intermediate log metadata update failed");
     }
