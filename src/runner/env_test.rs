@@ -110,6 +110,16 @@ fn sets_workspace_paths() {
 }
 
 #[test]
+fn seeds_host_path_from_process() {
+    let manifest = minimal_manifest();
+    let (_tmp, ws) = test_workspace();
+
+    let env = build_base_env(&manifest, &ws, "test-runner");
+
+    assert_eq!(env.get("PATH"), std::env::var("PATH").ok().as_ref());
+}
+
+#[test]
 fn sets_non_secret_variables() {
     let manifest = minimal_manifest();
     let (_tmp, ws) = test_workspace();

@@ -95,3 +95,47 @@ async fn composite_action_with_input_variation() {
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+/// A composite action that forwards a hyphenated input of its own to a sub-step,
+/// the way `pnpm/action-setup`'s `dest:` is wired up in real workflows.
+fn create_forwarding_action(workspace_dir: &std::path::Path) {
+    let action_dir = workspace_dir.join(".github/actions/forward");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        r#"
+name: 'Forward'
+description: 'Forwards a hyphenated input to a sub-step'
+inputs:
+  pnpm-dest:
+    description: 'Where pnpm goes'
+    required: false
+    default: '~/setup-pnpm'
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      run: |
+        echo "dest=${{ inputs.pnpm-dest }}"
+        test "${{ inputs.pnpm-dest }}" = "/tmp/pnpm-here" || exit 1
+"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn composite_action_forwards_hyphenated_input() {
+    let env = TestEnv::setup().await;
+    create_forwarding_action(env.workspace.workspace_dir());
+
+    let manifest = manifest_with_steps(
+        vec![composite_step(
+            "forward",
+            ".github/actions/forward",
+            serde_json::json!({"pnpm-dest": "/tmp/pnpm-here"}),
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
