@@ -129,6 +129,22 @@ async fn path_file_prepend_between_steps() {
 }
 
 #[tokio::test]
+async fn path_file_prepend_keeps_host_path() {
+    let env = TestEnv::setup().await;
+    let manifest = manifest_with_steps(
+        vec![
+            script_step("s1", r#"echo "/custom/test/bin" >> "$GITHUB_PATH""#),
+            // `command -v` resolves against PATH, so this fails if the addition
+            // above replaced the host PATH instead of prepending to it.
+            script_step("s2", r#"command -v env >/dev/null || exit 1"#),
+        ],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
 async fn output_file_sets_step_output() {
     let env = TestEnv::setup().await;
     let manifest = manifest_with_steps(

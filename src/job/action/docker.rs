@@ -316,6 +316,11 @@ async fn run_docker_container(params: RunDockerParams<'_>) -> Result<StepResult>
 
 fn build_container_env(host_env: &HashMap<String, String>) -> HashMap<String, String> {
     let mut env = host_env.clone();
+
+    // The action's image defines its own PATH; carrying the runner's over would point
+    // the container at directories that only exist outside it.
+    env.remove("PATH");
+
     let remaps = [
         ("GITHUB_WORKSPACE", "/github/workspace"),
         ("GITHUB_ENV", "/github/workflow/_env"),

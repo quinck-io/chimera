@@ -226,6 +226,32 @@ fn resolve_input_with_default() {
 }
 
 #[test]
+fn resolve_input_with_hyphen() {
+    // GitHub keeps hyphens in INPUT_* names and only turns spaces into underscores,
+    // which is what build_action_inputs does — the lookup here has to agree.
+    let mut env = HashMap::new();
+    env.insert("INPUT_PNPM-DEST".into(), "/tmp/pnpm".into());
+    let ctx = ctx_with_env(&env);
+
+    assert_eq!(
+        resolve_expression("${{ inputs.pnpm-dest }}", &ctx),
+        "/tmp/pnpm"
+    );
+}
+
+#[test]
+fn resolve_input_with_space() {
+    let mut env = HashMap::new();
+    env.insert("INPUT_MY_INPUT".into(), "value".into());
+    let ctx = ctx_with_env(&env);
+
+    assert_eq!(
+        resolve_expression("${{ inputs['my input'] }}", &ctx),
+        "value"
+    );
+}
+
+#[test]
 fn resolve_plain_string_unchanged() {
     let ctx = empty_ctx();
     assert_eq!(resolve_expression("hello", &ctx), "hello");

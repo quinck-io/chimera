@@ -456,13 +456,13 @@ pub fn build_step_env(
     if let Ok(extra_paths) = workspace.read_path_file() {
         let mut all_paths = job_state.path_prepends.clone();
         all_paths.extend(extra_paths);
-        if let Some(existing_path) = env.get("PATH") {
-            env.insert(
-                "PATH".into(),
-                format!("{}:{existing_path}", all_paths.join(":")),
-            );
-        } else if !all_paths.is_empty() {
-            env.insert("PATH".into(), all_paths.join(":"));
+        if !all_paths.is_empty() {
+            let prepend = all_paths.join(":");
+            let path = match env.get("PATH") {
+                Some(existing) if !existing.is_empty() => format!("{prepend}:{existing}"),
+                _ => prepend,
+            };
+            env.insert("PATH".into(), path);
         }
     }
 

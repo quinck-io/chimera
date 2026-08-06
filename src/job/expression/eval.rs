@@ -135,7 +135,7 @@ fn resolve_property(segments: &[PropertySegment], ctx: &ExprContext) -> Result<V
         "inputs" => {
             if let Some(seg) = rest.first() {
                 let key = segment_to_key(seg, ctx)?;
-                let env_key = format!("INPUT_{}", key.to_uppercase().replace([' ', '-'], "_"));
+                let env_key = format!("INPUT_{}", key.to_uppercase().replace(' ', "_"));
                 Ok(Value::String(
                     ctx.env.get(&env_key).cloned().unwrap_or_default(),
                 ))

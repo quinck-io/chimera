@@ -57,6 +57,15 @@ pub fn build_base_env(
         workspace.tool_cache().to_string_lossy().into_owned(),
     );
 
+    // Host-mode steps inherit the daemon's PATH from the process environment, but it
+    // must also be in this map: `build_step_env` prepends GITHUB_PATH entries onto
+    // whatever PATH it finds here, and with nothing to prepend onto it would hand the
+    // step a PATH containing only the added directories — losing /bin, /usr/bin and
+    // every other host tool from the first `core.addPath()` onwards.
+    if let Ok(path) = std::env::var("PATH") {
+        env.insert("PATH".into(), path);
+    }
+
     // GITHUB_TOKEN from manifest variables
     if let Some(token) = manifest.github_token() {
         env.insert("GITHUB_TOKEN".into(), token.into());

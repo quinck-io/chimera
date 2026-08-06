@@ -64,15 +64,7 @@ impl TestEnv {
         &self,
         manifest: &JobManifest,
     ) -> anyhow::Result<(chimera::job::client::JobConclusion, HashMap<String, String>)> {
-        let mut base_env = build_base_env(manifest, &self.workspace, "test-runner");
-
-        // In real host-mode runs, PATH is inherited from the process environment.
-        // We must include it explicitly because build_step_env only looks at the
-        // HashMap, not the inherited process env.
-        if let Ok(path) = std::env::var("PATH") {
-            base_env.entry("PATH".into()).or_insert(path);
-        }
-
+        let base_env = build_base_env(manifest, &self.workspace, "test-runner");
         let action_cache = ActionCache::new(self.actions_dir.clone(), reqwest::Client::new());
 
         run_all_steps(
