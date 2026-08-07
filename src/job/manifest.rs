@@ -235,7 +235,8 @@ fn action_reference_label(reference: &Value) -> Option<String> {
 
     let path = str_field("path");
     if reference.get("repositoryType").and_then(|v| v.as_str()) == Some("self") {
-        return Some(format!("./{}", path?));
+        // The path arrives as it was written, so it usually carries the `./` already.
+        return Some(format!("./{}", path?.trim_start_matches("./")));
     }
 
     let name = str_field("name")?;

@@ -214,6 +214,26 @@ fn unnamed_local_action_step_is_named_after_its_path() {
     );
 }
 
+/// The job message sends the path as written in the workflow, `./` included.
+#[test]
+fn unnamed_local_action_step_does_not_double_the_dot_slash() {
+    let step = unnamed_step(
+        json!({
+            "type": "repository",
+            "repositoryType": "self",
+            "name": "",
+            "path": "./.github/actions/greet"
+        }),
+        None,
+    );
+
+    let result = normalize_step(&step);
+    assert_eq!(
+        result.get("displayName").unwrap(),
+        "Run ./.github/actions/greet"
+    );
+}
+
 #[test]
 fn unnamed_docker_action_step_is_named_after_its_image() {
     let step = unnamed_step(
