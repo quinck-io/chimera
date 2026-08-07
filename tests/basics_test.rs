@@ -371,7 +371,7 @@ async fn cancel_token_cancels_job() {
         "fake-token",
         cancel_token,
         None,
-        std::path::Path::new("node"),
+        &chimera::node::NodeRuntimes::single("node".into()),
         None,
     )
     .await

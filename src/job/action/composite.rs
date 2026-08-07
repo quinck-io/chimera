@@ -15,6 +15,7 @@ use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
 use crate::job::schema::Step;
 use crate::job::workspace::Workspace;
+use crate::node::NodeRuntimes;
 
 use super::build_action_inputs;
 
@@ -38,7 +39,7 @@ pub fn run_composite_action<'a>(
     depth: u32,
     cancel_token: &'a CancellationToken,
     docker_resources: Option<&'a JobDockerResources>,
-    node_path: &'a Path,
+    node_runtimes: &'a NodeRuntimes,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StepResult>> + Send + 'a>> {
     Box::pin(run_composite_action_inner(
         action_dir,
@@ -53,7 +54,7 @@ pub fn run_composite_action<'a>(
         depth,
         cancel_token,
         docker_resources,
-        node_path,
+        node_runtimes,
     ))
 }
 
@@ -71,7 +72,7 @@ async fn run_composite_action_inner(
     depth: u32,
     cancel_token: &CancellationToken,
     docker_resources: Option<&JobDockerResources>,
-    node_path: &Path,
+    node_runtimes: &NodeRuntimes,
 ) -> Result<StepResult> {
     if depth >= MAX_COMPOSITE_DEPTH {
         bail!("composite action recursion depth limit ({MAX_COMPOSITE_DEPTH}) exceeded");
@@ -131,7 +132,7 @@ async fn run_composite_action_inner(
                 depth,
                 cancel_token,
                 docker_resources,
-                node_path,
+                node_runtimes,
             )
             .await?
         } else if nested_obj.contains_key(ykey("run")) {
@@ -285,7 +286,7 @@ async fn run_nested_action(
     depth: u32,
     cancel_token: &CancellationToken,
     docker_resources: Option<&JobDockerResources>,
-    node_path: &Path,
+    node_runtimes: &NodeRuntimes,
 ) -> Result<StepResult> {
     let uses = step_map
         .get(ykey("uses"))
@@ -352,7 +353,7 @@ async fn run_nested_action(
             log_sender,
             cancel_token,
             docker_resources,
-            node_path,
+            node_runtimes,
         )
         .await
     } else if metadata.runs.is_composite() {
@@ -369,7 +370,7 @@ async fn run_nested_action(
             depth + 1,
             cancel_token,
             docker_resources,
-            node_path,
+            node_runtimes,
         )
         .await
     } else if metadata.runs.is_docker() {

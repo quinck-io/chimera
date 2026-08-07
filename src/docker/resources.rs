@@ -49,7 +49,7 @@ pub struct JobDockerResources {
     /// Host→container path mappings for remapping paths when running inside the container.
     path_mappings: Vec<(PathBuf, String)>,
     /// Path to the node binary inside the container (if mounted from host).
-    node_container_path: Option<String>,
+    node_container_paths: std::collections::BTreeMap<String, String>,
     /// Gateway IP of the job network (host IP from container's perspective).
     host_gateway_ip: Option<String>,
     /// Default environment from the job container's Docker image (ENV directives).
@@ -67,7 +67,7 @@ impl JobDockerResources {
             service_container_map: HashMap::new(),
             service_ports: HashMap::new(),
             path_mappings: Vec::new(),
-            node_container_path: None,
+            node_container_paths: std::collections::BTreeMap::new(),
             host_gateway_ip: None,
             image_env: HashMap::new(),
         }
@@ -242,17 +242,16 @@ impl JobDockerResources {
                 tool_cache_mount,
             ];
 
-            // Ensure a Linux node binary is available and mount it into the container.
-            // The official runner ships node in externals/; we download it on first use.
-            let node_bin = crate::node::ensure_linux_node(params.externals_dir).await?;
-            // node_bin is e.g. externals/node20-linux-x64/bin/node — mount the grandparent dir
-            let node_dir = node_bin
-                .parent()
-                .and_then(|p| p.parent())
-                .context("unexpected node binary path structure")?;
-            let node_mount = format!("{}:/github/externals/node:ro", node_dir.display());
-            binds.push(node_mount);
-            self.node_container_path = Some("/github/externals/node/bin/node".into());
+            // Ensure the Linux node binaries are available and mount them into the
+            // container. The official runner ships these in externals/; we download
+            // them on first use. The whole directory goes in, not one runtime, so an
+            // action can be run on the major version it declares.
+            let runtimes = crate::node::ensure_linux_node(params.externals_dir).await?;
+            binds.push(format!(
+                "{}:/github/externals:ro",
+                params.externals_dir.display()
+            ));
+            self.node_container_paths = runtimes.remapped("/github/externals");
 
             binds.extend(spec.volumes.clone());
 
@@ -401,10 +400,15 @@ impl JobDockerResources {
         self.host_gateway_ip.as_deref()
     }
 
-    /// Path to the node binary inside the container.
-    /// Falls back to "node" (relying on container PATH) if not mounted from host.
-    pub fn node_path(&self) -> &str {
-        self.node_container_path.as_deref().unwrap_or("node")
+    /// Path inside the container to the node binary for an action's declared
+    /// runtime. Falls back to whatever `node` the image has on PATH when nothing
+    /// was mounted from the host.
+    pub fn node_path(&self, major: Option<&str>) -> &str {
+        major
+            .and_then(|m| self.node_container_paths.get(m))
+            .or_else(|| self.node_container_paths.get(crate::node::DEFAULT_MAJOR))
+            .map(String::as_str)
+            .unwrap_or("node")
     }
 
     /// Default environment variables from the job container's Docker image.

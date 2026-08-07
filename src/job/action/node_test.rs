@@ -99,7 +99,7 @@ async fn node_action_executes_script() {
         logger.sender(),
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await;
 
@@ -160,7 +160,7 @@ if (process.env.INPUT_TOKEN !== 'my-secret') {
         logger.sender(),
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await;
 
@@ -219,7 +219,7 @@ if (process.env.INPUT_FLAVOR !== 'vanilla') {
         logger.sender(),
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await;
 
@@ -263,7 +263,7 @@ async fn nonzero_exit_fails() {
         logger.sender(),
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await;
 

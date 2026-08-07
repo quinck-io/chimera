@@ -332,7 +332,7 @@ async fn continue_on_error_works() {
         "fake-token",
         CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
         None,
     )
     .await
@@ -391,7 +391,7 @@ async fn failure_stops_remaining_steps() {
         "fake-token",
         CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
         None,
     )
     .await
@@ -443,7 +443,7 @@ async fn secrets_from_context_data_resolved() {
         "fake-token",
         CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
         None,
     )
     .await
@@ -506,7 +506,7 @@ async fn cancel_token_returns_cancelled_between_steps() {
         "fake-token",
         cancel_token,
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
         None,
     )
     .await

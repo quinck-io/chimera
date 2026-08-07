@@ -32,6 +32,15 @@ impl ActionRuntime {
         matches!(self, Self::Node(_))
     }
 
+    /// The major version behind `using: node<major>`, used to pick the runtime the
+    /// action was built against.
+    pub fn node_major(&self) -> Option<&str> {
+        match self {
+            Self::Node(version) => Some(version),
+            _ => None,
+        }
+    }
+
     pub fn is_composite(&self) -> bool {
         matches!(self, Self::Composite)
     }

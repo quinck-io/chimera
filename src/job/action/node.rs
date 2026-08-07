@@ -14,6 +14,7 @@ use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
 use crate::job::schema::Step;
 use crate::job::workspace::Workspace;
+use crate::node::NodeRuntimes;
 
 use super::build_action_inputs;
 
@@ -29,7 +30,7 @@ pub async fn run_node_action(
     log_sender: &LogSender,
     cancel_token: &CancellationToken,
     docker_resources: Option<&JobDockerResources>,
-    node_path: &Path,
+    node_runtimes: &NodeRuntimes,
 ) -> Result<StepResult> {
     let script_file = match entry_point {
         "pre" => metadata
@@ -50,6 +51,10 @@ pub async fn run_node_action(
     };
 
     let script_path = action_dir.join(script_file);
+
+    // Actions are bundled against a specific Node major; running a node24 bundle on
+    // Node 20 only appears to work until it reaches for something newer.
+    let node_major = metadata.runs.using.node_major();
 
     let mut env = build_step_env(step, job_state, workspace, base_env);
 
@@ -101,7 +106,7 @@ pub async fn run_node_action(
         let result = crate::docker::exec::docker_exec(
             resources.docker(),
             container_id,
-            vec![resources.node_path().into(), container_script],
+            vec![resources.node_path(node_major).into(), container_script],
             &env,
             "/github/workspace",
             job_state,
@@ -130,7 +135,7 @@ pub async fn run_node_action(
     );
 
     let script_path_str = script_path.to_string_lossy();
-    let node_path_str = node_path.to_string_lossy();
+    let node_path_str = node_runtimes.resolve(node_major).to_string_lossy();
     let result = run_process(
         &node_path_str,
         &[OsStr::new(script_path_str.as_ref())],
