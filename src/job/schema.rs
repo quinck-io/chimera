@@ -25,6 +25,9 @@ pub struct JobManifest {
     pub mask: Vec<serde_json::Value>,
     #[serde(default)]
     pub file_table: Vec<String>,
+    /// Flattened `defaults` from the workflow and job, e.g. `{"run": {"working-directory": "app"}}`.
+    #[serde(default)]
+    pub defaults: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -217,6 +220,16 @@ impl JobManifest {
         self.service_containers
             .as_ref()
             .is_some_and(|s| !s.is_empty())
+    }
+
+    /// `defaults.run.working-directory`, applied to every `run:` step that does not
+    /// set its own.
+    pub fn default_working_directory(&self) -> Option<&str> {
+        self.defaults
+            .get("run")?
+            .get("working-directory")
+            .map(String::as_str)
+            .filter(|dir| !dir.is_empty())
     }
 
     pub fn results_endpoint(&self) -> Option<&str> {

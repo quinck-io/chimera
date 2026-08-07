@@ -280,6 +280,14 @@ pub fn script_step(id: &str, script: &str) -> serde_json::Value {
     })
 }
 
+/// A `run:` step with a `working-directory:`, which reaches the runner as the
+/// step input `workingDirectory`.
+pub fn script_step_in_dir(id: &str, script: &str, dir: &str) -> serde_json::Value {
+    let mut step = script_step(id, script);
+    step["inputs"]["workingDirectory"] = serde_json::json!(dir);
+    step
+}
+
 pub fn script_step_continue(id: &str, script: &str) -> serde_json::Value {
     let mut step = script_step(id, script);
     step["continueOnError"] = serde_json::json!(true);

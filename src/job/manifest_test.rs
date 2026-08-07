@@ -780,3 +780,73 @@ fn normalize_empty_job_container_becomes_none() {
     assert!(manifest.job_container.is_none());
     assert!(!manifest.has_container());
 }
+
+fn defaults_token(entries: &[(&str, &str)]) -> serde_json::Value {
+    let map: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|(k, v)| json!({ "Key": { "type": 0, "lit": k }, "Value": { "type": 0, "lit": v } }))
+        .collect();
+    json!({
+        "type": 2,
+        "map": [{
+            "Key": { "type": 0, "lit": "run" },
+            "Value": { "type": 2, "map": map }
+        }]
+    })
+}
+
+#[test]
+fn normalize_flattens_run_defaults() {
+    let raw = json!({
+        "plan": { "planId": "p", "version": 0 },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "steps": [],
+        "defaults": [defaults_token(&[("working-directory", "apps/mobile")])]
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest = serde_json::from_value(normalized).unwrap();
+
+    assert_eq!(manifest.default_working_directory(), Some("apps/mobile"));
+}
+
+/// Workflow-level defaults come first, job-level second; the narrower scope wins.
+#[test]
+fn normalize_lets_job_defaults_override_workflow_defaults() {
+    let raw = json!({
+        "plan": { "planId": "p", "version": 0 },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "steps": [],
+        "defaults": [
+            defaults_token(&[("working-directory", "from-workflow"), ("shell", "bash")]),
+            defaults_token(&[("working-directory", "from-job")])
+        ]
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest = serde_json::from_value(normalized).unwrap();
+
+    assert_eq!(manifest.default_working_directory(), Some("from-job"));
+    // The key the job did not restate survives the merge.
+    assert_eq!(
+        manifest.defaults.get("run").and_then(|r| r.get("shell")),
+        Some(&"bash".to_string())
+    );
+}
+
+#[test]
+fn manifest_without_defaults_has_no_working_directory() {
+    let raw = json!({
+        "plan": { "planId": "p", "version": 0 },
+        "jobId": "j",
+        "timeline": { "id": "t" },
+        "steps": []
+    });
+
+    let normalized = normalize_manifest(&raw);
+    let manifest: crate::job::schema::JobManifest = serde_json::from_value(normalized).unwrap();
+
+    assert_eq!(manifest.default_working_directory(), None);
+}
