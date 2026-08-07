@@ -120,25 +120,29 @@ fn normalize_step(step: &Value) -> Value {
         result.insert("id".into(), id.clone());
     }
 
-    // displayName: extract from displayNameToken.lit
-    let display_name = obj
-        .get("displayNameToken")
-        .and_then(|t| t.get("lit"))
-        .and_then(|v| v.as_str())
-        .or_else(|| obj.get("name").and_then(|v| v.as_str()))
-        .unwrap_or("(unnamed step)")
-        .to_string();
-    result.insert("displayName".into(), Value::String(display_name));
-
     // reference
     if let Some(reference) = obj.get("reference") {
         result.insert("reference".into(), reference.clone());
     }
 
     // inputs: convert from template token to plain map
-    if let Some(inputs) = obj.get("inputs") {
-        result.insert("inputs".into(), template_token_to_map(inputs));
+    let inputs = obj.get("inputs").map(template_token_to_map);
+    if let Some(inputs) = &inputs {
+        result.insert("inputs".into(), inputs.clone());
     }
+
+    // displayName: from displayNameToken, which is a template token like any other
+    // — a `name:` carrying an expression arrives as one, and comes back out here as
+    // a `${{ }}` string for the executor to resolve once the step runs.
+    let display_name = obj
+        .get("displayNameToken")
+        .map(template_token_to_value)
+        .and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        })
+        .unwrap_or_else(|| synthesize_display_name(obj, inputs.as_ref()));
+    result.insert("displayName".into(), Value::String(display_name));
 
     // condition: might be a template token (expression or string)
     if let Some(cond) = obj.get("condition") {
@@ -176,6 +180,70 @@ fn normalize_step(step: &Value) -> Value {
     }
 
     Value::Object(result)
+}
+
+/// Build the label GitHub shows for a step that has no `name:`.
+///
+/// The job message names these steps after their context (`__self`,
+/// `__actions_checkout`, `__run_2`), which is an internal handle, not something to
+/// put in front of a user. The official runner derives the label from what the step
+/// actually does, and that label ends up on the run page, in the timeline and in the
+/// filenames inside the downloadable log archive — so it has to match.
+fn synthesize_display_name(step: &Map<String, Value>, inputs: Option<&Value>) -> String {
+    let reference = step.get("reference");
+    let kind = reference
+        .and_then(|r| r.get("type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if kind == "script" {
+        // Only the first line: a multi-line script would otherwise put newlines in
+        // the timeline record and in log filenames.
+        let script = inputs
+            .and_then(|i| i.get("script"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        if let Some(first_line) = script.lines().find(|l| !l.trim().is_empty()) {
+            return format!("Run {}", first_line.trim());
+        }
+    }
+
+    if let Some(label) = reference.and_then(action_reference_label) {
+        return format!("Run {label}");
+    }
+
+    step.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unnamed step)")
+        .to_string()
+}
+
+/// Render an action reference the way it was written in the workflow:
+/// `owner/repo@ref`, `owner/repo/subdir@ref`, `./local/action`, `docker://image`.
+fn action_reference_label(reference: &Value) -> Option<String> {
+    let str_field = |key: &str| {
+        reference
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+
+    if let Some(image) = str_field("image") {
+        return Some(format!("docker://{image}"));
+    }
+
+    let path = str_field("path");
+    if reference.get("repositoryType").and_then(|v| v.as_str()) == Some("self") {
+        return Some(format!("./{}", path?));
+    }
+
+    let name = str_field("name")?;
+    let git_ref = str_field("ref")?;
+    match path {
+        Some(path) => Some(format!("{name}/{path}@{git_ref}")),
+        None => Some(format!("{name}@{git_ref}")),
+    }
 }
 
 /// Convert a TemplateToken to a plain serde_json::Value.

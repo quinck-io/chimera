@@ -196,6 +196,15 @@ impl StepTracker {
         }
     }
 
+    /// Resolve a templated `name:` (`Build ${{ matrix.os }}`). Deferred to step
+    /// start because the manifest carries the raw template — GitHub resolves it in
+    /// the runner, not on the server.
+    fn resolve_name(&mut self, ctx: &ExprContext) {
+        if self.name.contains("${{") {
+            self.name = super::expression::resolve_template(&self.name, ctx);
+        }
+    }
+
     fn mark_started(&mut self) {
         self.status = ResultsStatus::InProgress;
         self.started_at = Some(format_results_timestamp(Utc::now()));
@@ -605,6 +614,7 @@ pub async fn run_all_steps(
 
             update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
+            trackers[tracker_idx].resolve_name(&condition_ctx);
             if !super::expression::evaluate_condition(pre_step.condition.as_deref(), &condition_ctx)
             {
                 debug!(step = %pre_step.display_name, "skipping pre step (condition not met)");
@@ -616,7 +626,7 @@ pub async fn run_all_steps(
                     job_client,
                     manifest,
                     &trackers,
-                    pre_step,
+                    tracker_idx,
                     &now,
                     &now,
                     ResultsConclusion::Skipped,
@@ -633,7 +643,7 @@ pub async fn run_all_steps(
                 job_client,
                 manifest,
                 &trackers,
-                pre_step,
+                tracker_idx,
                 &start_time,
             )
             .await;
@@ -676,7 +686,7 @@ pub async fn run_all_steps(
                 job_client,
                 manifest,
                 &trackers,
-                pre_step,
+                tracker_idx,
                 &start_time,
                 &finish_time,
                 result_conclusion,
@@ -732,6 +742,7 @@ pub async fn run_all_steps(
         // logs and are reported as completed immediately.
         update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
         let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
+        trackers[idx].resolve_name(&condition_ctx);
         if !super::expression::evaluate_condition(step.condition.as_deref(), &condition_ctx) {
             debug!(step = %step.display_name, "skipping step (condition not met)");
             let now = format_timeline_timestamp(Utc::now());
@@ -753,7 +764,7 @@ pub async fn run_all_steps(
                 job_client,
                 manifest,
                 &trackers,
-                step,
+                idx,
                 &now,
                 &now,
                 ResultsConclusion::Skipped,
@@ -771,7 +782,7 @@ pub async fn run_all_steps(
             job_client,
             manifest,
             &trackers,
-            step,
+            idx,
             &start_time,
         )
         .await;
@@ -816,7 +827,7 @@ pub async fn run_all_steps(
             job_client,
             manifest,
             &trackers,
-            step,
+            idx,
             &start_time,
             &finish_time,
             result_conclusion,
@@ -929,6 +940,7 @@ pub async fn run_all_steps(
 
             update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
+            trackers[tracker_idx].resolve_name(&condition_ctx);
             if !super::expression::evaluate_condition(
                 post_step.condition.as_deref(),
                 &condition_ctx,
@@ -942,7 +954,7 @@ pub async fn run_all_steps(
                     job_client,
                     manifest,
                     &trackers,
-                    post_step,
+                    tracker_idx,
                     &now,
                     &now,
                     ResultsConclusion::Skipped,
@@ -959,7 +971,7 @@ pub async fn run_all_steps(
                 job_client,
                 manifest,
                 &trackers,
-                post_step,
+                tracker_idx,
                 &start_time,
             )
             .await;
@@ -1002,7 +1014,7 @@ pub async fn run_all_steps(
                 job_client,
                 manifest,
                 &trackers,
-                post_step,
+                tracker_idx,
                 &start_time,
                 &finish_time,
                 result_conclusion,
@@ -1356,7 +1368,7 @@ async fn report_step_started(
     client: &Arc<JobClient>,
     manifest: &JobManifest,
     trackers: &[StepTracker],
-    step: &Step,
+    idx: usize,
     start_time: &str,
 ) {
     if use_results {
@@ -1365,18 +1377,19 @@ async fn report_step_started(
             .update_steps(&manifest.plan.plan_id, &manifest.plan.job_id, &steps)
             .await;
     } else {
+        let tracker = &trackers[idx];
         let _ = client
             .update_timeline(
                 &manifest.plan.plan_id,
                 &manifest.plan.timeline_id,
                 &[TimelineRecord {
-                    id: step.id.clone(),
+                    id: tracker.id.clone(),
                     state: Some(TimelineState::InProgress),
                     result: None,
                     start_time: Some(start_time.to_string()),
                     finish_time: None,
-                    name: Some(step.display_name.clone()),
-                    order: Some(step.order),
+                    name: Some(tracker.name.clone()),
+                    order: Some(tracker.order),
                     log: None,
                 }],
             )
@@ -1390,7 +1403,7 @@ async fn report_step_completed(
     client: &Arc<JobClient>,
     manifest: &JobManifest,
     trackers: &[StepTracker],
-    step: &Step,
+    idx: usize,
     start_time: &str,
     finish_time: &str,
     result_conclusion: ResultsConclusion,
@@ -1409,18 +1422,19 @@ async fn report_step_completed(
             ResultsConclusion::Skipped => TimelineResult::Skipped,
             _ => TimelineResult::Failed,
         };
+        let tracker = &trackers[idx];
         let _ = client
             .update_timeline(
                 &manifest.plan.plan_id,
                 &manifest.plan.timeline_id,
                 &[TimelineRecord {
-                    id: step.id.clone(),
+                    id: tracker.id.clone(),
                     state: Some(TimelineState::Completed),
                     result: Some(timeline_result),
                     start_time: Some(start_time.to_string()),
                     finish_time: Some(finish_time.to_string()),
-                    name: Some(step.display_name.clone()),
-                    order: Some(step.order),
+                    name: Some(tracker.name.clone()),
+                    order: Some(tracker.order),
                     log: Some(TimelineLogRef { id: legacy_log_id }),
                 }],
             )
