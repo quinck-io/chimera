@@ -96,6 +96,7 @@ fn normalize_step_extracts_display_name_from_token() {
     assert_eq!(result.get("displayName").unwrap(), "My Step");
 }
 
+/// Last resort only: nothing to synthesize a label from.
 #[test]
 fn normalize_step_falls_back_to_name() {
     let step = json!({
@@ -107,6 +108,124 @@ fn normalize_step_falls_back_to_name() {
 
     let result = normalize_step(&step);
     assert_eq!(result.get("displayName").unwrap(), "__run");
+}
+
+#[test]
+fn normalize_step_keeps_templated_display_name_for_later() {
+    let step = json!({
+        "id": "s1",
+        "displayNameToken": {
+            "type": 1,
+            "seq": [
+                { "type": 0, "lit": "Build " },
+                { "type": 3, "expr": "matrix.os" }
+            ]
+        },
+        "reference": { "type": "script" },
+        "inputs": { "type": 2, "map": [] }
+    });
+
+    let result = normalize_step(&step);
+    assert_eq!(result.get("displayName").unwrap(), "Build ${{ matrix.os }}");
+}
+
+fn unnamed_step(reference: serde_json::Value, script: Option<&str>) -> serde_json::Value {
+    let inputs = match script {
+        Some(script) => json!({
+            "type": 2,
+            "map": [{
+                "Key": { "type": 0, "lit": "script" },
+                "Value": { "type": 0, "lit": script }
+            }]
+        }),
+        None => json!({ "type": 2, "map": [] }),
+    };
+    json!({ "id": "s1", "name": "__ctx", "reference": reference, "inputs": inputs })
+}
+
+#[test]
+fn unnamed_script_step_is_named_after_its_script() {
+    let step = unnamed_step(json!({ "type": "script" }), Some("echo hello"));
+
+    let result = normalize_step(&step);
+    assert_eq!(result.get("displayName").unwrap(), "Run echo hello");
+}
+
+#[test]
+fn unnamed_multiline_script_step_uses_first_line() {
+    let step = unnamed_step(
+        json!({ "type": "script" }),
+        Some("\n  echo one\n  echo two\n"),
+    );
+
+    let result = normalize_step(&step);
+    assert_eq!(result.get("displayName").unwrap(), "Run echo one");
+}
+
+#[test]
+fn unnamed_remote_action_step_is_named_after_its_reference() {
+    let step = unnamed_step(
+        json!({ "type": "repository", "name": "actions/checkout", "ref": "v7" }),
+        None,
+    );
+
+    let result = normalize_step(&step);
+    assert_eq!(
+        result.get("displayName").unwrap(),
+        "Run actions/checkout@v7"
+    );
+}
+
+#[test]
+fn unnamed_remote_action_step_includes_subdirectory() {
+    let step = unnamed_step(
+        json!({
+            "type": "repository",
+            "name": "owner/repo",
+            "ref": "v1",
+            "path": "sub/action"
+        }),
+        None,
+    );
+
+    let result = normalize_step(&step);
+    assert_eq!(
+        result.get("displayName").unwrap(),
+        "Run owner/repo/sub/action@v1"
+    );
+}
+
+#[test]
+fn unnamed_local_action_step_is_named_after_its_path() {
+    let step = unnamed_step(
+        json!({
+            "type": "repository",
+            "repositoryType": "self",
+            "name": "",
+            "path": ".github/actions/setup-monorepo"
+        }),
+        None,
+    );
+
+    let result = normalize_step(&step);
+    assert_eq!(
+        result.get("displayName").unwrap(),
+        "Run ./.github/actions/setup-monorepo"
+    );
+}
+
+#[test]
+fn unnamed_docker_action_step_is_named_after_its_image() {
+    let step = unnamed_step(
+        json!({ "type": "containerregistry", "image": "alpine:3.19" }),
+        None,
+    );
+
+    let result = normalize_step(&step);
+    assert_eq!(
+        result.get("displayName").unwrap(),
+        "Run docker://alpine:3.19"
+    );
 }
 
 #[test]

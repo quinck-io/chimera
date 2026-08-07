@@ -636,9 +636,28 @@ GitHub sends service containers in two possible formats:
 
 ### 7.7 Display Name Extraction
 
-Step display names live in `displayNameToken.lit` (a string template token), not
-in a plain `displayName` field. The normalizer extracts the literal value. Falls
-back to `name` field, then to `"(unnamed step)"`.
+Step display names live in `displayNameToken` (a template token), not in a plain
+`displayName` field. Like any template token it can be an expression — a `name:`
+written as `Build ${{ matrix.os }}` arrives unresolved, and the runner, not the
+server, is expected to resolve it when the step starts.
+
+`displayNameToken` is absent entirely for a step with no `name:`. The step's
+`name` field is **not** a substitute: it holds the context handle (`__self`,
+`__actions_checkout`, `__run_2`), which is an internal identifier. The runner
+derives the label from what the step does instead:
+
+| Step | Display name |
+|------|--------------|
+| `run: echo hi` | `Run echo hi` (first line only) |
+| `uses: actions/checkout@v7` | `Run actions/checkout@v7` |
+| `uses: owner/repo/sub@v1` | `Run owner/repo/sub@v1` |
+| `uses: ./.github/actions/foo` | `Run ./.github/actions/foo` |
+| `uses: docker://alpine:3.19` | `Run docker://alpine:3.19` |
+
+Pre and post steps prefix this, giving `Post Run actions/checkout@v7`. The label
+is not only cosmetic: it names the per-step files inside the downloadable log
+archive. `"(unnamed step)"` is the last resort when there is nothing to derive
+from.
 
 ---
 
