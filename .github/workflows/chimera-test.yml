@@ -581,3 +581,76 @@ jobs:
       - name: "Real-world: !contains(needs.*.result, 'failure')"
         if: "!contains(needs.*.result, 'failure')"
         run: echo "No failures detected via wildcard"
+
+  # ── Job 11: Regression — hyphenated inputs through a composite ─────
+  # A composite whose sub-steps are `uses:` (not just `run:`) forwarding a
+  # hyphenated input of its own. Fails as "Input required and not supplied: dest"
+  # when `inputs.pnpm-dest` does not resolve.
+  regression-composite-inputs:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/forward-input
+        with:
+          pnpm-dest: ${{ runner.temp }}/pnpm
+
+      - name: pnpm landed where it was told to
+        run: test -d "$RUNNER_TEMP/pnpm"
+
+  # ── Job 12: Regression — host PATH survives core.addPath() ─────────
+  # setup-node prepends to GITHUB_PATH. Every later step must still see the host
+  # PATH; otherwise the next `run:` cannot even spawn bash.
+  regression-host-path:
+    runs-on: [self-hosted, chimera]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Host tools are still on PATH after an action added to it
+        run: |
+          echo "PATH=$PATH"
+          command -v bash || { echo "::error::bash fell off PATH"; exit 1; }
+          command -v uname || { echo "::error::host PATH was replaced"; exit 1; }
+          node --version
+
+  # ── Job 13: Regression — step conclusions after a failure ──────────
+  # Expected to fail: the point is what the API reports for steps 3 and 4.
+  # Steps after the failure must read `skipped`, not `action_required`, and the
+  # always() step must actually run.
+  regression-conclusions:
+    runs-on: [self-hosted, chimera]
+    continue-on-error: true
+    steps:
+      - name: Succeeds
+        run: echo ok
+
+      - name: Deliberate failure
+        run: exit 1
+
+      - name: Must report skipped
+        run: echo "this step must not run"
+
+      - name: Must run anyway
+        if: always()
+        run: echo "always() still runs after a failure"
+
+  # ── Job 14: Regression — step display names ────────────────────────
+  # None of these should surface as __run, __actions_checkout or __self.
+  regression-step-names:
+    runs-on: [self-hosted, chimera]
+    strategy:
+      matrix:
+        variant: [alpha]
+    steps:
+      - run: echo "unnamed script step"
+
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/greet
+        with:
+          name: chimera
+
+      - name: Interpolated ${{ matrix.variant }}
+        run: echo "templated step name"
