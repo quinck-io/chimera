@@ -1,0 +1,29 @@
+name: 'Forward input'
+description: 'Passes a hyphenated input of its own down to a nested action'
+inputs:
+  # Hyphenated on purpose. The runner exports this as INPUT_PNPM-DEST, keeping the
+  # hyphen, and `inputs.pnpm-dest` below has to find it under that exact name.
+  pnpm-dest:
+    description: 'Directory pnpm is installed into'
+    required: false
+    default: '~/setup-pnpm'
+runs:
+  using: 'composite'
+  steps:
+    - name: Forwarded value is visible to the composite
+      shell: bash
+      run: |
+        echo "pnpm-dest resolved to: ${{ inputs.pnpm-dest }}"
+        test -n "${{ inputs.pnpm-dest }}" || {
+          echo "::error::inputs.pnpm-dest resolved to an empty string"
+          exit 1
+        }
+
+    # `dest` is required with no default, so an empty forwarded value fails here
+    # with "Input required and not supplied: dest" — the exact production failure.
+    # `version` is pinned because this repo has no package.json to read it from.
+    - name: Forwarded value survives into a nested action
+      uses: pnpm/action-setup@v6
+      with:
+        dest: ${{ inputs.pnpm-dest }}
+        version: '10'
