@@ -611,6 +611,15 @@ After normalization, the manifest looks like:
 | `"repository"` | An action from a repo | `name` = `owner/action`, `ref` = git ref, `path` = subdir |
 | `"containerregistry"` | A Docker action | `image` = container image |
 
+A `run:` step carries more than its script. `working-directory:` arrives as the
+input **`workingDirectory`** — camelCase, unlike the `working-directory` spelling
+used everywhere else, including inside composite action steps and in `defaults`
+(7.5). `shell:` arrives as `inputs.shell`.
+
+Ignoring `workingDirectory` does not fail loudly: the step simply runs at the
+workspace root, so it either fails somewhere confusing or, worse, succeeds in the
+wrong directory.
+
 ### 7.5 Key Manifest Fields
 
 **SystemVssConnection endpoint** is the most important resource. It contains:
@@ -622,6 +631,26 @@ After normalization, the manifest looks like:
 **`system.github.results_endpoint`** variable — if present, enables the modern
 Results Twirp API for this job. This is how you know whether to use legacy VSS
 or modern Results for timeline/log operations.
+
+**`defaults`** — a *list* of template tokens, not a single mapping, because both
+the workflow and the job can declare them. Each resolves to `{run: {shell,
+working-directory}}`, in outermost-first order, so later entries override earlier
+ones key by key:
+
+```json
+"defaults": [
+  {"type": 2, "map": [{
+    "Key":   {"type": 0, "lit": "run"},
+    "Value": {"type": 2, "map": [
+      {"Key": {"type": 0, "lit": "working-directory"}, "Value": {"type": 0, "lit": "apps/mobile"}}
+    ]}
+  }]}
+]
+```
+
+A step's own `workingDirectory` input takes precedence over the default. Whichever
+wins is resolved against `GITHUB_WORKSPACE`, and an absolute path replaces the
+workspace rather than nesting under it.
 
 ### 7.6 Service Containers Normalization
 

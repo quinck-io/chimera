@@ -93,6 +93,30 @@ pub fn normalize_manifest(raw: &Value) -> Value {
         }
     }
 
+    // Defaults arrive as a list of template tokens, workflow level before job level,
+    // each resolving to a mapping like {run: {shell, working-directory}}. Flatten them
+    // in order so the innermost scope wins.
+    if let Some(defaults) = obj.get("defaults").and_then(|d| d.as_array()) {
+        let mut merged = Map::new();
+        for token in defaults {
+            if let Value::Object(scope) = template_token_to_map(token) {
+                for (key, value) in scope {
+                    match (merged.get_mut(&key), &value) {
+                        (Some(Value::Object(existing)), Value::Object(incoming)) => {
+                            existing.extend(incoming.clone());
+                        }
+                        _ => {
+                            merged.insert(key, value);
+                        }
+                    }
+                }
+            }
+        }
+        if !merged.is_empty() {
+            result.insert("defaults".into(), Value::Object(merged));
+        }
+    }
+
     // Pass through mask, fileTable, and actionsDownloadInfos
     if let Some(mask) = obj.get("mask") {
         result.insert("mask".into(), mask.clone());

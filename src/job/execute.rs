@@ -56,6 +56,9 @@ pub struct JobState {
     /// Host filesystem workspace path for hashFiles(). In container mode, GITHUB_WORKSPACE
     /// points to the container path (/github/workspace) but file operations need the real path.
     pub host_workspace: Option<String>,
+    /// `defaults.run.working-directory` for the job, used by any `run:` step that
+    /// does not set its own.
+    pub default_working_directory: Option<String>,
     /// Whether `::debug::` workflow commands should be emitted to the log stream.
     /// Only true when the `ACTIONS_STEP_DEBUG` secret is set to `"true"`.
     pub debug_enabled: bool,
@@ -81,8 +84,35 @@ impl JobState {
             secrets,
             context_data,
             host_workspace: None,
+            default_working_directory: None,
             debug_enabled,
         }
+    }
+}
+
+/// Where a `run:` step's script should execute, relative to the workspace.
+///
+/// A step's own `working-directory` wins; otherwise the job's
+/// `defaults.run.working-directory` applies. Both may carry expressions, and both
+/// are resolved against the workspace — an absolute path replaces it outright,
+/// which is what `Path::join` and the official runner's `Path.Combine` both do.
+fn step_working_directory(
+    step: &Step,
+    job_state: &JobState,
+    env: &HashMap<String, String>,
+) -> Option<String> {
+    let raw = step
+        .inputs
+        .get("workingDirectory")
+        .or(job_state.default_working_directory.as_ref())
+        .filter(|dir| !dir.is_empty())?;
+
+    let ctx = ExprContext::new(env, job_state, false, false);
+    let resolved = super::expression::resolve_template(raw, &ctx);
+    let trimmed = resolved.trim();
+    match trimmed.is_empty() {
+        true => None,
+        false => Some(trimmed.to_string()),
     }
 }
 
@@ -261,11 +291,16 @@ pub async fn run_host_step(
         "running host step"
     );
 
+    let working_dir = match step_working_directory(step, job_state, &env) {
+        Some(dir) => workspace.workspace_dir().join(dir),
+        None => workspace.workspace_dir().to_path_buf(),
+    };
+
     let result = run_process(
         "bash",
         &[OsStr::new("-e"), script_file.as_os_str()],
         &env,
-        workspace.workspace_dir(),
+        &working_dir,
         job_state,
         log_sender,
         timeout,
@@ -318,13 +353,19 @@ pub async fn run_container_step(
         "running container step"
     );
 
+    let working_dir = match step_working_directory(step, job_state, &env) {
+        Some(dir) if dir.starts_with('/') => dir,
+        Some(dir) => format!("/github/workspace/{dir}"),
+        None => "/github/workspace".into(),
+    };
+
     let debug_enabled = job_state.debug_enabled;
     let result = crate::docker::exec::docker_exec(
         docker_resources.docker(),
         container_id,
         vec!["bash".into(), "-e".into(), "-c".into(), script],
         &env,
-        "/github/workspace",
+        &working_dir,
         job_state,
         log_sender,
         timeout,
@@ -550,6 +591,8 @@ pub async fn run_all_steps(
     {
         job_state.host_workspace = Some(workspace.workspace_dir().to_string_lossy().into_owned());
     }
+
+    job_state.default_working_directory = manifest.default_working_directory().map(str::to_string);
 
     let mut job_failed = false;
     let mut job_cancelled = false;

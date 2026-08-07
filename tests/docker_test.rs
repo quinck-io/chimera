@@ -371,3 +371,39 @@ if (major !== '24') {
 
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+/// `working-directory` has to be honoured inside the job container too, where the
+/// workspace lives at /github/workspace rather than its host path.
+#[tokio::test]
+#[ignore]
+async fn container_step_runs_in_its_working_directory() {
+    let env = TestEnv::setup().await;
+    let dir = env.workspace.workspace_dir().join("apps/mobile");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("marker.txt"), "here").unwrap();
+
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+
+    let manifest = manifest_with_steps(
+        vec![script_step_in_dir(
+            "s1",
+            r#"test -f marker.txt || exit 1
+               test "$PWD" = "/github/workspace/apps/mobile" || { echo "cwd=$PWD"; exit 1; }"#,
+            "apps/mobile",
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
