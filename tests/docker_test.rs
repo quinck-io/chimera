@@ -303,3 +303,71 @@ async fn inline_docker_env_vars() {
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+/// A local node action declaring `using: node24`, run inside a container. Covers
+/// the mount layout as well as the choice: every runtime has to be visible from
+/// inside the container, and the action has to land on the one it asked for.
+#[tokio::test]
+#[ignore]
+async fn container_node_action_runs_on_its_declared_runtime() {
+    let env = TestEnv::setup().await;
+
+    let action_dir = env
+        .workspace
+        .workspace_dir()
+        .join(".github/actions/node-probe");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        "name: 'Node probe'\nruns:\n  using: 'node24'\n  main: 'index.js'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        action_dir.join("index.js"),
+        r#"
+const major = process.versions.node.split('.')[0];
+console.log(`running on node ${process.versions.node}`);
+if (major !== '24') {
+  console.error(`expected the node24 runtime, got ${process.versions.node}`);
+  process.exit(1);
+}
+"#,
+    )
+    .unwrap();
+
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+
+    let manifest = manifest_with_steps(
+        vec![serde_json::json!({
+            "id": "probe",
+            "displayName": "Run ./.github/actions/node-probe",
+            "reference": {
+                "name": "",
+                "type": "repository",
+                "repositoryType": "self",
+                "path": ".github/actions/node-probe"
+            },
+            "inputs": {},
+            "condition": null,
+            "timeoutInMinutes": null,
+            "continueOnError": false,
+            "order": 1,
+            "environment": null,
+            "contextName": "probe"
+        })],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}

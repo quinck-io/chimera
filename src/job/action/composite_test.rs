@@ -106,7 +106,7 @@ async fn nested_script_steps_execute() {
         0,
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await
     .unwrap();
@@ -154,7 +154,7 @@ async fn failure_propagates() {
         0,
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await
     .unwrap();
@@ -205,7 +205,7 @@ async fn inputs_available_as_env() {
         0,
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await
     .unwrap();
@@ -251,7 +251,7 @@ async fn recursion_depth_limit() {
         10, // Already at limit
         &CancellationToken::new(),
         None,
-        Path::new("node"),
+        &crate::node::NodeRuntimes::single("node".into()),
     )
     .await;
 

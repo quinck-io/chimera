@@ -23,6 +23,7 @@ use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineSt
 use super::workspace::Workspace;
 use crate::docker::output::OutputProcessor;
 use crate::docker::resources::JobDockerResources;
+use crate::node::NodeRuntimes;
 use crate::utils::{format_results_timestamp, format_timeline_timestamp};
 
 /// Per-step result for `steps.<id>.outcome` and `steps.<id>.conclusion`.
@@ -504,7 +505,7 @@ pub async fn run_all_steps(
     access_token: &str,
     cancel_token: CancellationToken,
     docker_resources: Option<&JobDockerResources>,
-    node_path: &Path,
+    node_runtimes: &NodeRuntimes,
     feed_sender: Option<&FeedSender>,
 ) -> Result<(JobConclusion, HashMap<String, String>)> {
     let masks = collect_secret_masks(manifest);
@@ -672,7 +673,7 @@ pub async fn run_all_steps(
                 access_token,
                 &cancel_token,
                 docker_resources,
-                node_path,
+                node_runtimes,
             )
             .await;
 
@@ -811,7 +812,7 @@ pub async fn run_all_steps(
             access_token,
             &cancel_token,
             docker_resources,
-            node_path,
+            node_runtimes,
         )
         .await;
 
@@ -1000,7 +1001,7 @@ pub async fn run_all_steps(
                 access_token,
                 &cancel_token,
                 docker_resources,
-                node_path,
+                node_runtimes,
             )
             .await;
 
@@ -1126,7 +1127,7 @@ async fn execute_step(
     access_token: &str,
     cancel_token: &CancellationToken,
     docker_resources: Option<&JobDockerResources>,
-    node_path: &Path,
+    node_runtimes: &NodeRuntimes,
 ) -> (StepConclusion, ResultsConclusion) {
     let has_docker = docker_resources
         .as_ref()
@@ -1176,7 +1177,7 @@ async fn execute_step(
             access_token,
             cancel_token,
             docker_resources,
-            node_path,
+            node_runtimes,
         )
         .await
     };
@@ -1204,7 +1205,7 @@ async fn run_action_step(
     access_token: &str,
     cancel_token: &CancellationToken,
     docker_resources: Option<&JobDockerResources>,
-    node_path: &Path,
+    node_runtimes: &NodeRuntimes,
 ) -> Result<StepResult> {
     use super::action::resolve::ActionSource;
 
@@ -1243,7 +1244,7 @@ async fn run_action_step(
             log_sender,
             cancel_token,
             docker_resources,
-            node_path,
+            node_runtimes,
         )
         .await
     } else if metadata.runs.is_composite() {
@@ -1260,7 +1261,7 @@ async fn run_action_step(
             0,
             cancel_token,
             docker_resources,
-            node_path,
+            node_runtimes,
         )
         .await
     } else if metadata.runs.is_docker() {

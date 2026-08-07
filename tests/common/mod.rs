@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use chimera::docker::client as docker_client;
@@ -86,7 +85,7 @@ impl TestEnv {
             "fake-token",
             CancellationToken::new(),
             None,
-            Path::new("node"),
+            &chimera::node::NodeRuntimes::single("node".into()),
             None,
         )
         .await
@@ -101,7 +100,8 @@ impl TestEnv {
         let base_env = build_container_env(manifest, &self.workspace, "test-runner");
         let action_cache = ActionCache::new(self.actions_dir.clone(), reqwest::Client::new());
 
-        let node_path = Path::new(docker_resources.node_path());
+        let node_runtimes =
+            chimera::node::NodeRuntimes::single(docker_resources.node_path(None).into());
 
         run_all_steps(
             manifest,
@@ -113,7 +113,7 @@ impl TestEnv {
             "fake-token",
             CancellationToken::new(),
             Some(docker_resources),
-            node_path,
+            &node_runtimes,
             None,
         )
         .await
@@ -134,7 +134,10 @@ pub async fn setup_docker(
     let mut resources = JobDockerResources::new(docker);
 
     let workflow_files_path = workspace.workspace_dir().parent().unwrap();
-    let externals_dir = tmp.path().join("externals");
+    // Shared across tests on purpose: a per-test directory means re-downloading
+    // every Node runtime for every container test. Concurrent downloads are safe —
+    // they extract to a temp dir and rename into place.
+    let externals_dir = std::env::temp_dir().join("chimera-test-externals");
     std::fs::create_dir_all(&externals_dir).unwrap();
 
     resources

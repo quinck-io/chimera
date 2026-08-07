@@ -1,23 +1,125 @@
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-const NODE_VERSION: &str = "v20.18.3";
+/// The Node runtimes an action can ask for through `runs.using: node<major>`.
+///
+/// Shipping only one is not enough: a `node24` action running on Node 20 mostly
+/// works, right up until it touches something the older runtime lacks — and then
+/// it fails somewhere deep inside the action, as `pnpm/action-setup` does when its
+/// self-installer re-execs `process.execPath`.
+const NODE_VERSIONS: &[(&str, &str)] = &[("20", "v20.18.3"), ("24", "v24.19.0")];
 
-/// Ensure a node binary is available for the current host platform.
-/// Returns the path to the node binary (e.g., `externals/node20-darwin-arm64/bin/node`).
-pub async fn ensure_node(externals_dir: &Path) -> Result<PathBuf> {
+/// Used for actions that declare a runtime we do not ship.
+pub(crate) const DEFAULT_MAJOR: &str = "20";
+
+/// The Node binaries available to node actions, keyed by major version.
+#[derive(Debug, Clone)]
+pub struct NodeRuntimes {
+    by_major: BTreeMap<String, PathBuf>,
+    default_path: PathBuf,
+}
+
+impl NodeRuntimes {
+    /// A set backed by one binary, where every declared runtime resolves to it.
+    /// For callers that already have a Node they trust — tests, and hosts wanting
+    /// to pin their own install rather than let the runner download one.
+    pub fn single(path: PathBuf) -> Self {
+        Self {
+            by_major: NODE_VERSIONS
+                .iter()
+                .map(|(major, _)| ((*major).to_string(), path.clone()))
+                .collect(),
+            default_path: path,
+        }
+    }
+
+    /// The binary for the runtime an action declared.
+    ///
+    /// Anything we do not have falls back to the default rather than failing the
+    /// step — node12 and node16 actions are long past EOL and the official runner
+    /// runs them on a current runtime too.
+    pub fn resolve(&self, major: Option<&str>) -> &Path {
+        let Some(major) = major else {
+            return &self.default_path;
+        };
+        match self.by_major.get(major) {
+            Some(path) => path,
+            None => {
+                warn!(
+                    requested = major,
+                    using = DEFAULT_MAJOR,
+                    "action wants a Node runtime this runner does not ship"
+                );
+                &self.default_path
+            }
+        }
+    }
+
+    /// The same set of runtimes as seen from somewhere else in the filesystem —
+    /// a container that has the externals directory bind-mounted at `root`.
+    pub fn remapped(&self, root: &str) -> BTreeMap<String, String> {
+        self.by_major
+            .iter()
+            .filter_map(|(major, path)| {
+                let dir = path.parent()?.parent()?.file_name()?.to_str()?;
+                Some((major.clone(), format!("{root}/{dir}/bin/node")))
+            })
+            .collect()
+    }
+}
+
+/// Ensure every supported node binary is available for the current host platform.
+pub async fn ensure_node(externals_dir: &Path) -> Result<NodeRuntimes> {
     ensure_node_for_platform(externals_dir, std::env::consts::OS, std::env::consts::ARCH).await
 }
 
-/// Ensure a Linux node binary is available (for container execution).
-/// Returns the path to the node binary.
-pub async fn ensure_linux_node(externals_dir: &Path) -> Result<PathBuf> {
+/// Ensure every supported node binary is available for Linux (container execution).
+pub async fn ensure_linux_node(externals_dir: &Path) -> Result<NodeRuntimes> {
     ensure_node_for_platform(externals_dir, "linux", std::env::consts::ARCH).await
 }
 
-async fn ensure_node_for_platform(externals_dir: &Path, os: &str, arch: &str) -> Result<PathBuf> {
+async fn ensure_node_for_platform(
+    externals_dir: &Path,
+    os: &str,
+    arch: &str,
+) -> Result<NodeRuntimes> {
+    let mut by_major = BTreeMap::new();
+
+    for (major, version) in NODE_VERSIONS {
+        match ensure_one(externals_dir, os, arch, major, version).await {
+            Ok(path) => {
+                by_major.insert((*major).to_string(), path);
+            }
+            // A runtime we cannot fetch is only fatal if it is the one we fall back
+            // to; otherwise the actions that want it degrade to the default.
+            Err(e) if *major != DEFAULT_MAJOR => {
+                warn!(major, error = %e, "could not provision Node runtime");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let default_path = by_major
+        .get(DEFAULT_MAJOR)
+        .cloned()
+        .with_context(|| format!("no Node {DEFAULT_MAJOR} runtime available"))?;
+
+    Ok(NodeRuntimes {
+        by_major,
+        default_path,
+    })
+}
+
+async fn ensure_one(
+    externals_dir: &Path,
+    os: &str,
+    arch: &str,
+    major: &str,
+    version: &str,
+) -> Result<PathBuf> {
     let node_arch = match arch {
         "x86_64" | "x86" => "x64",
         "aarch64" => "arm64",
@@ -28,7 +130,7 @@ async fn ensure_node_for_platform(externals_dir: &Path, os: &str, arch: &str) ->
         other => other,
     };
 
-    let dir_name = format!("node20-{node_os}-{node_arch}");
+    let dir_name = format!("node{major}-{node_os}-{node_arch}");
     let node_dir = externals_dir.join(&dir_name);
     let node_bin = node_dir.join("bin").join("node");
 
@@ -37,9 +139,8 @@ async fn ensure_node_for_platform(externals_dir: &Path, os: &str, arch: &str) ->
         return Ok(node_bin);
     }
 
-    let url = format!(
-        "https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-{node_os}-{node_arch}.tar.gz"
-    );
+    let url =
+        format!("https://nodejs.org/dist/{version}/node-{version}-{node_os}-{node_arch}.tar.gz");
 
     info!(url = %url, dest = %node_dir.display(), "downloading node binary");
 
@@ -127,3 +228,7 @@ async fn ensure_node_for_platform(externals_dir: &Path, os: &str, arch: &str) ->
     info!(path = %node_bin.display(), "node binary downloaded and cached");
     Ok(node_bin)
 }
+
+#[cfg(test)]
+#[path = "node_test.rs"]
+mod node_test;

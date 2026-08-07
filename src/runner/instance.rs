@@ -298,11 +298,11 @@ impl Runner {
             .write_event_file(&event_data)
             .context("writing event payload")?;
 
-        // Ensure a node binary is available for the host platform.
-        // Used by node actions in host mode; container mode downloads its own Linux binary.
-        let node_path = crate::node::ensure_node(&self.paths.externals_dir())
+        // Ensure the node binaries are available for the host platform.
+        // Used by node actions in host mode; container mode downloads its own Linux set.
+        let node_runtimes = crate::node::ensure_node(&self.paths.externals_dir())
             .await
-            .context("ensuring node binary")?;
+            .context("ensuring node binaries")?;
 
         // Set up Docker resources if the job needs containers or services
         let mut docker_resources = if manifest.has_container() || manifest.has_services() {
@@ -349,7 +349,7 @@ impl Runner {
                 cancel_token,
                 repo,
                 &workspace,
-                &node_path,
+                &node_runtimes,
                 &mut docker_resources,
             )
             .await;
@@ -374,7 +374,7 @@ impl Runner {
         cancel_token: CancellationToken,
         repo: &str,
         workspace: &Workspace,
-        node_path: &std::path::Path,
+        node_runtimes: &crate::node::NodeRuntimes,
         docker_resources: &mut Option<JobDockerResources>,
     ) -> Result<()> {
         // Choose env builder based on execution mode
@@ -478,7 +478,7 @@ impl Runner {
             &github_token,
             cancel_token.clone(),
             docker_resources.as_ref(),
-            node_path,
+            node_runtimes,
             live_feed.as_ref().map(|f| f.sender()),
         )
         .await;
