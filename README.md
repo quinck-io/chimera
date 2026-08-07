@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/quinck-io/chimera/main/install.sh |
 Or install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/quinck-io/chimera/main/install.sh | sh -s -- v0.1.1
+curl -fsSL https://raw.githubusercontent.com/quinck-io/chimera/main/install.sh | sh -s -- v0.1.2
 ```
 
 Prebuilt binaries are available for Linux and macOS (x86_64 and aarch64) on the [releases page](https://github.com/quinck-io/chimera/releases).
