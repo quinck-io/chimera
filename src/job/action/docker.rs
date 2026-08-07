@@ -253,7 +253,11 @@ async fn run_docker_container(params: RunDockerParams<'_>) -> Result<StepResult>
         .and_then(|r| r.network_name())
         .map(|n| n.to_string());
 
-    let container_name = format!("chimera-docker-{}", params.step.id);
+    // Unique per invocation, not per step: this host runs many runners at once, so
+    // the step id alone collides whenever two of them reach the same step together —
+    // and a container left behind by a crashed run would block every later retry of
+    // that step, since Docker refuses to reuse a name.
+    let container_name = format!("chimera-docker-{}-{}", params.step.id, uuid::Uuid::new_v4());
     let entrypoint_vec = params.entrypoint.map(|ep| vec![ep.to_string()]);
     let cmd: Option<Vec<&str>> = if params.args.is_empty() {
         None
