@@ -251,6 +251,72 @@ fn resolve_input_with_space() {
     );
 }
 
+/// A reusable workflow's own inputs arrive in context data, not as INPUT_* env
+/// vars — those only exist for an action's inputs.
+#[test]
+fn resolve_workflow_call_input_from_context_data() {
+    let data = serde_json::json!({ "inputs": { "app-directory": "apps/mobile" } });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(
+        resolve_expression("${{ inputs.app-directory }}", &ctx),
+        "apps/mobile"
+    );
+}
+
+#[test]
+fn resolve_workflow_call_input_of_other_types() {
+    let data = serde_json::json!({ "inputs": { "count": 3, "enabled": true } });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(resolve_expression("${{ inputs.count }}", &ctx), "3");
+    assert!(evaluate_condition(Some("inputs.enabled"), &ctx));
+}
+
+/// An action's INPUT_* env var wins: inside a composite the action's own inputs
+/// shadow whatever the calling workflow was given.
+#[test]
+fn action_input_env_beats_context_data() {
+    let data = serde_json::json!({ "inputs": { "name": "from-workflow" } });
+    let mut env = HashMap::new();
+    env.insert("INPUT_NAME".into(), "from-action".into());
+
+    let ctx = ExprContext {
+        env: &env,
+        context_data: &data,
+        ..ctx_with_json(&data)
+    };
+
+    assert_eq!(
+        resolve_expression("${{ inputs.name }}", &ctx),
+        "from-action"
+    );
+}
+
+/// Explicitly empty is not the same as absent, and must not fall through.
+#[test]
+fn empty_action_input_does_not_fall_back_to_context_data() {
+    let data = serde_json::json!({ "inputs": { "name": "from-workflow" } });
+    let mut env = HashMap::new();
+    env.insert("INPUT_NAME".into(), String::new());
+
+    let ctx = ExprContext {
+        env: &env,
+        context_data: &data,
+        ..ctx_with_json(&data)
+    };
+
+    assert_eq!(resolve_expression("${{ inputs.name }}", &ctx), "");
+}
+
+#[test]
+fn unknown_input_renders_empty() {
+    let data = serde_json::json!({ "inputs": { "other": "x" } });
+    let ctx = ctx_with_json(&data);
+
+    assert_eq!(resolve_expression("${{ inputs.missing }}", &ctx), "");
+}
+
 #[test]
 fn resolve_plain_string_unchanged() {
     let ctx = empty_ctx();
