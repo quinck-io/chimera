@@ -133,15 +133,24 @@ fn resolve_property(segments: &[PropertySegment], ctx: &ExprContext) -> Result<V
                 .unwrap_or(Value::Null))
         }
         "inputs" => {
-            if let Some(seg) = rest.first() {
-                let key = segment_to_key(seg, ctx)?;
-                let env_key = format!("INPUT_{}", key.to_uppercase().replace(' ', "_"));
-                Ok(Value::String(
-                    ctx.env.get(&env_key).cloned().unwrap_or_default(),
-                ))
-            } else {
-                Ok(Value::Null)
+            let Some(seg) = rest.first() else {
+                return Ok(Value::Null);
+            };
+            let key = segment_to_key(seg, ctx)?;
+
+            // An action's inputs are handed to it as INPUT_* env vars. A reusable
+            // workflow's own inputs never are — they reach the runner in the job
+            // message's context data, like `needs` and `matrix`.
+            let env_key = format!("INPUT_{}", key.to_uppercase().replace(' ', "_"));
+            if let Some(value) = ctx.env.get(&env_key) {
+                return Ok(Value::String(value.clone()));
             }
+
+            let from_context = walk_json(ctx.context_data, segments, ctx)?;
+            if from_context == Value::Null {
+                debug!(input = %key, "no value for input in env or context data");
+            }
+            Ok(from_context)
         }
         "secrets" => {
             let key = rest
