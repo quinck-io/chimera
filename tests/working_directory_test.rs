@@ -131,3 +131,47 @@ async fn step_working_directory_beats_the_job_default() {
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+/// The body-vision shape end to end: a reusable workflow whose job default is
+/// `working-directory: ${{ inputs.app-directory }}`, with the input arriving in
+/// context data rather than as an env var.
+#[tokio::test]
+async fn job_default_working_directory_from_a_workflow_call_input() {
+    let env = TestEnv::setup().await;
+    nested_dir(&env);
+
+    let mut manifest = manifest_with_steps_and_context(
+        vec![script_step("s1", r#"test -f marker.txt || exit 1"#)],
+        &env.mock_server.uri(),
+        serde_json::json!({ "inputs": { "app-directory": "apps/mobile" } }),
+    );
+    manifest.defaults.insert(
+        "run".into(),
+        std::collections::HashMap::from([(
+            "working-directory".into(),
+            "${{ inputs.app-directory }}".into(),
+        )]),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+/// A called workflow reads its inputs in ordinary step bodies too, not just in
+/// `defaults`.
+#[tokio::test]
+async fn workflow_call_input_resolves_inside_a_step_script() {
+    let env = TestEnv::setup().await;
+
+    let manifest = manifest_with_steps_and_context(
+        vec![script_step(
+            "s1",
+            r#"test "${{ inputs.app-directory }}" = "apps/mobile" || exit 1"#,
+        )],
+        &env.mock_server.uri(),
+        serde_json::json!({ "inputs": { "app-directory": "apps/mobile" } }),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
