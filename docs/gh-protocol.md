@@ -502,6 +502,23 @@ names:
 **Key difference from TemplateToken**: uses `t` instead of `type`, and field names
 are single letters (`s`, `a`, `d`, `k`, `v`, `b`, `n`).
 
+Every key under `contextData` is an expression context in its own right — the
+official runner seeds them wholesale (`ExpressionValues[pair.Key] = pair.Value`).
+So `needs`, `matrix`, `strategy`, `job` and, for a job of a reusable workflow,
+`inputs` all come from here.
+
+**`inputs` has two unrelated sources**, which is easy to get wrong:
+
+| Kind | Where the value lives |
+|------|----------------------|
+| An action's inputs (`with:`) | `INPUT_<NAME>` env vars on the step |
+| A reusable workflow's own inputs (`workflow_call`) | `contextData.inputs` |
+
+Env takes precedence, so inside a composite action its own inputs shadow the
+calling workflow's. Reading only the env vars makes every `${{ inputs.* }}` in a
+called workflow evaluate to the empty string — silently, since a missing context
+value renders as `""` in string interpolation.
+
 ### 7.3 Normalized Manifest Structure
 
 After normalization, the manifest looks like:
@@ -1441,6 +1458,15 @@ display in the GitHub UI.
 ---
 
 ## 17. Gotchas & Non-Obvious Behavior
+
+### An empty expression is indistinguishable from a broken one
+
+A context value the runner cannot resolve renders as `""`, the same as one that
+is genuinely empty. Nothing warns. `${{ inputs.app-directory }}` in a reusable
+workflow resolved to nothing for as long as `inputs` was read only from env vars,
+and the symptom was a step three later failing in the wrong directory. When a job
+misbehaves in a way that looks like a missing value, check what the expression
+actually resolved to before looking anywhere else.
 
 ### Token confusion
 
