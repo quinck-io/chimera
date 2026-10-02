@@ -407,3 +407,54 @@ async fn container_step_runs_in_its_working_directory() {
 
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+#[tokio::test]
+#[ignore]
+async fn container_composite_step_with_absolute_working_directory() {
+    let env = TestEnv::setup().await;
+    let workspace_dir = env.workspace.workspace_dir();
+    std::fs::create_dir_all(workspace_dir.join("sub")).unwrap();
+    let action_dir = workspace_dir.join(".github/actions/pwd");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        r#"
+name: 'Pwd'
+runs:
+  using: 'composite'
+  steps:
+    - run: test "$PWD" = /github/workspace/sub
+      shell: bash
+      working-directory: /github/workspace/sub
+"#,
+    )
+    .unwrap();
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+    let step = serde_json::json!({
+        "id": "pwd",
+        "displayName": "Run: pwd",
+        "reference": {
+            "name": ".github/actions/pwd",
+            "type": "repository",
+            "repositoryType": "self",
+            "path": ".github/actions/pwd"
+        },
+        "inputs": {},
+        "order": 1,
+        "contextName": "pwd"
+    });
+
+    let manifest = manifest_with_steps(vec![step], &env.mock_server.uri());
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}

@@ -226,6 +226,7 @@ async fn run_nested_script(
             .context("no job container for composite script step")?;
 
         let working_dir = match &raw_workdir {
+            Some(d) if d.starts_with('/') => d.clone(),
             Some(d) if d != "." => format!("/github/workspace/{d}"),
             _ => "/github/workspace".into(),
         };
