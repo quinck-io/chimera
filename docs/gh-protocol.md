@@ -52,7 +52,7 @@ manifest's variables. If present, use Twirp. If absent, fall back to VSS.
 | **OAuth token** | JWT exchange with stored RSA key | Runner-level ops (session, polling, acquire) |
 | **Job access token** | Embedded in job manifest | Job-level ops (logs, timeline, completion) |
 
-**Runner version**: The runner reports itself as `2.329.0` (constant `RUNNER_VERSION`).
+**Runner version**: The runner reports itself as `2.337.0` (constant `RUNNER_VERSION`).
 The broker rejects runners with outdated versions — bumping this may be necessary
 when GitHub ships breaking changes. The broker protocol version is `3.0.0`
 (separate from the runner version).
@@ -71,7 +71,7 @@ Exchange the registration token for a temporary tenant credential.
 ```
 POST https://api.github.com/actions/runner-registration
 Authorization: RemoteAuth {registration_token}
-User-Agent: chimera/2.329.0
+User-Agent: chimera/2.337.0
 Content-Type: application/json
 
 {
@@ -108,7 +108,7 @@ Content-Type: application/json
   "url": "https://github.com/{owner}/{repo}",
   "group_id": 1,
   "name": "chimera-0",
-  "version": "2.329.0",
+  "version": "2.337.0",
   "updates_disabled": true,
   "ephemeral": false,
   "labels": [
@@ -148,7 +148,7 @@ Content-Type: application/json
 
 {
   "name": "chimera-0",
-  "version": "2.329.0",
+  "version": "2.337.0",
   "osDescription": "Linux X64",
   "enabled": true,
   "status": 0,
@@ -316,7 +316,7 @@ Timeout: 30s
   "agent": {
     "id": 12345,
     "name": "chimera-0",
-    "version": "2.329.0",
+    "version": "2.337.0",
     "osDescription": "linux aarch64",
     "ephemeral": true,
     "status": 0
@@ -369,7 +369,7 @@ Timeout: 55s (client-side)
 ```
 
 **Note**: The `runnerVersion` query parameter is `3.0.0` (the broker protocol
-version), NOT the runner version `2.329.0` used elsewhere.
+version), NOT the runner version `2.337.0` used elsewhere.
 
 The server holds the connection for up to ~50 seconds before responding with 202.
 
@@ -1491,7 +1491,7 @@ based on its own cancellation tracking.
 
 ### Version numbers matter
 
-- `RUNNER_VERSION` (`2.329.0`) in session/registration bodies
+- `RUNNER_VERSION` (`2.337.0`) in session/registration bodies
 - `BROKER_PROTOCOL_VERSION` (`3.0.0`) in poll/ack query strings
 - These are separate values. Confusing them causes 400 errors.
 
