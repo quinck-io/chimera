@@ -188,3 +188,21 @@ fn container_env_preserves_non_path_vars() {
     assert_eq!(env.get("RUNNER_OS").unwrap(), "Linux");
     assert!(env.contains_key("RUNNER_ARCH"));
 }
+
+#[test]
+fn sets_ref_details_and_runner_defaults() {
+    let mut manifest = minimal_manifest();
+    let github = manifest.context_data["github"].as_object_mut().unwrap();
+    github.insert("ref_name".into(), json!("main"));
+    github.insert("ref_protected".into(), json!(true));
+    github.insert("repository_id".into(), json!(42));
+    let (_tmp, ws) = test_workspace();
+
+    let env = build_base_env(&manifest, &ws, "runner-0");
+
+    assert_eq!(env["GITHUB_REF_NAME"], "main");
+    assert_eq!(env["GITHUB_REF_PROTECTED"], "true");
+    assert_eq!(env["GITHUB_REPOSITORY_ID"], "42");
+    assert_eq!(env["CI"], "true");
+    assert_eq!(env["RUNNER_ENVIRONMENT"], "self-hosted");
+}

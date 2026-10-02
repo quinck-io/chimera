@@ -89,14 +89,33 @@ pub fn build_base_env(
             ("server_url", "GITHUB_SERVER_URL"),
             ("api_url", "GITHUB_API_URL"),
             ("graphql_url", "GITHUB_GRAPHQL_URL"),
+            ("ref_name", "GITHUB_REF_NAME"),
+            ("ref_type", "GITHUB_REF_TYPE"),
+            ("ref_protected", "GITHUB_REF_PROTECTED"),
+            ("base_ref", "GITHUB_BASE_REF"),
+            ("head_ref", "GITHUB_HEAD_REF"),
+            ("actor_id", "GITHUB_ACTOR_ID"),
+            ("triggering_actor", "GITHUB_TRIGGERING_ACTOR"),
+            ("repository_id", "GITHUB_REPOSITORY_ID"),
+            ("repository_owner_id", "GITHUB_REPOSITORY_OWNER_ID"),
+            ("retention_days", "GITHUB_RETENTION_DAYS"),
+            ("workflow_ref", "GITHUB_WORKFLOW_REF"),
+            ("workflow_sha", "GITHUB_WORKFLOW_SHA"),
         ];
 
         for (json_key, env_key) in mappings {
-            if let Some(val) = github.get(json_key).and_then(|v| v.as_str()) {
-                env.insert(env_key.into(), val.into());
-            }
+            let value = match github.get(json_key) {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(v @ (serde_json::Value::Bool(_) | serde_json::Value::Number(_))) => {
+                    v.to_string()
+                }
+                _ => continue,
+            };
+            env.insert(env_key.into(), value);
         }
     }
+    env.insert("CI".into(), "true".into());
+    env.insert("RUNNER_ENVIRONMENT".into(), "self-hosted".into());
 
     // Add non-secret variables
     for (key, var) in &manifest.variables {

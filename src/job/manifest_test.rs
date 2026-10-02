@@ -880,3 +880,18 @@ fn environment_variables_merge_with_the_job_scope_winning() {
     assert_eq!(env["FROZEN"], "true");
     assert_eq!(env["FROM_INPUT"], "${{ inputs.dir }}");
 }
+
+#[test]
+fn github_job_comes_from_the_system_variable() {
+    let raw = json!({
+        "variables": { "system.github.job": { "value": "send-notification" } },
+        "contextData": { "t": 2, "d": [{ "k": "github", "v": { "t": 2, "d": [] } }] }
+    });
+
+    let normalized = normalize_manifest(&raw);
+
+    assert_eq!(
+        normalized["contextData"]["github"]["job"],
+        "send-notification"
+    );
+}

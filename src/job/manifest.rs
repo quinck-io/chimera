@@ -69,11 +69,21 @@ pub fn normalize_manifest(raw: &Value) -> Value {
     }
 
     // ContextData: uses PipelineContextData format {t: 2, d: [{k: ..., v: ...}]}
-    if let Some(ctx) = obj.get("contextData") {
-        result.insert("contextData".into(), normalize_context_data(ctx));
-    } else {
-        result.insert("contextData".into(), json!({}));
+    let mut context_data = obj
+        .get("contextData")
+        .map(normalize_context_data)
+        .unwrap_or_else(|| json!({}));
+    if let Some(job) = obj
+        .get("variables")
+        .and_then(|v| v.get("system.github.job"))
+        .and_then(|v| v.get("value"))
+        && let Some(github) = context_data
+            .get_mut("github")
+            .and_then(|g| g.as_object_mut())
+    {
+        github.entry("job").or_insert_with(|| job.clone());
     }
+    result.insert("contextData".into(), context_data);
 
     // Normalize container fields — environment maps inside may be template tokens
     if let Some(jc) = obj.get("jobContainer") {
