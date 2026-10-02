@@ -13,7 +13,7 @@ use crate::docker::resources::JobDockerResources;
 use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env, run_process};
 use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
-use crate::job::schema::Step;
+use crate::job::schema::{Evaluable, Step};
 use crate::job::workspace::Workspace;
 use crate::node::NodeRuntimes;
 
@@ -89,7 +89,7 @@ async fn run_composite_action_inner(
     let expr_ctx = ExprContext::new(&initial_env, job_state, false, false);
     let action_inputs = build_action_inputs(metadata, step, &expr_ctx);
 
-    let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
+    let timeout = step.timeout();
 
     for (i, nested_step) in steps.iter().enumerate() {
         let nested_obj = nested_step
@@ -314,8 +314,8 @@ async fn run_nested_action(
         },
         inputs,
         condition: None,
-        timeout_in_minutes: Some(timeout.as_secs() / 60),
-        continue_on_error: false,
+        timeout_in_minutes: Some(Evaluable::Literal(timeout.as_secs() / 60)),
+        continue_on_error: None,
         order: 0,
         environment: None,
         context_name: None,

@@ -158,3 +158,33 @@ async fn job_status_failure_after_hard_fail() {
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Failed);
 }
+
+#[tokio::test]
+async fn continue_on_error_from_an_expression_that_is_true() {
+    let env = TestEnv::setup().await;
+    let mut step = script_step("s1", "exit 1");
+    step["continueOnError"] = serde_json::json!("${{ inputs.allow-failure }}");
+
+    let manifest = manifest_with_steps_and_context(
+        vec![step, script_step("s2", "echo still running")],
+        &env.mock_server.uri(),
+        serde_json::json!({ "inputs": { "allow-failure": true } }),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
+async fn continue_on_error_from_an_expression_that_is_false() {
+    let env = TestEnv::setup().await;
+    let mut step = script_step("s1", "exit 1");
+    step["continueOnError"] = serde_json::json!("${{ inputs.allow-failure }}");
+
+    let manifest = manifest_with_steps_and_context(
+        vec![step],
+        &env.mock_server.uri(),
+        serde_json::json!({ "inputs": { "allow-failure": false } }),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Failed);
+}

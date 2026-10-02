@@ -171,3 +171,55 @@ fn deserialize_container_registry_step() {
     assert_eq!(step.reference.kind, StepReferenceKind::ContainerRegistry);
     assert_eq!(step.reference.image.as_deref(), Some("node:18"));
 }
+
+fn step_from(fields: serde_json::Value) -> Step {
+    let mut step = serde_json::json!({ "id": "s1" });
+    for (key, value) in fields.as_object().unwrap() {
+        step[key] = value.clone();
+    }
+    serde_json::from_value(step).unwrap()
+}
+
+#[test]
+fn step_fields_accept_literals() {
+    let step = step_from(serde_json::json!({ "timeoutInMinutes": 10, "continueOnError": true }));
+
+    assert_eq!(step.timeout(), std::time::Duration::from_secs(600));
+    assert!(step.continues_on_error());
+}
+
+#[test]
+fn step_fields_accept_expressions() {
+    let step = step_from(serde_json::json!({
+        "timeoutInMinutes": "${{ inputs.minutes }}",
+        "continueOnError": "${{ inputs.soft }}"
+    }));
+
+    assert_eq!(
+        step.timeout_in_minutes,
+        Some(Evaluable::Expression("${{ inputs.minutes }}".into()))
+    );
+    assert_eq!(
+        step.continue_on_error,
+        Some(Evaluable::Expression("${{ inputs.soft }}".into()))
+    );
+}
+
+#[test]
+fn unevaluated_step_fields_read_as_unset() {
+    let step = step_from(serde_json::json!({
+        "timeoutInMinutes": "${{ inputs.minutes }}",
+        "continueOnError": "${{ inputs.soft }}"
+    }));
+
+    assert_eq!(step.timeout(), std::time::Duration::from_secs(360 * 60));
+    assert!(!step.continues_on_error());
+}
+
+#[test]
+fn null_step_fields_read_as_unset() {
+    let step = step_from(serde_json::json!({ "timeoutInMinutes": null, "continueOnError": null }));
+
+    assert_eq!(step.timeout(), std::time::Duration::from_secs(360 * 60));
+    assert!(!step.continues_on_error());
+}

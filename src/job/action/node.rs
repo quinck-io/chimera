@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
@@ -80,7 +79,7 @@ pub async fn run_node_action(
         }
     }
 
-    let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
+    let timeout = step.timeout();
 
     // Container mode: run via docker exec with remapped paths
     if let Some(resources) = docker_resources.filter(|r| r.job_container_id().is_some()) {

@@ -34,7 +34,7 @@ fn make_action_step(name: &str) -> Step {
         inputs: HashMap::new(),
         condition: None,
         timeout_in_minutes: None,
-        continue_on_error: false,
+        continue_on_error: None,
         order: 1,
         environment: None,
         context_name: None,

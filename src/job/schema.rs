@@ -1,10 +1,10 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use crate::docker::container::{JobContainerSpec, ServiceContainerSpec};
-use crate::utils::deserialize_nullable_bool;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,9 +59,9 @@ pub struct Step {
     #[serde(default)]
     pub inputs: HashMap<String, String>,
     pub condition: Option<String>,
-    pub timeout_in_minutes: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_nullable_bool")]
-    pub continue_on_error: bool,
+    pub timeout_in_minutes: Option<Evaluable<u64>>,
+    #[serde(default)]
+    pub continue_on_error: Option<Evaluable<bool>>,
     #[serde(default)]
     pub order: u32,
     pub environment: Option<HashMap<String, String>>,
@@ -69,10 +69,31 @@ pub struct Step {
     pub context_name: Option<String>,
 }
 
+const DEFAULT_STEP_TIMEOUT_MINUTES: u64 = 360;
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Evaluable<T> {
+    Literal(T),
+    Expression(String),
+}
+
 impl Step {
     /// Whether this step is a `run:` script (vs an action reference).
     pub fn is_script(&self) -> bool {
         self.reference.kind == StepReferenceKind::Script
+    }
+
+    pub fn timeout(&self) -> Duration {
+        let minutes = match self.timeout_in_minutes {
+            Some(Evaluable::Literal(minutes)) => minutes,
+            _ => DEFAULT_STEP_TIMEOUT_MINUTES,
+        };
+        Duration::from_secs(minutes * 60)
+    }
+
+    pub fn continues_on_error(&self) -> bool {
+        matches!(self.continue_on_error, Some(Evaluable::Literal(true)))
     }
 }
 

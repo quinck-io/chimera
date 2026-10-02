@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bollard::Docker;
@@ -374,7 +373,7 @@ async fn start_and_stream_logs(
         .await
         .context("starting docker action container")?;
 
-    let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
+    let timeout = step.timeout();
 
     let processor =
         OutputProcessor::new(log_sender.clone(), job_state.masks.clone(), debug_enabled);

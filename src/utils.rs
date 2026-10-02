@@ -1,13 +1,4 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer};
-
-/// Deserialize a bool that might be null in JSON (treat null as false).
-pub fn deserialize_nullable_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<bool>::deserialize(deserializer).map(|opt| opt.unwrap_or(false))
-}
 
 /// RFC3339 with 7 decimal places (100ns precision), used for timeline records.
 pub fn format_timeline_timestamp(ts: DateTime<Utc>) -> String {

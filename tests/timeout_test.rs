@@ -18,3 +18,29 @@ async fn step_with_timeout_succeeds_when_fast() {
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+#[tokio::test]
+async fn step_timeout_from_a_workflow_call_input() {
+    let env = TestEnv::setup().await;
+    let mut step = script_step("s1", "echo done");
+    step["timeoutInMinutes"] = serde_json::json!("${{ inputs.step-timeout-minutes }}");
+
+    let manifest = manifest_with_steps_and_context(
+        vec![step],
+        &env.mock_server.uri(),
+        serde_json::json!({ "inputs": { "step-timeout-minutes": 15 } }),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
+async fn step_timeout_expression_that_is_not_a_number() {
+    let env = TestEnv::setup().await;
+    let mut step = script_step("s1", "echo done");
+    step["timeoutInMinutes"] = serde_json::json!("${{ inputs.missing }}");
+
+    let manifest = manifest_with_steps(vec![step], &env.mock_server.uri());
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}

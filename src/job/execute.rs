@@ -18,7 +18,7 @@ use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep
 use super::expression::ExprContext;
 use super::live_feed::FeedSender;
 use super::logs::{JobLogger, LogLine, LogSender, StepLogger};
-use super::schema::{JobManifest, Step};
+use super::schema::{Evaluable, JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
 use crate::docker::output::OutputProcessor;
@@ -282,7 +282,7 @@ pub async fn run_host_step(
     let script_file = workspace.runner_temp().join(format!("step_{}.sh", step.id));
     std::fs::write(&script_file, &script)
         .with_context(|| format!("writing script file {}", script_file.display()))?;
-    let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
+    let timeout = step.timeout();
 
     debug!(
         step_id = %step.id,
@@ -342,7 +342,7 @@ pub async fn run_container_step(
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
     let script = super::expression::resolve_template(script_raw, &expr_ctx);
 
-    let timeout = Duration::from_secs(step.timeout_in_minutes.unwrap_or(360) * 60);
+    let timeout = step.timeout();
     let container_id = docker_resources
         .job_container_id()
         .context("no job container for container step")?;
@@ -659,6 +659,7 @@ pub async fn run_all_steps(
             update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
             trackers[tracker_idx].resolve_name(&condition_ctx);
+            let pre_step = &resolve_step_fields(pre_step, &condition_ctx);
             if !super::expression::evaluate_condition(pre_step.condition.as_deref(), &condition_ctx)
             {
                 debug!(step = %pre_step.display_name, "skipping pre step (condition not met)");
@@ -762,7 +763,7 @@ pub async fn run_all_steps(
             if conclusion == StepConclusion::Cancelled {
                 job_cancelled = true;
             } else if conclusion == StepConclusion::Failed {
-                if pre_step.continue_on_error {
+                if pre_step.continues_on_error() {
                     info!(step = %pre_step.display_name, "pre step failed but continue_on_error is set");
                 } else {
                     job_failed = true;
@@ -787,6 +788,7 @@ pub async fn run_all_steps(
         update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
         let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
         trackers[idx].resolve_name(&condition_ctx);
+        let step = &resolve_step_fields(step, &condition_ctx);
         if !super::expression::evaluate_condition(step.condition.as_deref(), &condition_ctx) {
             debug!(step = %step.display_name, "skipping step (condition not met)");
             let now = format_timeline_timestamp(Utc::now());
@@ -922,7 +924,7 @@ pub async fn run_all_steps(
         // Save outcome/conclusion for `steps.<id>.outcome` / `steps.<id>.conclusion`
         if let Some(ctx_name) = step.context_name.as_deref() {
             let effective_conclusion =
-                if step.continue_on_error && conclusion == StepConclusion::Failed {
+                if step.continues_on_error() && conclusion == StepConclusion::Failed {
                     StepConclusion::Succeeded
                 } else {
                     conclusion
@@ -939,7 +941,7 @@ pub async fn run_all_steps(
         if conclusion == StepConclusion::Cancelled {
             job_cancelled = true;
         } else if conclusion == StepConclusion::Failed {
-            if step.continue_on_error {
+            if step.continues_on_error() {
                 info!(step = %step.display_name, "step failed but continue_on_error is set");
             } else {
                 job_failed = true;
@@ -985,6 +987,7 @@ pub async fn run_all_steps(
             update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
             trackers[tracker_idx].resolve_name(&condition_ctx);
+            let post_step = &resolve_step_fields(post_step, &condition_ctx);
             if !super::expression::evaluate_condition(
                 post_step.condition.as_deref(),
                 &condition_ctx,
@@ -1483,6 +1486,34 @@ async fn report_step_completed(
                 }],
             )
             .await;
+    }
+}
+
+fn resolve_step_fields(step: &Step, ctx: &ExprContext) -> Step {
+    Step {
+        timeout_in_minutes: step
+            .timeout_in_minutes
+            .clone()
+            .map(|v| resolve_evaluable(v, ctx)),
+        continue_on_error: step
+            .continue_on_error
+            .clone()
+            .map(|v| resolve_evaluable(v, ctx)),
+        ..step.clone()
+    }
+}
+
+fn resolve_evaluable<T: std::str::FromStr>(value: Evaluable<T>, ctx: &ExprContext) -> Evaluable<T> {
+    let Evaluable::Expression(expression) = value else {
+        return value;
+    };
+    let resolved = super::expression::resolve_template(&expression, ctx);
+    match resolved.trim().parse() {
+        Ok(literal) => Evaluable::Literal(literal),
+        Err(_) => {
+            warn!(%expression, %resolved, "step field did not evaluate to the expected type");
+            Evaluable::Expression(expression)
+        }
     }
 }
 
