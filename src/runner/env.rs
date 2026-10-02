@@ -147,7 +147,7 @@ pub fn build_container_env(
         "GITHUB_EVENT_PATH".into(),
         "/github/workflow/_event.json".into(),
     );
-    env.insert("RUNNER_TEMP".into(), "/github/tmp".into());
+    env.insert("RUNNER_TEMP".into(), "/github/runner_temp".into());
     env.insert("RUNNER_TOOL_CACHE".into(), "/github/tool-cache".into());
 
     // Set a proper default PATH for the Linux container. In host mode PATH

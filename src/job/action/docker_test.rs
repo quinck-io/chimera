@@ -219,7 +219,7 @@ fn container_env_remaps_github_paths() {
     assert_eq!(env["GITHUB_ENV"], "/github/workflow/_env");
     assert_eq!(env["GITHUB_OUTPUT"], "/github/workflow/_output");
     assert_eq!(env["GITHUB_STATE"], "/github/workflow/_state");
-    assert_eq!(env["RUNNER_TEMP"], "/github/tmp");
+    assert_eq!(env["RUNNER_TEMP"], "/github/runner_temp");
     assert_eq!(env["RUNNER_TOOL_CACHE"], "/github/tool-cache");
     assert_eq!(env["CUSTOM_VAR"], "kept");
 }

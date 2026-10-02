@@ -168,7 +168,7 @@ fn container_env_remaps_paths() {
         env.get("GITHUB_EVENT_PATH").unwrap(),
         "/github/workflow/_event.json"
     );
-    assert_eq!(env.get("RUNNER_TEMP").unwrap(), "/github/tmp");
+    assert_eq!(env.get("RUNNER_TEMP").unwrap(), "/github/runner_temp");
     assert_eq!(env.get("RUNNER_TOOL_CACHE").unwrap(), "/github/tool-cache");
 }
 

@@ -281,9 +281,9 @@ async fn cleanup_purges_files_the_host_cannot_delete() {
     let write_foreign_files = [
         "sh",
         "-c",
-        "mkdir -p /github/workspace/node_modules/pkg /github/workspace/.git /github/tmp/home \
-         && touch /github/workspace/node_modules/pkg/index.js /github/tmp/home/cache \
-         && chown -R 12345:12345 /github/workspace /github/tmp",
+        "mkdir -p /github/workspace/node_modules/pkg /github/workspace/.git /github/runner_temp/home \
+         && touch /github/workspace/node_modules/pkg/index.js /github/runner_temp/home/cache \
+         && chown -R 12345:12345 /github/workspace /github/runner_temp",
     ]
     .map(String::from)
     .to_vec();

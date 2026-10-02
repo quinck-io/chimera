@@ -331,7 +331,7 @@ fn build_container_env(host_env: &HashMap<String, String>) -> HashMap<String, St
         ("GITHUB_OUTPUT", "/github/workflow/_output"),
         ("GITHUB_STATE", "/github/workflow/_state"),
         ("GITHUB_STEP_SUMMARY", "/github/workflow/_step_summary"),
-        ("RUNNER_TEMP", "/github/tmp"),
+        ("RUNNER_TEMP", "/github/runner_temp"),
         ("RUNNER_TOOL_CACHE", "/github/tool-cache"),
     ];
     for (key, val) in remaps {
@@ -347,7 +347,7 @@ fn build_bind_mounts(workspace: &Workspace, action_dir: Option<&Path>) -> Result
     let mut binds = vec![
         format!("{}:/github/workspace", workspace_dir.display()),
         format!("{}:/github/workflow", workflow_files.display()),
-        format!("{}:/github/tmp", workspace.runner_temp().display()),
+        format!("{}:/github/runner_temp", workspace.runner_temp().display()),
     ];
 
     if let Some(dir) = action_dir {

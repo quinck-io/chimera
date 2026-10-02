@@ -24,7 +24,7 @@ const HEALTH_CHECK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PURGE_TIMEOUT: Duration = Duration::from_secs(300);
 
 const JOB_WORKSPACE_PATH: &str = "/github/workspace";
-const JOB_TEMP_PATH: &str = "/github/tmp";
+const JOB_TEMP_PATH: &str = "/github/runner_temp";
 
 /// Parameters for setting up Docker resources for a job.
 pub struct SetupParams<'a> {
@@ -337,7 +337,7 @@ impl JobDockerResources {
                 ),
                 (
                     params.runner_temp_host_path.to_path_buf(),
-                    "/github/tmp".into(),
+                    "/github/runner_temp".into(),
                 ),
                 (
                     params.actions_host_path.to_path_buf(),
