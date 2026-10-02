@@ -224,3 +224,50 @@ fn results_conclusion_wire_values_match_official_runner() {
     // Not 5 — GitHub renders 5 as `action_required`.
     assert_eq!(json(ResultsConclusion::Skipped), "7");
 }
+
+fn unreadable_job_message(server_url: &str) -> serde_json::Value {
+    let manifest_json = include_str!("../../tests/fixtures/job_manifest.json");
+    let mut message: serde_json::Value = serde_json::from_str(manifest_json).unwrap();
+    message["steps"][0]["order"] = serde_json::json!("first");
+    message["resources"]["endpoints"][0]["url"] = serde_json::json!(server_url);
+    message
+}
+
+#[tokio::test]
+async fn acquire_job_keeps_what_a_report_needs_when_a_step_is_unreadable() {
+    let (mock_server, tm) = setup().await;
+    Mock::given(method("POST"))
+        .and(path("/acquirejob"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(unreadable_job_message(&mock_server.uri())),
+        )
+        .mount(&mock_server)
+        .await;
+    let client = make_client(&mock_server, tm, false);
+
+    let err = client.acquire_job("req-123").await.unwrap_err();
+
+    let unreadable = err
+        .downcast_ref::<UnreadableJob>()
+        .expect("an unreadable step yields UnreadableJob");
+    assert_eq!(unreadable.skeleton.plan.plan_id, "plan-001");
+    assert!(unreadable.skeleton.steps.is_empty());
+    assert!(unreadable.skeleton.access_token().is_ok());
+}
+
+#[tokio::test]
+async fn acquire_job_with_unreadable_reporting_fields_is_a_plain_error() {
+    let (mock_server, tm) = setup().await;
+    let mut message = unreadable_job_message(&mock_server.uri());
+    message["variables"] = serde_json::json!("not-a-map");
+    Mock::given(method("POST"))
+        .and(path("/acquirejob"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(message))
+        .mount(&mock_server)
+        .await;
+    let client = make_client(&mock_server, tm, false);
+
+    let err = client.acquire_job("req-123").await.unwrap_err();
+
+    assert!(err.downcast_ref::<UnreadableJob>().is_none());
+}

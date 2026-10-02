@@ -15,7 +15,7 @@ use crate::github::auth::TokenManager;
 use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage, MessageType};
 use crate::job::JobClient;
 use crate::job::action::ActionCache;
-use crate::job::client::JobConclusion;
+use crate::job::client::{JobConclusion, UnreadableJob};
 use crate::job::execute::run_all_steps;
 use crate::job::live_feed::LiveFeed;
 use crate::job::schema::JobManifest;
@@ -213,10 +213,15 @@ impl Runner {
             self.credentials.info.server_url.clone(),
         );
 
-        let manifest = job_client
-            .acquire_job(runner_request_id)
-            .await
-            .context("acquiring job manifest")?;
+        let manifest = match job_client.acquire_job(runner_request_id).await {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                if let Some(unreadable) = e.downcast_ref::<UnreadableJob>() {
+                    report_unreadable_job(&mut job_client, unreadable, &e).await;
+                }
+                return Err(e.context("acquiring job manifest"));
+            }
+        };
 
         let var_names: Vec<&str> = manifest.variables.keys().map(|s| s.as_str()).collect();
         let container_image = manifest
@@ -607,6 +612,21 @@ impl Runner {
                 }
             }
         }
+    }
+}
+
+async fn report_unreadable_job(
+    job_client: &mut JobClient,
+    unreadable: &UnreadableJob,
+    err: &anyhow::Error,
+) {
+    error!(error = %err, cause = ?err, "job is unreadable, reporting failure to GitHub");
+    if let Err(e) = job_client.configure_from_manifest(&unreadable.skeleton) {
+        error!(error = %e, "cannot report the unreadable job: no job credentials");
+        return;
+    }
+    if let Err(e) = report_setup_failure(job_client, &unreadable.skeleton, err).await {
+        error!(error = %e, "failed to report the unreadable job to GitHub");
     }
 }
 

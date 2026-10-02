@@ -14,6 +14,25 @@ use super::timeline::TimelineRecord;
 use crate::github::auth::TokenManager;
 use crate::utils::format_results_timestamp;
 
+#[derive(Debug, thiserror::Error)]
+#[error("deserializing normalized manifest")]
+pub struct UnreadableJob {
+    pub skeleton: JobManifest,
+    #[source]
+    source: serde_json::Error,
+}
+
+fn reporting_skeleton(normalized: &serde_json::Value) -> Option<JobManifest> {
+    const REPORTING_FIELDS: [&str; 3] = ["plan", "resources", "variables"];
+    let fields: serde_json::Map<String, serde_json::Value> = normalized
+        .as_object()?
+        .iter()
+        .filter(|(key, _)| REPORTING_FIELDS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    serde_json::from_value(serde_json::Value::Object(fields)).ok()
+}
+
 pub struct JobClient {
     client: reqwest::Client,
     token_manager: Arc<TokenManager>,
@@ -132,13 +151,11 @@ impl JobClient {
 
         debug!(normalized = %normalized, "normalized manifest");
 
-        serde_json::from_value(normalized).with_context(|| {
-            let preview = if body_text.len() > 2000 {
-                format!("{}...(truncated)", &body_text[..2000])
-            } else {
-                body_text.clone()
-            };
-            format!("deserializing normalized manifest: {preview}")
+        serde_json::from_value(normalized.clone()).map_err(|source| {
+            match reporting_skeleton(&normalized) {
+                Some(skeleton) => UnreadableJob { skeleton, source }.into(),
+                None => anyhow::Error::new(source).context("deserializing normalized manifest"),
+            }
         })
     }
 

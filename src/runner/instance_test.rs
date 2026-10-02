@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::config::ChimeraPaths;
@@ -241,4 +241,59 @@ async fn poll_loop_refreshes_token_on_401() {
     let mut rx = shutdown_tx.subscribe();
     let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
     assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn unreadable_job_is_completed_as_failed() {
+    let (mock_server, tm, _shutdown_tx) = setup().await;
+    let uri = mock_server.uri();
+
+    let manifest_json = include_str!("../../tests/fixtures/job_manifest.json");
+    let mut message: serde_json::Value = serde_json::from_str(manifest_json).unwrap();
+    message["steps"][0]["order"] = serde_json::json!("first");
+    message["jobId"] = serde_json::json!("job-001");
+    message["resources"]["endpoints"][0]["url"] = serde_json::json!(uri);
+    message["variables"]["system.github.results_endpoint"] =
+        serde_json::json!({ "value": uri, "isSecret": false });
+
+    Mock::given(method("POST"))
+        .and(path("/acquirejob"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(message))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(
+            "/twirp/.*(WorkflowStepsUpdate|CreateStepLogsMetadata)$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex("/twirp/.*GetStepLogsSignedBlobURL$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "logs_url": format!("{uri}/blob?sig=test"),
+            "blob_storage_type": "BLOB_STORAGE_TYPE_S3"
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/blob"))
+        .respond_with(ResponseTemplate::new(201))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/completejob"))
+        .and(body_partial_json(
+            serde_json::json!({ "planId": "plan-001", "jobId": "job-001" }),
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let mut job_client = JobClient::new(reqwest::Client::new(), tm, uri.clone(), uri.clone());
+    let err = job_client.acquire_job("req-1").await.unwrap_err();
+    let unreadable = err.downcast_ref::<UnreadableJob>().unwrap();
+
+    report_unreadable_job(&mut job_client, unreadable, &err).await;
 }
