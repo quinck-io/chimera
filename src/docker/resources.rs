@@ -8,6 +8,7 @@ use bollard::container::{
     Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
     StopContainerOptions,
 };
+use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::{EndpointSettings, HealthStatusEnum, HostConfig, PortBinding};
 use futures::StreamExt;
 use tracing::{debug, error, info, warn};
@@ -20,6 +21,10 @@ use super::options::parse_options;
 const STOP_TIMEOUT_SECS: i64 = 5;
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(300);
 const HEALTH_CHECK_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const PURGE_TIMEOUT: Duration = Duration::from_secs(300);
+
+const JOB_WORKSPACE_PATH: &str = "/github/workspace";
+const JOB_TEMP_PATH: &str = "/github/tmp";
 
 /// Parameters for setting up Docker resources for a job.
 pub struct SetupParams<'a> {
@@ -214,7 +219,7 @@ impl JobDockerResources {
 
             let container_name = format!("chimera-{}-{}-job", params.runner_name, params.job_id);
             let workspace_mount = format!(
-                "{}:/github/workspace",
+                "{}:{JOB_WORKSPACE_PATH}",
                 params.workspace_host_path.to_string_lossy()
             );
             let workflow_mount = format!(
@@ -222,7 +227,7 @@ impl JobDockerResources {
                 params.workflow_files_host_path.to_string_lossy()
             );
             let temp_mount = format!(
-                "{}:/github/tmp",
+                "{}:{JOB_TEMP_PATH}",
                 params.runner_temp_host_path.to_string_lossy()
             );
             let actions_mount = format!(
@@ -352,6 +357,7 @@ impl JobDockerResources {
     pub async fn cleanup(&mut self) {
         // Stop and remove job container
         if let Some(id) = self.job_container_id.take() {
+            purge_job_files(&self.docker, &id).await;
             stop_and_remove(&self.docker, &id, "job container").await;
         }
 
@@ -428,6 +434,69 @@ impl JobDockerResources {
         }
         None
     }
+}
+
+/// Delete what the job wrote to the bind-mounted workspace and temp dirs, from inside
+/// the job container. A job container usually runs as root, so the files it writes are
+/// owned by root on the host, and the daemon's own workspace cleanup cannot delete them.
+async fn purge_job_files(docker: &Docker, container_id: &str) {
+    match exec_as_root(docker, container_id, purge_command()).await {
+        Ok(0) => debug!(container = %container_id, "job files purged"),
+        Ok(code) => {
+            warn!(container = %container_id, exit_code = code, "purging job files failed")
+        }
+        Err(e) => warn!(container = %container_id, error = %e, "purging job files failed"),
+    }
+}
+
+fn purge_command() -> Vec<String> {
+    // `find -delete` and not `rm -rf dir/*`: the glob skips dotfiles such as `.git`.
+    [
+        "find",
+        JOB_WORKSPACE_PATH,
+        JOB_TEMP_PATH,
+        "-mindepth",
+        "1",
+        "-delete",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+/// Run a command in a container as root, wait for it, and return its exit code.
+/// Root, because a job container can set `--user`, and its files can still be root's.
+async fn exec_as_root(docker: &Docker, container_id: &str, cmd: Vec<String>) -> Result<i64> {
+    let exec = docker
+        .create_exec(
+            container_id,
+            CreateExecOptions::<String> {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(cmd),
+                user: Some("0".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("creating exec")?;
+
+    let started = docker
+        .start_exec(&exec.id, None)
+        .await
+        .context("starting exec")?;
+    if let StartExecResults::Attached { mut output, .. } = started {
+        let drain = async { while output.next().await.is_some() {} };
+        tokio::time::timeout(PURGE_TIMEOUT, drain)
+            .await
+            .context("exec timed out")?;
+    }
+
+    let inspect = docker
+        .inspect_exec(&exec.id)
+        .await
+        .context("inspecting exec")?;
+    inspect.exit_code.context("exec has no exit code")
 }
 
 /// Stop a container (SIGTERM -> timeout -> SIGKILL) and remove it with volumes.

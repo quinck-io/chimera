@@ -222,3 +222,80 @@ async fn setup_and_cleanup_with_service() {
     assert!(resources.service_addresses().is_empty());
     assert!(resources.service_container_map().is_empty());
 }
+
+/// Integration test: files a root job container leaves behind are deleted on cleanup.
+#[tokio::test]
+#[ignore]
+async fn cleanup_purges_files_the_host_cannot_delete() {
+    let docker = crate::docker::client::connect(None).unwrap();
+    crate::docker::client::ping(&docker).await.unwrap();
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let mut resources = JobDockerResources::new(docker);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let workflow = tmp.path().join("workflow");
+    let runner_temp = tmp.path().join("tmp");
+    let actions = tmp.path().join("actions");
+    let tool_cache = tmp.path().join("tool-cache");
+    let externals = tmp.path().join("externals");
+    for dir in [
+        &workspace,
+        &workflow,
+        &runner_temp,
+        &actions,
+        &tool_cache,
+        &externals,
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    let job_spec = JobContainerSpec {
+        image: "alpine:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+
+    resources
+        .setup(&SetupParams {
+            runner_name: "test-runner",
+            job_id: &job_id,
+            job_container: Some(&job_spec),
+            services: &[],
+            workspace_host_path: &workspace,
+            workflow_files_host_path: &workflow,
+            runner_temp_host_path: &runner_temp,
+            actions_host_path: &actions,
+            tool_cache_host_path: &tool_cache,
+            externals_dir: &externals,
+        })
+        .await
+        .unwrap();
+
+    // A uid outside the host user's reach: root-owned on rootful Docker, a subuid on
+    // rootless Docker. Either way the host user cannot delete what sits below it.
+    let write_foreign_files = [
+        "sh",
+        "-c",
+        "mkdir -p /github/workspace/node_modules/pkg /github/workspace/.git /github/tmp/home \
+         && touch /github/workspace/node_modules/pkg/index.js /github/tmp/home/cache \
+         && chown -R 12345:12345 /github/workspace /github/tmp",
+    ]
+    .map(String::from)
+    .to_vec();
+    let id = resources.job_container_id().unwrap().to_string();
+    let exit_code = exec_as_root(resources.docker(), &id, write_foreign_files)
+        .await
+        .unwrap();
+    assert_eq!(exit_code, 0);
+    assert!(std::fs::remove_dir_all(workspace.join("node_modules")).is_err());
+
+    resources.cleanup().await;
+
+    assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&runner_temp).unwrap().count(), 0);
+}
