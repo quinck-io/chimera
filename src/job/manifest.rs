@@ -93,6 +93,21 @@ pub fn normalize_manifest(raw: &Value) -> Value {
         }
     }
 
+    if let Some(scopes) = obj.get("environmentVariables").and_then(|e| e.as_array()) {
+        let merged: Map<String, Value> = scopes
+            .iter()
+            .filter_map(|token| match template_token_to_map(token) {
+                Value::Object(scope) => Some(scope),
+                _ => None,
+            })
+            .flatten()
+            .map(|(key, value)| (key, Value::String(env_value_string(value))))
+            .collect();
+        if !merged.is_empty() {
+            result.insert("environment".into(), Value::Object(merged));
+        }
+    }
+
     // Defaults arrive as a list of template tokens, workflow level before job level,
     // each resolving to a mapping like {run: {shell, working-directory}}. Flatten them
     // in order so the innermost scope wins.
@@ -362,6 +377,14 @@ fn template_token_to_value(token: &Value) -> Value {
 }
 
 /// Convert a Mapping TemplateToken to a plain JSON object.
+fn env_value_string(value: Value) -> String {
+    match value {
+        Value::String(s) => s,
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 fn template_token_to_map(token: &Value) -> Value {
     let obj = match token.as_object() {
         Some(o) => o,

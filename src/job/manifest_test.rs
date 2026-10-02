@@ -850,3 +850,33 @@ fn manifest_without_defaults_has_no_working_directory() {
 
     assert_eq!(manifest.default_working_directory(), None);
 }
+
+#[test]
+fn environment_variables_merge_with_the_job_scope_winning() {
+    let raw = json!({
+        "environmentVariables": [
+            {
+                "type": 2,
+                "map": [
+                    { "Key": { "type": 0, "lit": "SCOPE" }, "Value": { "type": 0, "lit": "workflow" } },
+                    { "Key": { "type": 0, "lit": "ONLY_WORKFLOW" }, "Value": { "type": 0, "lit": "w" } }
+                ]
+            },
+            {
+                "type": 2,
+                "map": [
+                    { "Key": { "type": 0, "lit": "SCOPE" }, "Value": { "type": 0, "lit": "job" } },
+                    { "Key": { "type": 0, "lit": "FROZEN" }, "Value": { "type": 5, "bool": true } },
+                    { "Key": { "type": 0, "lit": "FROM_INPUT" }, "Value": { "type": 3, "expr": "inputs.dir" } }
+                ]
+            }
+        ]
+    });
+
+    let env = normalize_manifest(&raw)["environment"].clone();
+
+    assert_eq!(env["SCOPE"], "job");
+    assert_eq!(env["ONLY_WORKFLOW"], "w");
+    assert_eq!(env["FROZEN"], "true");
+    assert_eq!(env["FROM_INPUT"], "${{ inputs.dir }}");
+}

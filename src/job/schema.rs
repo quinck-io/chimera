@@ -28,6 +28,8 @@ pub struct JobManifest {
     /// Flattened `defaults` from the workflow and job, e.g. `{"run": {"working-directory": "app"}}`.
     #[serde(default)]
     pub defaults: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    pub environment: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -188,3 +188,29 @@ async fn continue_on_error_from_an_expression_that_is_false() {
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Failed);
 }
+
+#[tokio::test]
+async fn job_env_reaches_steps_and_step_env_overrides_it() {
+    let env = TestEnv::setup().await;
+    let mut step_env = std::collections::HashMap::new();
+    step_env.insert("SCOPE".to_string(), "step".to_string());
+    let mut manifest = manifest_with_steps_and_context(
+        vec![
+            script_step(
+                "s1",
+                r#"test "$LOCK" = /root/.gradle/ci-job.lock && test "$APP" = apps/mobile && test "$SCOPE" = job || exit 1"#,
+            ),
+            script_step_env("s2", r#"test "$SCOPE" = step || exit 1"#, step_env),
+        ],
+        &env.mock_server.uri(),
+        serde_json::json!({ "inputs": { "app": "apps/mobile" } }),
+    );
+    manifest.environment = std::collections::HashMap::from([
+        ("LOCK".to_string(), "/root/.gradle/ci-job.lock".to_string()),
+        ("APP".to_string(), "${{ inputs.app }}".to_string()),
+        ("SCOPE".to_string(), "job".to_string()),
+    ]);
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}

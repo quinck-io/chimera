@@ -621,6 +621,16 @@ pub async fn run_all_steps(
 
     job_state.default_working_directory = manifest.default_working_directory().map(str::to_string);
 
+    let job_env: HashMap<String, String> = {
+        let ctx = ExprContext::new(base_env, &job_state, false, false);
+        manifest
+            .environment
+            .iter()
+            .map(|(k, v)| (k.clone(), super::expression::resolve_template(v, &ctx)))
+            .collect()
+    };
+    job_state.env.extend(job_env);
+
     let mut job_failed = false;
     let mut job_cancelled = false;
     let use_results = job_client.has_results_url();
