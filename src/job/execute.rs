@@ -21,6 +21,7 @@ use super::logs::{JobLogger, LogLine, LogSender, StepLogger};
 use super::schema::{Evaluable, JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
+use crate::docker::container::{JobContainerSpec, ServiceContainerSpec};
 use crate::docker::output::OutputProcessor;
 use crate::docker::resources::JobDockerResources;
 use crate::node::NodeRuntimes;
@@ -534,6 +535,51 @@ fn spawn_stdout_reader(
     })
 }
 
+fn context_secrets(manifest: &JobManifest) -> impl Iterator<Item = (&String, &str)> {
+    manifest
+        .context_data
+        .get("secrets")
+        .and_then(|v| v.as_object())
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| v.as_str().filter(|s| !s.is_empty()).map(|s| (k, s)))
+}
+
+fn job_secrets(manifest: &JobManifest) -> HashMap<String, String> {
+    manifest
+        .variables
+        .iter()
+        .filter(|(_, v)| v.is_secret && !v.value.is_empty())
+        .map(|(k, v)| (k.clone(), v.value.clone()))
+        .chain(context_secrets(manifest).map(|(k, v)| (k.clone(), v.to_string())))
+        .collect()
+}
+
+pub fn resolve_container_specs(
+    manifest: &JobManifest,
+) -> (Option<JobContainerSpec>, Vec<ServiceContainerSpec>) {
+    let job_state = JobState::new(
+        Arc::new(RwLock::new(Vec::new())),
+        job_secrets(manifest),
+        manifest.context_data.clone(),
+    );
+    let env = HashMap::new();
+    let ctx = ExprContext::new(&env, &job_state, false, false);
+    let resolve = |value: &str| super::expression::resolve_template(value, &ctx);
+
+    let job_container = manifest
+        .job_container
+        .as_ref()
+        .map(|c| c.resolved(&resolve));
+    let services = manifest
+        .service_containers
+        .iter()
+        .flatten()
+        .map(|s| s.resolved(&resolve))
+        .collect();
+    (job_container, services)
+}
+
 /// Run all steps in a job manifest.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_all_steps(
@@ -550,30 +596,11 @@ pub async fn run_all_steps(
     feed_sender: Option<&FeedSender>,
 ) -> Result<(JobConclusion, HashMap<String, String>)> {
     let masks = collect_secret_masks(manifest);
-    let mut secrets: HashMap<String, String> = manifest
-        .variables
-        .iter()
-        .filter(|(_, v)| v.is_secret && !v.value.is_empty())
-        .map(|(k, v)| (k.clone(), v.value.clone()))
-        .collect();
-
-    // User-defined secrets (repo/org secrets) come via contextData["secrets"],
-    // not through the variables dict which only has system-level secrets.
-    if let Some(ctx_secrets) = manifest
-        .context_data
-        .get("secrets")
-        .and_then(|v| v.as_object())
-    {
-        for (k, v) in ctx_secrets {
-            if let Some(s) = v.as_str()
-                && !s.is_empty()
-            {
-                // Add to mask list so secret values are redacted in logs
-                masks.write().await.push(s.to_string());
-                secrets.insert(k.clone(), s.to_string());
-            }
-        }
-    }
+    masks
+        .write()
+        .await
+        .extend(context_secrets(manifest).map(|(_, v)| v.to_string()));
+    let secrets = job_secrets(manifest);
 
     let mut job_state = JobState::new(masks.clone(), secrets, manifest.context_data.clone());
 

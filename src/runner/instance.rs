@@ -16,7 +16,7 @@ use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage, MessageTyp
 use crate::job::JobClient;
 use crate::job::action::ActionCache;
 use crate::job::client::{JobConclusion, UnreadableJob};
-use crate::job::execute::run_all_steps;
+use crate::job::execute::{resolve_container_specs, run_all_steps};
 use crate::job::live_feed::LiveFeed;
 use crate::job::schema::JobManifest;
 use crate::job::workspace::Workspace;
@@ -315,7 +315,7 @@ impl Runner {
             crate::docker::client::ping(&docker).await?;
             let mut resources = JobDockerResources::new(docker);
 
-            let services = manifest.service_containers.as_deref().unwrap_or_default();
+            let (job_container, services) = resolve_container_specs(manifest);
 
             let workflow_files_path = workspace
                 .workspace_dir()
@@ -326,8 +326,8 @@ impl Runner {
                 .setup(&SetupParams {
                     runner_name: &self.name,
                     job_id: &manifest.plan.job_id,
-                    job_container: manifest.job_container.as_ref(),
-                    services,
+                    job_container: job_container.as_ref(),
+                    services: &services,
                     workspace_host_path: workspace.workspace_dir(),
                     workflow_files_host_path: workflow_files_path,
                     runner_temp_host_path: workspace.runner_temp(),

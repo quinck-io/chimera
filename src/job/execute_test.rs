@@ -614,3 +614,58 @@ fn update_job_status_transitions() {
     update_job_status(&mut data, false, false);
     assert_eq!(data["job"]["status"], "success");
 }
+
+fn manifest_with_container(
+    container: serde_json::Value,
+    context: serde_json::Value,
+) -> JobManifest {
+    serde_json::from_value(serde_json::json!({
+        "jobContainer": container,
+        "serviceContainers": [{ "image": "${{ inputs.db }}", "alias": "db" }],
+        "contextData": context
+    }))
+    .unwrap()
+}
+
+#[test]
+fn container_image_expression_resolves_from_inputs() {
+    let image = "${{ inputs.browser && 'mcr.microsoft.com/playwright:v1.61.1-noble' || 'node:24.19.0-bookworm' }}";
+    let with_browser = manifest_with_container(
+        serde_json::json!({ "image": image }),
+        serde_json::json!({ "inputs": { "browser": true, "db": "postgres:18" } }),
+    );
+    let without_browser = manifest_with_container(
+        serde_json::json!({ "image": image }),
+        serde_json::json!({ "inputs": { "browser": false, "db": "postgres:18" } }),
+    );
+
+    let (browser_container, services) = resolve_container_specs(&with_browser);
+    let (plain_container, _) = resolve_container_specs(&without_browser);
+
+    assert_eq!(
+        browser_container.unwrap().image,
+        "mcr.microsoft.com/playwright:v1.61.1-noble"
+    );
+    assert_eq!(plain_container.unwrap().image, "node:24.19.0-bookworm");
+    assert_eq!(services[0].image, "postgres:18");
+}
+
+#[test]
+fn container_credentials_resolve_from_secrets() {
+    let manifest = manifest_with_container(
+        serde_json::json!({
+            "image": "ghcr.io/org/image:1",
+            "credentials": { "username": "${{ github.actor }}", "password": "${{ secrets.REGISTRY_TOKEN }}" }
+        }),
+        serde_json::json!({
+            "github": { "actor": "octocat" },
+            "secrets": { "REGISTRY_TOKEN": "s3cret" }
+        }),
+    );
+
+    let (container, _) = resolve_container_specs(&manifest);
+
+    let credentials = container.unwrap().credentials.unwrap();
+    assert_eq!(credentials.username.as_deref(), Some("octocat"));
+    assert_eq!(credentials.password.as_deref(), Some("s3cret"));
+}
