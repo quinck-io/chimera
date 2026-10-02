@@ -338,6 +338,9 @@ impl Runner {
                 .await
             {
                 resources.cleanup().await;
+                if let Err(cleanup_err) = workspace.cleanup() {
+                    warn!(error = %cleanup_err, "workspace cleanup failed");
+                }
                 return Err(e.context("setting up Docker resources"));
             }
             Some(resources)
