@@ -177,6 +177,25 @@ async fn persist_and_reload() {
 }
 
 #[tokio::test]
+async fn duplicate_commit_survives_reload() {
+    let tmp = TempDir::new().unwrap();
+    {
+        let manager = make_manager(&tmp, 1024 * 1024).await;
+        upload_blob(&manager, "dup-key", "v1", b"first").await;
+        upload_blob(&manager, "dup-key", "v1", b"second").await;
+    }
+
+    let manager = make_manager(&tmp, 1024 * 1024).await;
+    let entry = manager
+        .lookup(&["dup-key".to_string()], "v1", REPO, &[MAIN_REF])
+        .await
+        .expect("entry should survive a restart");
+
+    let content = std::fs::read(manager.blob_path(&entry.blob_hash).unwrap()).unwrap();
+    assert_eq!(content, b"second");
+}
+
+#[tokio::test]
 async fn concurrent_access() {
     let tmp = TempDir::new().unwrap();
     let manager = Arc::new(make_manager(&tmp, 1024 * 1024).await);

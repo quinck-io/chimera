@@ -203,12 +203,12 @@ impl CacheManager {
             .persist(&self.entries_dir)
             .context("persisting entry")?;
 
-        // If an entry with the same scope+key+version already exists (duplicate commit),
-        // decref the old blob to avoid leaking refcounts.
+        // A duplicate commit (same scope+key+version) replaces the entry. `persist` has
+        // already overwritten its file, which has the same name, so only the old blob
+        // reference is released.
         {
             let mut entries = self.entries.write().await;
             if let Some(old) = entries.remove(&scope_repo, &scope_ref, &key, &version) {
-                old.remove_file(&self.entries_dir);
                 self.store.decref(&old.blob_hash).await;
             }
             entries.insert(entry);
