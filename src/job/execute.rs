@@ -23,8 +23,8 @@ use super::schema::{Evaluable, JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
 use crate::docker::container::{JobContainerSpec, ServiceContainerSpec};
-use crate::docker::output::OutputProcessor;
 use crate::docker::resources::JobDockerResources;
+use crate::job::output::OutputProcessor;
 use crate::node::NodeRuntimes;
 use crate::utils::{format_results_timestamp, format_timeline_timestamp};
 

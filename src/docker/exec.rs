@@ -7,10 +7,11 @@ use bollard::exec::{CreateExecOptions, StartExecResults};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::output::{OutputProcessor, process_docker_output};
+use super::output::process_docker_output;
 use crate::job::commands::CommandPolicy;
 use crate::job::execute::{JobState, StepConclusion, StepResult};
 use crate::job::logs::LogSender;
+use crate::job::output::OutputProcessor;
 
 /// Run a command inside a running container via `docker exec`.
 ///

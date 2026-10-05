@@ -10,12 +10,13 @@ use tracing::{debug, warn};
 
 use super::build_action_inputs;
 use super::metadata::ActionMetadata;
-use crate::docker::output::{OutputProcessor, process_docker_output};
+use crate::docker::output::process_docker_output;
 use crate::docker::resources::{JobDockerResources, stop_and_remove};
 use crate::job::commands::CommandPolicy;
 use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env};
 use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
+use crate::job::output::OutputProcessor;
 use crate::job::schema::Step;
 use crate::job::workspace::Workspace;
 
