@@ -40,6 +40,7 @@ glob = "0.3.3"
 libc = "0.2"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
 wiremock = "0.6"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

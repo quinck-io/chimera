@@ -111,7 +111,7 @@ impl Runner {
         self.report_phase(RunnerPhase::Idle).await;
         info!("entering poll loop, waiting for jobs...");
 
-        loop {
+        let outcome = loop {
             let result = self.poll_loop(&broker, &mut shutdown_rx).await;
 
             match result {
@@ -129,20 +129,17 @@ impl Runner {
                     if *shutdown_rx.borrow() {
                         self.report_phase(RunnerPhase::Stopping).await;
                         info!("shutdown after job completion");
-                        break;
+                        break Ok(());
                     }
                 }
                 Ok(None) => {
                     self.report_phase(RunnerPhase::Stopping).await;
                     info!("poll loop exited (shutdown)");
-                    break;
+                    break Ok(());
                 }
-                Err(e) => {
-                    error!(error = %e, "poll loop error");
-                    break;
-                }
+                Err(e) => break Err(e.context("polling for jobs")),
             }
-        }
+        };
 
         if let Err(e) = broker.disconnect().await {
             error!(error = %e, "failed to delete session");
@@ -150,7 +147,7 @@ impl Runner {
             info!("session deleted");
         }
 
-        Ok(())
+        outcome
     }
 
     async fn handle_job_message(

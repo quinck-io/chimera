@@ -310,3 +310,68 @@ fn format_runner_status_stopped_with_error() {
     assert!(line.contains("bad credentials"), "got: {line}");
     assert!(line.contains("Stopped"), "got: {line}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn supervise_backs_off_between_restarts() {
+    let attempts = std::sync::Mutex::new(Vec::new());
+    let state = DaemonState::new(&["r".to_string()]);
+    let (_tx, rx) = watch::channel(false);
+    let origin = tokio::time::Instant::now();
+
+    let start = |_rx| {
+        let mut attempts = attempts.lock().unwrap();
+        attempts.push(origin.elapsed().as_secs());
+        let failing = attempts.len() < 4;
+        async move {
+            if failing {
+                anyhow::bail!("network is unreachable")
+            }
+            Ok(())
+        }
+    };
+    let result = supervise(start, rx, &state, "r").await;
+
+    assert!(result.is_ok());
+    assert_eq!(*attempts.lock().unwrap(), vec![0, 5, 15, 35]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervise_caps_the_backoff() {
+    let attempts = std::sync::Mutex::new(Vec::new());
+    let state = DaemonState::new(&["r".to_string()]);
+    let (_tx, rx) = watch::channel(false);
+    let origin = tokio::time::Instant::now();
+
+    let start = |_rx| {
+        let mut attempts = attempts.lock().unwrap();
+        attempts.push(origin.elapsed().as_secs());
+        let failing = attempts.len() < 9;
+        async move {
+            if failing {
+                anyhow::bail!("network is unreachable")
+            }
+            Ok(())
+        }
+    };
+    supervise(start, rx, &state, "r").await.unwrap();
+
+    let attempts = attempts.lock().unwrap();
+    let gaps: Vec<u64> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(gaps, vec![5, 10, 20, 40, 80, 160, 300, 300]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervise_stops_retrying_on_shutdown() {
+    let state = DaemonState::new(&["r".to_string()]);
+    let (tx, rx) = watch::channel(false);
+
+    let start = |_rx| async { anyhow::bail!("network is unreachable") };
+    let supervisor = supervise(start, rx, &state, "r");
+    let shutdown = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tx.send(true).unwrap();
+    };
+    let (result, ()) = tokio::join!(supervisor, shutdown);
+
+    assert!(result.is_err());
+}

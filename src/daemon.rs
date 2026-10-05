@@ -184,6 +184,41 @@ pub struct StateSnapshot {
     pub runners: HashMap<String, RunnerStatus>,
 }
 
+const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(5);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(300);
+const HEALTHY_RUN: Duration = Duration::from_secs(600);
+
+async fn supervise<F>(
+    start: impl Fn(watch::Receiver<bool>) -> F,
+    mut shutdown_rx: watch::Receiver<bool>,
+    state: &DaemonState,
+    name: &str,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    let mut backoff = RESTART_BACKOFF_MIN;
+    loop {
+        let started_at = tokio::time::Instant::now();
+        let Err(e) = start(shutdown_rx.clone()).await else {
+            return Ok(());
+        };
+        state.set_error(name, format!("{e:#}")).await;
+        if *shutdown_rx.borrow() {
+            return Err(e);
+        }
+        if started_at.elapsed() >= HEALTHY_RUN {
+            backoff = RESTART_BACKOFF_MIN;
+        }
+        error!(error = %format!("{e:#}"), retry_in_secs = backoff.as_secs(), "runner failed, restarting");
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = shutdown_rx.changed() => return Err(e),
+        }
+        backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+    }
+}
+
 pub fn write_state_file(path: &Path, snapshot: &StateSnapshot) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(snapshot).context("serializing state")?;
@@ -246,13 +281,18 @@ impl Daemon {
                 }
             };
 
-            let runner = Runner::with_state(
-                name.clone(),
-                creds,
-                self.paths.clone(),
-                Arc::clone(&state),
-                cache_port,
-            );
+            let paths = self.paths.clone();
+            let state_ref = Arc::clone(&state);
+            let runner_name = name.clone();
+            let make_runner = move || {
+                Runner::with_state(
+                    runner_name.clone(),
+                    creds.clone(),
+                    paths.clone(),
+                    Arc::clone(&state_ref),
+                    cache_port,
+                )
+            };
 
             let rx = shutdown_rx.clone();
             let runner_name = name.clone();
@@ -260,10 +300,8 @@ impl Daemon {
 
             join_set.spawn(
                 async move {
-                    let result = runner.start(rx).await;
-                    if let Err(ref e) = result {
-                        state_ref.set_error(&runner_name, format!("{e:#}")).await;
-                    }
+                    let start = |rx| make_runner().start(rx);
+                    let result = supervise(start, rx, &state_ref, &runner_name).await;
                     (runner_name, result)
                 }
                 .instrument(tracing::info_span!("runner", name = %name)),
