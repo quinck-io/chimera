@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -39,6 +40,24 @@ impl CacheEntry {
     }
 }
 
+fn exact_key(
+    repo: &str,
+    git_ref: &str,
+    key: &str,
+    version: &str,
+) -> (String, String, String, String) {
+    (
+        repo.to_string(),
+        git_ref.to_string(),
+        key.to_string(),
+        version.to_string(),
+    )
+}
+
+fn scope_key(repo: &str, git_ref: &str, version: &str) -> (String, String, String) {
+    (repo.to_string(), git_ref.to_string(), version.to_string())
+}
+
 fn entry_filename(repo: &str, git_ref: &str, key: &str, version: &str) -> String {
     let input = format!("{repo}\0{git_ref}\0{key}\0{version}");
     let hash = blake3::hash(input.as_bytes()).to_hex();
@@ -50,8 +69,8 @@ fn entry_filename(repo: &str, git_ref: &str, key: &str, version: &str) -> String
 pub struct EntryIndex {
     /// Keyed by (repo, scope_ref, key, version)
     exact: HashMap<(String, String, String, String), CacheEntry>,
-    /// Keyed by (repo, version) -> sorted set of keys
-    by_repo_version: HashMap<(String, String), BTreeSet<String>>,
+    /// Keyed by (repo, scope_ref, version) -> sorted set of keys, for prefix lookups
+    keys_by_scope: HashMap<(String, String, String), BTreeSet<String>>,
 }
 
 impl EntryIndex {
@@ -60,16 +79,20 @@ impl EntryIndex {
     }
 
     pub fn insert(&mut self, entry: CacheEntry) {
-        self.by_repo_version
-            .entry((entry.scope_repo.clone(), entry.version.clone()))
+        self.keys_by_scope
+            .entry(scope_key(
+                &entry.scope_repo,
+                &entry.scope_ref,
+                &entry.version,
+            ))
             .or_default()
             .insert(entry.key.clone());
         self.exact.insert(
-            (
-                entry.scope_repo.clone(),
-                entry.scope_ref.clone(),
-                entry.key.clone(),
-                entry.version.clone(),
+            exact_key(
+                &entry.scope_repo,
+                &entry.scope_ref,
+                &entry.key,
+                &entry.version,
             ),
             entry,
         );
@@ -82,21 +105,13 @@ impl EntryIndex {
         key: &str,
         version: &str,
     ) -> Option<CacheEntry> {
-        let entry = self.exact.remove(&(
-            repo.to_string(),
-            git_ref.to_string(),
-            key.to_string(),
-            version.to_string(),
-        ))?;
+        let entry = self.exact.remove(&exact_key(repo, git_ref, key, version))?;
 
-        if let Some(keys) = self
-            .by_repo_version
-            .get_mut(&(repo.to_string(), version.to_string()))
-        {
+        let scope = scope_key(repo, git_ref, version);
+        if let Some(keys) = self.keys_by_scope.get_mut(&scope) {
             keys.remove(key);
             if keys.is_empty() {
-                self.by_repo_version
-                    .remove(&(repo.to_string(), version.to_string()));
+                self.keys_by_scope.remove(&scope);
             }
         }
         Some(entry)
@@ -104,7 +119,7 @@ impl EntryIndex {
 
     /// Look up a cache entry using GitHub's lookup semantics with scope isolation:
     /// for each ref in order (the job's own ref first, then the refs it may restore from),
-    /// try every search key as an exact then longest prefix match within `scope_repo`.
+    /// try every search key in order as an exact match, then as a prefix of stored keys.
     ///
     /// Returns a clone of the entry (so callers only need a read lock in the future).
     pub fn lookup(
@@ -126,57 +141,44 @@ impl EntryIndex {
         repo: &str,
         git_ref: &str,
     ) -> Option<CacheEntry> {
-        for search_key in keys {
-            // Exact match
-            let exact_key = (
-                repo.to_string(),
-                git_ref.to_string(),
-                search_key.clone(),
-                version.to_string(),
-            );
-            if let Some(entry) = self.exact.get_mut(&exact_key) {
-                entry.last_accessed_at = Utc::now();
-                return Some(entry.clone());
-            }
+        let matched_key = keys
+            .iter()
+            .find_map(|search_key| self.matching_key(search_key, version, repo, git_ref))?;
 
-            // Prefix match: walk backward from the search key to find longest prefix.
-            // We use by_repo_version keyed by (repo, version) to find candidate keys,
-            // then filter to entries whose ref matches.
-            if let Some(version_keys) = self
-                .by_repo_version
-                .get(&(repo.to_string(), version.to_string()))
-            {
-                let mut best_match: Option<String> = None;
-                for candidate in version_keys.range(..=search_key.clone()).rev() {
-                    if search_key.starts_with(candidate.as_str()) {
-                        // Verify this candidate exists for the correct ref
-                        let check_key = (
-                            repo.to_string(),
-                            git_ref.to_string(),
-                            candidate.clone(),
-                            version.to_string(),
-                        );
-                        if self.exact.contains_key(&check_key) {
-                            best_match = Some(candidate.clone());
-                            break;
-                        }
-                    }
-                }
-                if let Some(matched_key) = best_match {
-                    let key_tuple = (
-                        repo.to_string(),
-                        git_ref.to_string(),
-                        matched_key,
-                        version.to_string(),
-                    );
-                    if let Some(entry) = self.exact.get_mut(&key_tuple) {
-                        entry.last_accessed_at = Utc::now();
-                        return Some(entry.clone());
-                    }
-                }
-            }
+        let entry = self
+            .exact
+            .get_mut(&exact_key(repo, git_ref, &matched_key, version))?;
+        entry.last_accessed_at = Utc::now();
+        Some(entry.clone())
+    }
+
+    /// An exact hit wins; otherwise, like GitHub, the most recently created entry
+    /// whose key starts with `search_key`.
+    fn matching_key(
+        &self,
+        search_key: &str,
+        version: &str,
+        repo: &str,
+        git_ref: &str,
+    ) -> Option<String> {
+        // An empty restore key would otherwise match every entry in the scope.
+        if search_key.is_empty() {
+            return None;
         }
-        None
+        if self
+            .exact
+            .contains_key(&exact_key(repo, git_ref, search_key, version))
+        {
+            return Some(search_key.to_string());
+        }
+
+        self.keys_by_scope
+            .get(&scope_key(repo, git_ref, version))?
+            .range::<str, _>((Bound::Included(search_key), Bound::Unbounded))
+            .take_while(|key| key.starts_with(search_key))
+            .filter_map(|key| self.exact.get(&exact_key(repo, git_ref, key, version)))
+            .max_by_key(|entry| entry.created_at)
+            .map(|entry| entry.key.clone())
     }
 
     /// Get all entries sorted by last_accessed_at (oldest first) for LRU eviction.
