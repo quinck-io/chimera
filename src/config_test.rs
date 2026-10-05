@@ -196,9 +196,97 @@ fn credentials_are_saved_owner_only() {
 
     let dir = runners_dir.join("test-runner");
     assert_eq!(mode_of(&dir), 0o700);
-    for file in ["runner.json", "credentials.json", "rsa_params.json"] {
+    for file in CREDENTIAL_FILES {
         assert_eq!(mode_of(&dir.join(file)), 0o600, "{file}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_credentials_leaves_no_temp_files() {
+    let tmp = TempDir::new().unwrap();
+    let runners_dir = tmp.path().join("runners");
+    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+
+    save_runner_credentials(&runners_dir, "test-runner", &make_credentials(&key)).unwrap();
+
+    let mut entries: Vec<String> = std::fs::read_dir(runners_dir.join("test-runner"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    let mut expected = CREDENTIAL_FILES.map(String::from).to_vec();
+    expected.sort();
+    assert_eq!(entries, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_runner_directory_is_not_too_open() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("runners").join("test-runner");
+
+    create_private_dir(&dir).unwrap();
+
+    assert!(!restrict_to_owner(&dir, PRIVATE_DIR_MODE).unwrap());
+    assert_eq!(mode_of(&dir), 0o700);
+}
+
+#[cfg(unix)]
+#[test]
+fn freshly_saved_credentials_are_not_too_open() {
+    let tmp = TempDir::new().unwrap();
+    let runners_dir = tmp.path().join("runners");
+    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+
+    save_runner_credentials(&runners_dir, "test-runner", &make_credentials(&key)).unwrap();
+
+    let dir = runners_dir.join("test-runner");
+    assert!(!restrict_to_owner(&dir, PRIVATE_DIR_MODE).unwrap());
+    for file in CREDENTIAL_FILES {
+        assert!(
+            !restrict_to_owner(&dir.join(file), PRIVATE_FILE_MODE).unwrap(),
+            "{file}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn restricting_keeps_permissions_narrower_than_allowed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("rsa_params.json");
+    std::fs::write(&file, "{}").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    let changed = restrict_to_owner(&file, PRIVATE_FILE_MODE).unwrap();
+
+    assert!(!changed);
+    assert_eq!(mode_of(&file), 0o400);
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_replaces_stale_temp_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let runners_dir = tmp.path().join("runners");
+    let dir = runners_dir.join("test-runner");
+    create_private_dir(&dir).unwrap();
+    let stale = dir.join("rsa_params.json.tmp");
+    std::fs::write(&stale, "garbage").unwrap();
+    std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+
+    save_runner_credentials(&runners_dir, "test-runner", &make_credentials(&key)).unwrap();
+
+    assert!(!stale.exists());
+    assert_eq!(mode_of(&dir.join(RSA_PARAMS_FILE)), 0o600);
+    let loaded = load_runner_credentials(&runners_dir, "test-runner").unwrap();
+    assert_eq!(loaded.rsa_params.d, make_credentials(&key).rsa_params.d);
 }
 
 #[cfg(unix)]
@@ -210,7 +298,7 @@ fn overwriting_world_readable_credentials_restricts_them() {
     let runners_dir = tmp.path().join("runners");
     let dir = runners_dir.join("test-runner");
     std::fs::create_dir_all(&dir).unwrap();
-    let key_file = dir.join("rsa_params.json");
+    let key_file = dir.join(RSA_PARAMS_FILE);
     std::fs::write(&key_file, "{}").unwrap();
     std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
     let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
@@ -231,14 +319,14 @@ fn loading_credentials_restricts_legacy_permissions() {
     save_runner_credentials(&runners_dir, "test-runner", &make_credentials(&key)).unwrap();
     let dir = runners_dir.join("test-runner");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    for file in ["runner.json", "credentials.json", "rsa_params.json"] {
+    for file in CREDENTIAL_FILES {
         std::fs::set_permissions(dir.join(file), std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     load_runner_credentials(&runners_dir, "test-runner").unwrap();
 
     assert_eq!(mode_of(&dir), 0o700);
-    for file in ["runner.json", "credentials.json", "rsa_params.json"] {
+    for file in CREDENTIAL_FILES {
         assert_eq!(mode_of(&dir.join(file)), 0o600, "{file}");
     }
 }

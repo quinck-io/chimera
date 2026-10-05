@@ -191,17 +191,29 @@ pub fn save_config(path: &Path, config: &ChimeraConfig) -> Result<()> {
     Ok(())
 }
 
-/// Credential files hold the runner's RSA private key: anyone who can read them can
-/// impersonate the runner and receive job secrets, so only the owner may access them.
-const CREDENTIAL_FILES: [&str; 3] = ["runner.json", "credentials.json", "rsa_params.json"];
+const RUNNER_INFO_FILE: &str = "runner.json";
+const OAUTH_FILE: &str = "credentials.json";
+const RSA_PARAMS_FILE: &str = "rsa_params.json";
+
+/// Only `rsa_params.json` is secret: it holds the RSA private key, and anyone who can read it
+/// can impersonate the runner and receive job secrets. The other files are identifiers, kept
+/// owner-only too so the whole runner directory has one simple rule.
+const CREDENTIAL_FILES: [&str; 3] = [RUNNER_INFO_FILE, OAUTH_FILE, RSA_PARAMS_FILE];
+
+const PRIVATE_DIR_MODE: u32 = 0o700;
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 pub fn load_runner_credentials(runners_dir: &Path, name: &str) -> Result<RunnerCredentials> {
     let dir = runners_dir.join(name);
-    restrict_credentials_permissions(&dir)?;
+    // Hardening only: older installs loaded fine without it, so a failure (e.g. files owned
+    // by another user) must not stop the runner.
+    if let Err(e) = restrict_credentials_permissions(&dir) {
+        tracing::warn!(error = %format!("{e:#}"), "could not restrict credential permissions");
+    }
 
-    let info: RunnerInfo = load_json(&dir.join("runner.json"))?;
-    let oauth: OAuthCredentials = load_json(&dir.join("credentials.json"))?;
-    let rsa_params: RsaParameters = load_json(&dir.join("rsa_params.json"))?;
+    let info: RunnerInfo = load_json(&dir.join(RUNNER_INFO_FILE))?;
+    let oauth: OAuthCredentials = load_json(&dir.join(OAUTH_FILE))?;
+    let rsa_params: RsaParameters = load_json(&dir.join(RSA_PARAMS_FILE))?;
 
     Ok(RunnerCredentials {
         info,
@@ -216,13 +228,13 @@ pub fn save_runner_credentials(
     creds: &RunnerCredentials,
 ) -> Result<()> {
     let dir = runners_dir.join(name);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating runner directory {}", dir.display()))?;
-    set_owner_only(&dir, 0o700)?;
+    create_private_dir(&dir)?;
+    // An existing directory keeps its mode, and older versions created it with the umask default.
+    restrict_to_owner(&dir, PRIVATE_DIR_MODE)?;
 
-    save_private_json(&dir.join("runner.json"), &creds.info)?;
-    save_private_json(&dir.join("credentials.json"), &creds.oauth)?;
-    save_private_json(&dir.join("rsa_params.json"), &creds.rsa_params)?;
+    save_private_json(&dir.join(RUNNER_INFO_FILE), &creds.info)?;
+    save_private_json(&dir.join(OAUTH_FILE), &creds.oauth)?;
+    save_private_json(&dir.join(RSA_PARAMS_FILE), &creds.rsa_params)?;
 
     Ok(())
 }
@@ -232,18 +244,36 @@ fn restrict_credentials_permissions(dir: &Path) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
-    set_owner_only(dir, 0o700)?;
+    restrict_to_owner(dir, PRIVATE_DIR_MODE)?;
     for file in CREDENTIAL_FILES {
         let path = dir.join(file);
         if path.exists() {
-            set_owner_only(&path, 0o600)?;
+            restrict_to_owner(&path, PRIVATE_FILE_MODE)?;
         }
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn set_owner_only(path: &Path, mode: u32) -> Result<()> {
+fn create_private_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(PRIVATE_DIR_MODE)
+        .create(dir)
+        .with_context(|| format!("creating runner directory {}", dir.display()))
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating runner directory {}", dir.display()))
+}
+
+/// Removes any permission bits outside `allowed`, returning whether something was too open.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path, allowed: u32) -> Result<bool> {
     use std::os::unix::fs::PermissionsExt;
 
     let current = std::fs::metadata(path)
@@ -251,23 +281,24 @@ fn set_owner_only(path: &Path, mode: u32) -> Result<()> {
         .permissions()
         .mode()
         & 0o777;
-    if current == mode {
-        return Ok(());
+    if current & !allowed == 0 {
+        return Ok(false);
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    let restricted = current & allowed;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(restricted))
         .with_context(|| format!("restricting permissions of {}", path.display()))?;
     tracing::warn!(
         path = %path.display(),
         from = format!("{current:o}"),
-        to = format!("{mode:o}"),
+        to = format!("{restricted:o}"),
         "credential permissions were too open, restricted to owner"
     );
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(not(unix))]
-fn set_owner_only(_path: &Path, _mode: u32) -> Result<()> {
-    Ok(())
+fn restrict_to_owner(_path: &Path, _allowed: u32) -> Result<bool> {
+    Ok(false)
 }
 
 fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -276,25 +307,41 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Writes JSON readable only by the owner. Permissions are fixed before any content is
-/// written, so the secret is never exposed even when overwriting an older, wider file.
+/// Writes JSON readable only by the owner. The content goes to a fresh owner-only temp file
+/// that is then renamed over the target, so an older, wider file never receives the secret
+/// and a crash never leaves a truncated credential behind.
 fn save_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     use std::io::Write;
 
     let text = serde_json::to_string_pretty(value).context("serializing JSON")?;
+    let tmp = path.with_extension("json.tmp");
+    remove_stale_file(&tmp)?;
+
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(PRIVATE_FILE_MODE);
     }
     let mut file = options
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    set_owner_only(path, 0o600)?;
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
     file.write_all(text.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("renaming to {}", path.display()))
+}
+
+/// A previous crash may have left a temp file, and `create_new` would refuse to reuse it.
+fn remove_stale_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing stale {}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 pub fn rsa_params_to_private_key(params: &RsaParameters) -> Result<RsaPrivateKey> {
