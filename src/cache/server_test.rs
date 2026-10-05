@@ -448,7 +448,7 @@ async fn pull_request_can_restore_default_branch_cache() {
 }
 
 #[tokio::test]
-async fn cannot_commit_upload_reserved_by_another_scope() {
+async fn cannot_upload_chunk_to_session_of_another_scope() {
     let tmp = TempDir::new().unwrap();
     let (app, _mgr, scopes) = make_test_app(&tmp).await;
     let main = scopes.grant(main_scope());
@@ -464,10 +464,21 @@ async fn cannot_commit_upload_reserved_by_another_scope() {
         .header("content-range", "bytes 0-3/*")
         .body(Body::from(Bytes::from_static(b"evil")))
         .unwrap();
-    let chunk_status = app.clone().oneshot(req).await.unwrap().status();
+    let status = app.oneshot(req).await.unwrap().status();
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cannot_commit_upload_reserved_by_another_scope() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let main = scopes.grant(main_scope());
+    let pull_request = scopes.grant(scope(SCOPE_REPO, "refs/pull/7/merge"));
+    let cache_id = reserve_via_http(&app, &prefix_for(&main), "deps").await;
+
     let commit_status = commit_via_http(&app, &prefix_for(&pull_request), cache_id, 0).await;
 
-    assert_eq!(chunk_status, StatusCode::NOT_FOUND);
     assert_ne!(commit_status, StatusCode::NO_CONTENT);
     assert_eq!(
         lookup_status(&app, &prefix_for(&main), "deps").await,

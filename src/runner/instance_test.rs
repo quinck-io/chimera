@@ -298,3 +298,44 @@ async fn unreadable_job_is_completed_as_failed() {
 
     report_unreadable_job(&mut job_client, unreadable, &err).await;
 }
+
+fn manifest_with_github(github: serde_json::Value) -> JobManifest {
+    let manifest_json = include_str!("../../tests/fixtures/job_manifest.json");
+    let mut manifest: JobManifest = serde_json::from_str(manifest_json).unwrap();
+    manifest.context_data["github"] = github;
+    manifest
+}
+
+#[test]
+fn cache_scope_comes_from_manifest() {
+    let manifest = manifest_with_github(serde_json::json!({
+        "repository": "owner/repo",
+        "ref": "refs/pull/7/merge",
+        "event": { "repository": { "default_branch": "develop" } }
+    }));
+
+    let scope = cache_scope(&manifest).unwrap();
+
+    assert_eq!(
+        scope,
+        CacheScope {
+            repo: "owner/repo".into(),
+            git_ref: "refs/pull/7/merge".into(),
+            default_ref: "refs/heads/develop".into(),
+        }
+    );
+}
+
+#[test]
+fn cache_scope_requires_ref() {
+    let manifest = manifest_with_github(serde_json::json!({ "repository": "owner/repo" }));
+
+    assert_eq!(cache_scope(&manifest), None);
+}
+
+#[test]
+fn cache_scope_requires_repository() {
+    let manifest = manifest_with_github(serde_json::json!({ "ref": "refs/heads/main" }));
+
+    assert_eq!(cache_scope(&manifest), None);
+}

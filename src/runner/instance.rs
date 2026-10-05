@@ -357,7 +357,6 @@ impl Runner {
                 job_client,
                 client,
                 cancel_token,
-                repo,
                 &workspace,
                 &node_runtimes,
                 &mut docker_resources,
@@ -382,7 +381,6 @@ impl Runner {
         job_client: &Arc<JobClient>,
         client: &reqwest::Client,
         cancel_token: CancellationToken,
-        repo: &str,
         workspace: &Workspace,
         node_runtimes: &crate::node::NodeRuntimes,
         docker_resources: &mut Option<JobDockerResources>,
@@ -413,12 +411,17 @@ impl Runner {
         }
 
         // Kept alive for the whole job: dropping it revokes the job's cache access.
-        let cache_grant = self.cache_scopes.grant(cache_scope(manifest, repo));
-        let cache_host = cache_host(manifest, docker_resources.as_ref());
-        base_env.insert(
-            "ACTIONS_CACHE_URL".into(),
-            job_cache_url(&cache_host, self.cache_port, cache_grant.token()),
-        );
+        let cache_grant = cache_scope(manifest).map(|scope| self.cache_scopes.grant(scope));
+        match &cache_grant {
+            Some(grant) => {
+                let cache_host = cache_host(manifest, docker_resources.as_ref());
+                base_env.insert(
+                    "ACTIONS_CACHE_URL".into(),
+                    job_cache_url(&cache_host, self.cache_port, grant.token()),
+                );
+            }
+            None => warn!("job manifest has no github.repository or github.ref, cache disabled"),
+        }
 
         let action_cache = ActionCache::new(self.paths.actions_dir(), client.clone());
         let github_token = manifest.github_token().unwrap_or("").to_string();
@@ -594,12 +597,13 @@ async fn report_unreadable_job(
 }
 
 /// The cache scope a job may use, taken from the job manifest (not from anything the job controls).
-fn cache_scope(manifest: &JobManifest, repo: &str) -> CacheScope {
+///
+/// Returns `None` when the repository or ref is missing: any placeholder would be shared with
+/// other such jobs, or land in a real branch's write scope.
+fn cache_scope(manifest: &JobManifest) -> Option<CacheScope> {
+    let repo = manifest.repository().ok()?;
     let github = manifest.context_data.get("github");
-    let git_ref = github
-        .and_then(|g| g.get("ref"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("refs/heads/main");
+    let git_ref = github.and_then(|g| g.get("ref")).and_then(|v| v.as_str())?;
     let default_branch = github
         .and_then(|g| g.get("event"))
         .and_then(|e| e.get("repository"))
@@ -607,11 +611,11 @@ fn cache_scope(manifest: &JobManifest, repo: &str) -> CacheScope {
         .and_then(|v| v.as_str())
         .unwrap_or("main");
 
-    CacheScope {
-        repo: repo.to_string(),
+    Some(CacheScope {
+        repo,
         git_ref: git_ref.to_string(),
         default_ref: format!("refs/heads/{default_branch}"),
-    }
+    })
 }
 
 /// Address at which the job's steps reach the cache server.
