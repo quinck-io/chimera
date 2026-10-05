@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "chimera"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "axum",
