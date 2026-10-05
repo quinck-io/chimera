@@ -191,8 +191,13 @@ pub fn save_config(path: &Path, config: &ChimeraConfig) -> Result<()> {
     Ok(())
 }
 
+/// Credential files hold the runner's RSA private key: anyone who can read them can
+/// impersonate the runner and receive job secrets, so only the owner may access them.
+const CREDENTIAL_FILES: [&str; 3] = ["runner.json", "credentials.json", "rsa_params.json"];
+
 pub fn load_runner_credentials(runners_dir: &Path, name: &str) -> Result<RunnerCredentials> {
     let dir = runners_dir.join(name);
+    restrict_credentials_permissions(&dir)?;
 
     let info: RunnerInfo = load_json(&dir.join("runner.json"))?;
     let oauth: OAuthCredentials = load_json(&dir.join("credentials.json"))?;
@@ -213,11 +218,55 @@ pub fn save_runner_credentials(
     let dir = runners_dir.join(name);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating runner directory {}", dir.display()))?;
+    set_owner_only(&dir, 0o700)?;
 
-    save_json(&dir.join("runner.json"), &creds.info)?;
-    save_json(&dir.join("credentials.json"), &creds.oauth)?;
-    save_json(&dir.join("rsa_params.json"), &creds.rsa_params)?;
+    save_private_json(&dir.join("runner.json"), &creds.info)?;
+    save_private_json(&dir.join("credentials.json"), &creds.oauth)?;
+    save_private_json(&dir.join("rsa_params.json"), &creds.rsa_params)?;
 
+    Ok(())
+}
+
+/// Tightens permissions of credentials written by older versions, which used the umask default.
+fn restrict_credentials_permissions(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    set_owner_only(dir, 0o700)?;
+    for file in CREDENTIAL_FILES {
+        let path = dir.join(file);
+        if path.exists() {
+            set_owner_only(&path, 0o600)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current = std::fs::metadata(path)
+        .with_context(|| format!("reading permissions of {}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if current == mode {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("restricting permissions of {}", path.display()))?;
+    tracing::warn!(
+        path = %path.display(),
+        from = format!("{current:o}"),
+        to = format!("{mode:o}"),
+        "credential permissions were too open, restricted to owner"
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
@@ -227,9 +276,25 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+/// Writes JSON readable only by the owner. Permissions are fixed before any content is
+/// written, so the secret is never exposed even when overwriting an older, wider file.
+fn save_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    use std::io::Write;
+
     let text = serde_json::to_string_pretty(value).context("serializing JSON")?;
-    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    set_owner_only(path, 0o600)?;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 pub fn rsa_params_to_private_key(params: &RsaParameters) -> Result<RsaPrivateKey> {
