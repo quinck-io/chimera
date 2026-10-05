@@ -144,10 +144,16 @@ impl CacheManager {
         version: String,
         scope_repo: String,
         scope_ref: String,
+        token: String,
     ) -> Result<u64> {
         self.uploads
-            .reserve(key, version, scope_repo, scope_ref)
+            .reserve(key, version, scope_repo, scope_ref, token)
             .await
+    }
+
+    /// Drops uploads whose job ended before committing them.
+    pub async fn discard_abandoned_uploads(&self, is_live: impl Fn(&str) -> bool) -> usize {
+        self.uploads.discard_abandoned(is_live).await
     }
 
     /// Write a chunk to an upload session.

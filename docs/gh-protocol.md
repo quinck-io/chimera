@@ -1417,6 +1417,10 @@ On `CacheManager::new()`:
 6. Clean `tmp/upload-*.tmp` files (stale uploads from a previous crash)
 7. Run initial eviction (handles the case where `max_gb` was lowered)
 
+While running, the server drops every 10 minutes the upload sessions whose job
+token has been revoked, along with their `tmp/upload-*.tmp` file: a job that
+fails or is cancelled mid-upload never commits, and no one else can.
+
 ### 14.8 Configuration
 
 ```toml

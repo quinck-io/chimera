@@ -37,6 +37,7 @@ async fn upload_scoped_blob(
             version.to_string(),
             repo.to_string(),
             git_ref.to_string(),
+            "job-token".into(),
         )
         .await
         .unwrap();

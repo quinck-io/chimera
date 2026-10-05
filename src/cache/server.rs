@@ -108,6 +108,8 @@ pub async fn start(
     scopes: Arc<ScopeRegistry>,
     port: u16,
 ) -> Result<SocketAddr> {
+    tokio::spawn(discard_abandoned_uploads(manager.clone(), scopes.clone()));
+
     let app = router(manager, scopes);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await?;
@@ -122,6 +124,23 @@ pub async fn start(
     });
 
     Ok(local_addr)
+}
+
+/// A job that fails or is cancelled mid-upload never commits, and its revoked token means
+/// nobody else can, so its partial upload would otherwise stay on disk until restart.
+async fn discard_abandoned_uploads(manager: SharedManager, scopes: Arc<ScopeRegistry>) {
+    const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+    let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+    loop {
+        interval.tick().await;
+        let discarded = manager
+            .discard_abandoned_uploads(|token| scopes.resolve(token).is_some())
+            .await;
+        if discarded > 0 {
+            info!(discarded, "discarded abandoned cache uploads");
+        }
+    }
 }
 
 // --- Query / body types ---
@@ -211,7 +230,7 @@ async fn handle_lookup(
 
 async fn handle_reserve(
     State(manager): State<SharedManager>,
-    Authorized { scope, .. }: Authorized,
+    Authorized { token, scope }: Authorized,
     axum::Json(body): axum::Json<ReserveBody>,
 ) -> Response {
     info!(
@@ -223,7 +242,7 @@ async fn handle_reserve(
     );
 
     match manager
-        .reserve_upload(body.key, body.version, scope.repo, scope.git_ref)
+        .reserve_upload(body.key, body.version, scope.repo, scope.git_ref, token)
         .await
     {
         Ok(id) => {

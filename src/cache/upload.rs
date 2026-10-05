@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use super::error::CacheError;
 use super::scope::CacheScope;
@@ -14,6 +15,8 @@ struct UploadSession {
     version: String,
     scope_repo: String,
     scope_ref: String,
+    /// Token of the job that reserved the session. Once it is revoked, nobody can commit.
+    token: String,
     tmp_path: PathBuf,
     bytes_written: u64,
 }
@@ -50,6 +53,7 @@ impl UploadTracker {
         version: String,
         scope_repo: String,
         scope_ref: String,
+        token: String,
     ) -> Result<u64> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let tmp_path = self.tmp_dir.join(format!("upload-{id}.tmp"));
@@ -64,6 +68,7 @@ impl UploadTracker {
             version,
             scope_repo,
             scope_ref,
+            token,
             tmp_path,
             bytes_written: 0,
         };
@@ -142,6 +147,27 @@ impl UploadTracker {
             session.tmp_path,
             session.bytes_written,
         ))
+    }
+
+    /// Drops sessions whose job token is no longer live, with their partial uploads.
+    /// Returns how many were discarded.
+    pub async fn discard_abandoned(&self, is_live: impl Fn(&str) -> bool) -> usize {
+        let abandoned: Vec<UploadSession> = {
+            let mut sessions = self.sessions.write().await;
+            let ids: Vec<u64> = sessions
+                .iter()
+                .filter(|(_, session)| !is_live(&session.token))
+                .map(|(id, _)| *id)
+                .collect();
+            ids.iter().filter_map(|id| sessions.remove(id)).collect()
+        };
+
+        for session in &abandoned {
+            if let Err(e) = tokio::fs::remove_file(&session.tmp_path).await {
+                warn!(path = %session.tmp_path.display(), error = %e, "removing abandoned upload");
+            }
+        }
+        abandoned.len()
     }
 
     /// Clean up stale tmp files in the tmp directory (from previous crashes).

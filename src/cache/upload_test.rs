@@ -27,6 +27,7 @@ async fn reserve_and_commit() {
             "my-version".into(),
             "owner/repo".into(),
             "refs/heads/main".into(),
+            "job-token".into(),
         )
         .await
         .unwrap();
@@ -62,6 +63,7 @@ async fn chunked_upload() {
             "v".into(),
             "owner/repo".into(),
             "refs/heads/main".into(),
+            "job-token".into(),
         )
         .await
         .unwrap();
@@ -93,6 +95,7 @@ async fn size_mismatch() {
             "v".into(),
             "owner/repo".into(),
             "refs/heads/main".into(),
+            "job-token".into(),
         )
         .await
         .unwrap();
@@ -126,6 +129,7 @@ async fn other_scope_cannot_write_or_commit_upload() {
             "v".into(),
             "owner/repo".into(),
             "refs/heads/main".into(),
+            "job-token".into(),
         )
         .await
         .unwrap();
@@ -189,4 +193,54 @@ async fn cleanup_stale_files() {
     assert!(!upload_dir.join("upload-1.tmp").exists());
     assert!(!upload_dir.join("upload-2.tmp").exists());
     assert!(upload_dir.join("other.txt").exists());
+}
+
+async fn reserve_for(tracker: &UploadTracker, token: &str) -> u64 {
+    tracker
+        .reserve(
+            "k".into(),
+            "v".into(),
+            "owner/repo".into(),
+            "refs/heads/main".into(),
+            token.into(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn discard_abandoned_drops_only_sessions_of_dead_tokens() {
+    let tmp = TempDir::new().unwrap();
+    let tracker = make_tracker(&tmp);
+    let dead = reserve_for(&tracker, "ended-job").await;
+    let live = reserve_for(&tracker, "running-job").await;
+    tracker
+        .write_chunk(dead, &main_scope(), 0, b"partial")
+        .await
+        .unwrap();
+    tracker
+        .write_chunk(live, &main_scope(), 0, b"data")
+        .await
+        .unwrap();
+
+    let discarded = tracker
+        .discard_abandoned(|token| token == "running-job")
+        .await;
+
+    assert_eq!(discarded, 1);
+    assert!(tracker.commit(dead, &main_scope(), 7).await.is_err());
+    assert!(tracker.commit(live, &main_scope(), 4).await.is_ok());
+}
+
+#[tokio::test]
+async fn discard_abandoned_removes_partial_upload_file() {
+    let tmp = TempDir::new().unwrap();
+    let tracker = make_tracker(&tmp);
+    reserve_for(&tracker, "ended-job").await;
+    let uploads_dir = tmp.path().join("uploads");
+    assert_eq!(std::fs::read_dir(&uploads_dir).unwrap().count(), 1);
+
+    tracker.discard_abandoned(|_| false).await;
+
+    assert_eq!(std::fs::read_dir(&uploads_dir).unwrap().count(), 0);
 }
