@@ -122,15 +122,82 @@ fn parse_stop_commands() {
 }
 
 #[test]
-fn unsecure_commands_disabled_by_default() {
-    assert!(!unsecure_commands_allowed(&HashMap::new()));
+fn command_policy_disabled_by_default() {
+    let policy = CommandPolicy::from_env(&HashMap::new());
+
+    assert_eq!(policy, CommandPolicy::default());
 }
 
 #[test]
-fn unsecure_commands_enabled_only_by_true() {
-    let enabled = HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "TRUE".to_string())]);
-    let other = HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "1".to_string())]);
+fn command_policy_flags_enabled_only_by_true() {
+    let enabled = HashMap::from([
+        (ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "TRUE".to_string()),
+        (
+            ALLOW_UNSECURE_STOP_TOKENS_ENV.to_string(),
+            " true ".to_string(),
+        ),
+    ]);
+    let other = HashMap::from([
+        (ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "1".to_string()),
+        (
+            ALLOW_UNSECURE_STOP_TOKENS_ENV.to_string(),
+            "yes".to_string(),
+        ),
+    ]);
 
-    assert!(unsecure_commands_allowed(&enabled));
-    assert!(!unsecure_commands_allowed(&other));
+    let enabled_policy = CommandPolicy::from_env(&enabled);
+    let other_policy = CommandPolicy::from_env(&other);
+
+    assert!(enabled_policy.allow_unsecure_commands);
+    assert!(enabled_policy.allow_unsecure_stop_tokens);
+    assert_eq!(other_policy, CommandPolicy::default());
+}
+
+#[test]
+fn command_policy_flags_are_independent() {
+    let env = HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "true".to_string())]);
+
+    let policy = CommandPolicy::from_env(&env);
+
+    assert!(policy.allow_unsecure_commands);
+    assert!(!policy.allow_unsecure_stop_tokens);
+}
+
+#[test]
+fn weak_stop_tokens() {
+    for token in [
+        "",
+        "pause-logging",
+        "PAUSE-LOGGING",
+        "set-output",
+        "Add-Mask",
+        "warning",
+    ] {
+        assert!(is_weak_stop_token(token), "{token:?} should be weak");
+    }
+}
+
+#[test]
+fn unique_stop_token_is_not_weak() {
+    assert!(!is_weak_stop_token("f3c9a1e2-unique"));
+}
+
+#[test]
+fn resume_matches_token_case_insensitively() {
+    assert!(resumes_commands("::TOK::", "tok"));
+}
+
+#[test]
+fn resume_allows_leading_whitespace_trailing_data_and_params() {
+    assert!(resumes_commands("  ::tok::anything", "tok"));
+    assert!(resumes_commands("::tok param=1::", "tok"));
+    assert!(resumes_commands("::tok::\r\n", "tok"));
+}
+
+#[test]
+fn resume_rejects_other_lines() {
+    assert!(!resumes_commands("tok", "tok"));
+    assert!(!resumes_commands("::tok", "tok"));
+    assert!(!resumes_commands("::tokx::", "tok"));
+    assert!(!resumes_commands("echo ::tok::", "tok"));
 }

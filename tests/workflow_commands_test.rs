@@ -3,13 +3,11 @@ mod common;
 use std::collections::HashMap;
 
 use chimera::job::client::JobConclusion;
+use chimera::job::commands::ALLOW_UNSECURE_COMMANDS_ENV;
 use common::*;
 
 fn unsecure_env() -> HashMap<String, String> {
-    HashMap::from([(
-        "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
-        "true".to_string(),
-    )])
+    HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "true".to_string())])
 }
 
 #[tokio::test]
@@ -33,15 +31,23 @@ async fn set_env_command_when_unsecure_allowed() {
 #[tokio::test]
 async fn set_env_command_rejected_by_default() {
     let env = TestEnv::setup().await;
+    // continue-on-error keeps the job going, so the job only succeeds if the set-env
+    // step failed and the variable never reached the next step.
     let manifest = manifest_with_steps(
         vec![
-            script_step("s1", "echo '::set-env name=CMD_VAR::cmd_value'"),
-            script_step_if("s2", r#"test -z "$CMD_VAR" || exit 1"#, "always()"),
+            script_step_continue("s1", "echo '::set-env name=CMD_VAR::cmd_value'"),
+            script_step(
+                "check_outcome",
+                r#"test "${{ steps.s1.outcome }}" = "failure" || exit 1"#,
+            ),
+            script_step("check_env", r#"test -z "$CMD_VAR" || exit 1"#),
         ],
         &env.mock_server.uri(),
     );
+
     let (conclusion, _) = env.run(&manifest).await.unwrap();
-    assert_eq!(conclusion, JobConclusion::Failed);
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
 }
 
 #[tokio::test]

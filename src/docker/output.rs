@@ -3,7 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::RwLock;
 
-use crate::job::commands::{ALLOW_UNSECURE_COMMANDS_ENV, WorkflowCommand, parse_command};
+use crate::job::commands::{
+    ALLOW_UNSECURE_COMMANDS_ENV, ALLOW_UNSECURE_STOP_TOKENS_ENV, CommandPolicy, WorkflowCommand,
+    is_weak_stop_token, parse_command, resumes_commands,
+};
 use crate::job::execute::JobState;
 use crate::job::logs::LogSender;
 
@@ -24,7 +27,7 @@ pub struct OutputProcessor {
     /// A rejected command fails the step, like the official runner.
     command_failed: Arc<AtomicBool>,
     debug_enabled: bool,
-    allow_unsecure_commands: bool,
+    policy: CommandPolicy,
 }
 
 impl OutputProcessor {
@@ -32,7 +35,7 @@ impl OutputProcessor {
         sender: LogSender,
         masks: Arc<RwLock<Vec<String>>>,
         debug_enabled: bool,
-        allow_unsecure_commands: bool,
+        policy: CommandPolicy,
     ) -> Self {
         Self {
             sender,
@@ -44,7 +47,7 @@ impl OutputProcessor {
             stop_token: Arc::new(std::sync::Mutex::new(None)),
             command_failed: Arc::new(AtomicBool::new(false)),
             debug_enabled,
-            allow_unsecure_commands,
+            policy,
         }
     }
 
@@ -67,13 +70,13 @@ impl OutputProcessor {
 
         match cmd {
             WorkflowCommand::SetEnv { name, value } => {
-                if self.reject_unsecure("set-env").await {
+                if self.reject_unsecure(line, "set-env").await {
                     return;
                 }
                 self.env_buf.lock().await.push((name, value));
             }
             WorkflowCommand::AddPath(p) => {
-                if self.reject_unsecure("add-path").await {
+                if self.reject_unsecure(line, "add-path").await {
                     return;
                 }
                 self.path_buf.lock().await.push(p);
@@ -119,20 +122,22 @@ impl OutputProcessor {
         let Some(token) = stop_token.as_deref() else {
             return false;
         };
-        if line.trim_end_matches(['\r', '\n']) == format!("::{token}::") {
+        if resumes_commands(line, token) {
             *stop_token = None;
         }
         true
     }
 
     async fn stop_commands(&self, line: &str, token: String) {
-        // An empty or well-known token would let any output resume command processing.
-        let token_is_weak = token.is_empty() || token.eq_ignore_ascii_case("pause-logging");
-        if token_is_weak && !self.allow_unsecure_commands {
-            self.fail_command(format!(
-                "Invalid stop-commands token. Use a unique, unguessable token, or set \
-                 {ALLOW_UNSECURE_COMMANDS_ENV}=true to allow it"
-            ))
+        if is_weak_stop_token(&token) && !self.policy.allow_unsecure_stop_tokens {
+            self.fail_command(
+                line,
+                format!(
+                    "You cannot use a endToken that is an empty string, the string 'pause-logging', \
+                     or another workflow command. Opt into insecure command execution by setting \
+                     the `{ALLOW_UNSECURE_STOP_TOKENS_ENV}` environment variable to `true`."
+                ),
+            )
             .await;
             return;
         }
@@ -145,21 +150,30 @@ impl OutputProcessor {
     }
 
     /// Rejects `set-env` / `add-path` unless explicitly allowed. Returns true if rejected.
-    async fn reject_unsecure(&self, command: &str) -> bool {
-        if self.allow_unsecure_commands {
+    async fn reject_unsecure(&self, line: &str, command: &str) -> bool {
+        if self.policy.allow_unsecure_commands {
             return false;
         }
-        self.fail_command(format!(
-            "The `{command}` command is disabled. Please upgrade to using Environment Files \
-             or opt into unsecure command execution by setting the \
-             `{ALLOW_UNSECURE_COMMANDS_ENV}` environment variable to `true`."
-        ))
+        self.fail_command(
+            line,
+            format!(
+                "The `{command}` command is disabled. Please upgrade to using Environment Files \
+                 or opt into unsecure command execution by setting the \
+                 `{ALLOW_UNSECURE_COMMANDS_ENV}` environment variable to `true`."
+            ),
+        )
         .await;
         true
     }
 
-    async fn fail_command(&self, message: String) {
+    async fn fail_command(&self, line: &str, message: String) {
         self.command_failed.store(true, Ordering::Relaxed);
+        let command = line.trim_end_matches(['\r', '\n']);
+        self.sender
+            .send(format!(
+                "##[error]Unable to process command '{command}' successfully."
+            ))
+            .await;
         self.sender.send(format!("##[error]{message}")).await;
     }
 
