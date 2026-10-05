@@ -33,6 +33,38 @@ fn reporting_skeleton(normalized: &serde_json::Value) -> Option<JobManifest> {
     serde_json::from_value(serde_json::Value::Object(fields)).ok()
 }
 
+/// Losing the completion call means GitHub either hangs or shows the wrong result,
+/// so transient failures get a generous number of retries.
+const COMPLETE_JOB_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
+
+#[derive(Debug, thiserror::Error)]
+pub enum CompleteJobError {
+    #[error("sending complete job request")]
+    Request(#[source] reqwest::Error),
+    #[error("complete job failed ({status}): {body}")]
+    Rejected {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+}
+
+impl CompleteJobError {
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Request(_) => true,
+            Self::Rejected { status, .. } => {
+                status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            }
+        }
+    }
+}
+
 pub struct JobClient {
     client: reqwest::Client,
     token_manager: Arc<TokenManager>,
@@ -213,20 +245,41 @@ impl JobClient {
 
         debug!(%conclusion, api_conclusion, "completing job");
 
+        let mut retry_delays = COMPLETE_JOB_RETRY_DELAYS.iter();
+        loop {
+            let err = match self.send_complete_job(&url, token, &body).await {
+                Ok(()) => return Ok(()),
+                Err(err) => err,
+            };
+            let delay = match retry_delays.next() {
+                Some(delay) if err.is_transient() => delay,
+                _ => return Err(err.into()),
+            };
+            warn!(error = %err, retry_in_secs = delay.as_secs(), "complete job failed, retrying");
+            tokio::time::sleep(*delay).await;
+        }
+    }
+
+    async fn send_complete_job(
+        &self,
+        url: &str,
+        token: &str,
+        body: &serde_json::Value,
+    ) -> Result<(), CompleteJobError> {
         let resp = self
             .client
-            .post(&url)
+            .post(url)
             .bearer_auth(token)
-            .json(&body)
+            .json(body)
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .context("sending complete job request")?;
+            .map_err(CompleteJobError::Request)?;
 
         let status = resp.status();
         if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            bail!("complete job failed ({status}): {body_text}");
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CompleteJobError::Rejected { status, body });
         }
 
         Ok(())

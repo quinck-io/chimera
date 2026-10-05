@@ -271,3 +271,61 @@ async fn acquire_job_with_unreadable_reporting_fields_is_a_plain_error() {
 
     assert!(err.downcast_ref::<UnreadableJob>().is_none());
 }
+
+#[tokio::test]
+async fn complete_job_retries_transient_failures() {
+    let (mock_server, tm) = setup().await;
+    Mock::given(method("POST"))
+        .and(path("/completejob"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream connect error"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/completejob"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    let client = make_client(&mock_server, tm, true);
+
+    let result = client
+        .complete_job(
+            "plan-1",
+            "job-1",
+            super::JobConclusion::Succeeded,
+            &serde_json::json!({}),
+            &[],
+        )
+        .await;
+
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn complete_job_does_not_retry_client_errors() {
+    let (mock_server, tm) = setup().await;
+    Mock::given(method("POST"))
+        .and(path("/completejob"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    let client = make_client(&mock_server, tm, true);
+
+    let err = client
+        .complete_job(
+            "plan-1",
+            "job-1",
+            super::JobConclusion::Failed,
+            &serde_json::json!({}),
+            &[],
+        )
+        .await
+        .context("completing job")
+        .unwrap_err();
+
+    assert!(err.is::<CompleteJobError>());
+    assert!(format!("{err:#}").contains("400"));
+}

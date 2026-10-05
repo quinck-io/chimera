@@ -17,7 +17,7 @@ use crate::github::auth::TokenManager;
 use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage, MessageType};
 use crate::job::JobClient;
 use crate::job::action::ActionCache;
-use crate::job::client::{JobConclusion, UnreadableJob};
+use crate::job::client::{CompleteJobError, JobConclusion, UnreadableJob};
 use crate::job::execute::{resolve_container_specs, run_all_steps};
 use crate::job::live_feed::LiveFeed;
 use crate::job::schema::JobManifest;
@@ -267,6 +267,13 @@ impl Runner {
             .await;
 
         if let Err(ref e) = result {
+            // The steps already ran: reporting a setup failure would overwrite the job's
+            // real conclusion, through the same endpoint that just failed.
+            if e.is::<CompleteJobError>() {
+                error!(error = %format!("{e:#}"), "could not report job completion to GitHub");
+                return result;
+            }
+
             error!(error = %e, cause = ?e, "job failed, reporting failure to GitHub");
 
             if let Err(report_err) = report_setup_failure(&job_client, &manifest, e).await {
