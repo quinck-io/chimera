@@ -131,6 +131,13 @@ pub fn build_base_env(
     }
     if let Ok(token) = manifest.access_token() {
         env.insert("ACTIONS_RUNTIME_TOKEN".into(), token.into());
+        if let Some(url) = manifest.vss_data("GenerateIdTokenUrl") {
+            env.insert("ACTIONS_ID_TOKEN_REQUEST_URL".into(), url.into());
+            env.insert("ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(), token.into());
+        }
+    }
+    if let Some(url) = manifest.vss_data("ResultsServiceUrl") {
+        env.insert("ACTIONS_RESULTS_URL".into(), url.into());
     }
 
     env

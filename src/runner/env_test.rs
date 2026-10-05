@@ -143,6 +143,38 @@ fn sets_actions_runtime() {
         "https://pipelines.actions.githubusercontent.com/abc/"
     );
     assert_eq!(env.get("ACTIONS_RUNTIME_TOKEN").unwrap(), "runtime-token");
+    assert!(!env.contains_key("ACTIONS_RESULTS_URL"));
+    assert!(!env.contains_key("ACTIONS_ID_TOKEN_REQUEST_URL"));
+}
+
+#[test]
+fn sets_results_and_id_token_urls_from_endpoint_data() {
+    let mut manifest = minimal_manifest();
+    let data = &mut manifest.resources.endpoints[0].data;
+    data.insert(
+        "ResultsServiceUrl".into(),
+        "https://results-receiver.actions.githubusercontent.com/".into(),
+    );
+    data.insert(
+        "GenerateIdTokenUrl".into(),
+        "https://pipelines.actions.githubusercontent.com/abc/idtoken".into(),
+    );
+    let (_tmp, ws) = test_workspace();
+
+    let env = build_base_env(&manifest, &ws, "test-runner");
+
+    assert_eq!(
+        env.get("ACTIONS_RESULTS_URL").unwrap(),
+        "https://results-receiver.actions.githubusercontent.com/"
+    );
+    assert_eq!(
+        env.get("ACTIONS_ID_TOKEN_REQUEST_URL").unwrap(),
+        "https://pipelines.actions.githubusercontent.com/abc/idtoken"
+    );
+    assert_eq!(
+        env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN").unwrap(),
+        "runtime-token"
+    );
 }
 
 #[test]

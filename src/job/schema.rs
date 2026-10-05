@@ -214,6 +214,10 @@ impl JobManifest {
             .context("no AccessToken in SystemVssConnection authorization")
     }
 
+    pub fn vss_data(&self, key: &str) -> Option<&str> {
+        self.find_vss_endpoint()?.data.get(key).map(|s| s.as_str())
+    }
+
     pub fn pipelines_url(&self) -> anyhow::Result<&str> {
         let endpoint = self
             .find_vss_endpoint()
