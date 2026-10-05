@@ -1122,8 +1122,9 @@ Actions' workflow command interface.
 | Command | Parameters | Effect |
 |---------|-----------|--------|
 | `::set-output name=X::Y` | name | Sets step output `X` to `Y` |
-| `::set-env name=X::Y` | name | Sets env var `X=Y` for subsequent steps |
-| `::add-path::X` | — | Prepends `X` to `PATH` for subsequent steps |
+| `::set-env name=X::Y` | name | Sets env var `X=Y` for subsequent steps (disabled by default, see below) |
+| `::add-path::X` | — | Prepends `X` to `PATH` for subsequent steps (disabled by default, see below) |
+| `::stop-commands::TOKEN` | — | Ignores all commands until a line `::TOKEN::` |
 | `::add-mask::X` | — | Redacts `X` from all future log output |
 | `::debug::X` | — | Debug-level log annotation |
 | `::warning::X` | — | Warning annotation (shown in PR) |
@@ -1133,6 +1134,12 @@ Actions' workflow command interface.
 | `::save-state name=X::Y` | name | Save state for action pre/post lifecycle |
 
 Parameters are comma-separated key=value pairs between the command name and `::`.
+
+`set-env` and `add-path` are rejected, and fail the step, unless the step's environment
+sets `ACTIONS_ALLOW_UNSECURE_COMMANDS=true`, as in the official runner (CVE-2020-15228).
+Otherwise, any step that prints untrusted text (a PR title, a test log) could set
+`LD_PRELOAD` or `BASH_ENV` for every later step. Use `GITHUB_ENV` and `GITHUB_PATH` instead.
+`stop-commands` with an empty token or `pause-logging` is rejected for the same reason.
 
 ---
 

@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+
+/// Opt-in env var that re-enables `set-env` / `add-path` (CVE-2020-15228), matching the official runner.
+pub const ALLOW_UNSECURE_COMMANDS_ENV: &str = "ACTIONS_ALLOW_UNSECURE_COMMANDS";
+
 #[derive(Debug, PartialEq)]
 pub enum WorkflowCommand {
     SetOutput { name: String, value: String },
@@ -10,6 +15,12 @@ pub enum WorkflowCommand {
     Group(String),
     EndGroup,
     SaveState { name: String, value: String },
+    StopCommands(String),
+}
+
+pub fn unsecure_commands_allowed(env: &HashMap<String, String>) -> bool {
+    env.get(ALLOW_UNSECURE_COMMANDS_ENV)
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
 /// Parse a workflow command from a line of stdout.
@@ -55,6 +66,7 @@ pub fn parse_command(line: &str) -> Option<WorkflowCommand> {
         "error" => Some(WorkflowCommand::Error(message.to_string())),
         "group" => Some(WorkflowCommand::Group(message.to_string())),
         "endgroup" => Some(WorkflowCommand::EndGroup),
+        "stop-commands" => Some(WorkflowCommand::StopCommands(message.to_string())),
         "save-state" => {
             let name = extract_param(params?, "name")?;
             Some(WorkflowCommand::SaveState {

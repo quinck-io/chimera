@@ -114,3 +114,23 @@ fn special_characters_in_values() {
         }
     );
 }
+
+#[test]
+fn parse_stop_commands() {
+    let cmd = parse_command("::stop-commands::abc123").unwrap();
+    assert_eq!(cmd, WorkflowCommand::StopCommands("abc123".into()));
+}
+
+#[test]
+fn unsecure_commands_disabled_by_default() {
+    assert!(!unsecure_commands_allowed(&HashMap::new()));
+}
+
+#[test]
+fn unsecure_commands_enabled_only_by_true() {
+    let enabled = HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "TRUE".to_string())]);
+    let other = HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "1".to_string())]);
+
+    assert!(unsecure_commands_allowed(&enabled));
+    assert!(!unsecure_commands_allowed(&other));
+}

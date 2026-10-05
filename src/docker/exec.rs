@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::output::OutputProcessor;
+use crate::job::commands::unsecure_commands_allowed;
 use crate::job::execute::{JobState, StepConclusion, StepResult};
 use crate::job::logs::LogSender;
 
@@ -55,8 +56,12 @@ pub async fn docker_exec(
         anyhow::bail!("docker exec did not return attached output");
     };
 
-    let processor =
-        OutputProcessor::new(log_sender.clone(), job_state.masks.clone(), debug_enabled);
+    let processor = OutputProcessor::new(
+        log_sender.clone(),
+        job_state.masks.clone(),
+        debug_enabled,
+        unsecure_commands_allowed(env),
+    );
 
     let stream_processor = processor.clone();
     let stream_task = tokio::spawn(async move {
@@ -106,7 +111,7 @@ pub async fn docker_exec(
         .context("inspecting docker exec result")?;
 
     let exit_code = inspect.exit_code.unwrap_or(-1);
-    let conclusion = if exit_code == 0 {
+    let conclusion = if exit_code == 0 && !processor.command_failed() {
         StepConclusion::Succeeded
     } else {
         StepConclusion::Failed

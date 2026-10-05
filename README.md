@@ -84,7 +84,7 @@ shutdown_timeout_secs = 300
 - Host and container step execution (`run:`, `container:`, `services:`)
 - All action types: Node.js, Docker, composite
 - Full `${{ }}` expressions — `success()`, `failure()`, `hashFiles()`, `contains()`, `format()`, all contexts
-- All workflow commands (`set-output`, `set-env`, `add-mask`, `save-state`, etc.)
+- All workflow commands (`set-output`, `add-mask`, `save-state`, `stop-commands`, etc.; `set-env`/`add-path` only with `ACTIONS_ALLOW_UNSECURE_COMMANDS=true`, as on GitHub)
 - Step conditions, timeouts, `continue-on-error`, cancellation
 - Per-job Docker network, port mapping, volumes, `--privileged`/`--cap-add`
 - Live log streaming, job outputs, heartbeats
