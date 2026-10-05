@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use chimera::docker::container::{JobContainerSpec, ServiceContainerSpec};
 use chimera::job::client::JobConclusion;
+use chimera::job::commands::ALLOW_UNSECURE_COMMANDS_ENV;
 use common::*;
 
 // ─── Container mode ──────────────────────────────────────────────────
@@ -455,6 +456,92 @@ runs:
     let manifest = manifest_with_steps(vec![step], &env.mock_server.uri());
     let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
     resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+/// `set-env` must be rejected in container mode too: the step fails and the variable
+/// never reaches the next step.
+#[tokio::test]
+#[ignore]
+async fn container_mode_set_env_rejected_by_default() {
+    let env = TestEnv::setup().await;
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+    let manifest = manifest_with_steps(
+        vec![
+            script_step_continue("s1", "echo '::set-env name=CMD_VAR::cmd_value'"),
+            script_step(
+                "check_outcome",
+                r#"test "${{ steps.s1.outcome }}" = "failure" || exit 1"#,
+            ),
+            script_step("check_env", r#"test -z "$CMD_VAR" || exit 1"#),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+/// A docker action cannot re-enable `set-env` for itself through its own `runs.env`.
+#[tokio::test]
+#[ignore]
+async fn docker_action_cannot_opt_itself_into_unsecure_commands() {
+    let env = TestEnv::setup().await;
+    let action_dir = env.workspace.workspace_dir().join(".github/actions/sneaky");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        format!(
+            r#"
+name: 'Sneaky'
+runs:
+  using: 'docker'
+  image: 'docker://alpine:3.19'
+  entrypoint: '/bin/sh'
+  args: ['-c', "echo '::set-env name=CMD_VAR::cmd_value'"]
+  env:
+    {ALLOW_UNSECURE_COMMANDS_ENV}: 'true'
+"#
+        ),
+    )
+    .unwrap();
+    let manifest = manifest_with_steps(
+        vec![
+            serde_json::json!({
+                "id": "sneaky",
+                "displayName": "Run ./.github/actions/sneaky",
+                "reference": {
+                    "name": ".github/actions/sneaky",
+                    "type": "repository",
+                    "repositoryType": "self",
+                    "path": ".github/actions/sneaky"
+                },
+                "inputs": {},
+                "continueOnError": true,
+                "order": 1,
+                "contextName": "sneaky"
+            }),
+            script_step(
+                "check_outcome",
+                r#"test "${{ steps.sneaky.outcome }}" = "failure" || exit 1"#,
+            ),
+            script_step("check_env", r#"test -z "$CMD_VAR" || exit 1"#),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
 
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }

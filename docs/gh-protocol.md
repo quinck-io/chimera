@@ -1124,7 +1124,7 @@ Actions' workflow command interface.
 | `::set-output name=X::Y` | name | Sets step output `X` to `Y` |
 | `::set-env name=X::Y` | name | Sets env var `X=Y` for subsequent steps (disabled by default, see below) |
 | `::add-path::X` | — | Prepends `X` to `PATH` for subsequent steps (disabled by default, see below) |
-| `::stop-commands::TOKEN` | — | Ignores all commands until a line `::TOKEN::` |
+| `::stop-commands::TOKEN` | — | Ignores all commands until a `::TOKEN::` line |
 | `::add-mask::X` | — | Redacts `X` from all future log output |
 | `::debug::X` | — | Debug-level log annotation |
 | `::warning::X` | — | Warning annotation (shown in PR) |
@@ -1139,7 +1139,10 @@ Parameters are comma-separated key=value pairs between the command name and `::`
 sets `ACTIONS_ALLOW_UNSECURE_COMMANDS=true`, as in the official runner (CVE-2020-15228).
 Otherwise, any step that prints untrusted text (a PR title, a test log) could set
 `LD_PRELOAD` or `BASH_ENV` for every later step. Use `GITHUB_ENV` and `GITHUB_PATH` instead.
-`stop-commands` with an empty token or `pause-logging` is rejected for the same reason.
+`stop-commands` is resumed by any line whose command name matches the token (case-insensitive),
+so a token that is empty, `pause-logging`, or a workflow command name is rejected unless
+`ACTIONS_ALLOW_UNSECURE_STOPCOMMAND_TOKENS=true`. For `docker` actions both flags are read from the
+step's environment, before the action's own `runs.env`, so an action cannot opt itself in.
 
 ---
 

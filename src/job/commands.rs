@@ -3,6 +3,29 @@ use std::collections::HashMap;
 /// Opt-in env var that re-enables `set-env` / `add-path` (CVE-2020-15228), matching the official runner.
 pub const ALLOW_UNSECURE_COMMANDS_ENV: &str = "ACTIONS_ALLOW_UNSECURE_COMMANDS";
 
+/// Opt-in env var that allows guessable `stop-commands` tokens, matching the official runner.
+pub const ALLOW_UNSECURE_STOP_TOKENS_ENV: &str = "ACTIONS_ALLOW_UNSECURE_STOPCOMMAND_TOKENS";
+
+/// Every command the official runner registers. A stop token equal to one of them
+/// would let ordinary command output resume processing, so it counts as weak.
+const REGISTERED_COMMANDS: &[&str] = &[
+    "add-mask",
+    "add-matcher",
+    "add-path",
+    "debug",
+    "echo",
+    "endgroup",
+    "error",
+    "group",
+    "notice",
+    "remove-matcher",
+    "save-state",
+    "set-env",
+    "set-output",
+    "stop-commands",
+    "warning",
+];
+
 #[derive(Debug, PartialEq)]
 pub enum WorkflowCommand {
     SetOutput { name: String, value: String },
@@ -18,31 +41,48 @@ pub enum WorkflowCommand {
     StopCommands(String),
 }
 
-pub fn unsecure_commands_allowed(env: &HashMap<String, String>) -> bool {
-    env.get(ALLOW_UNSECURE_COMMANDS_ENV)
+/// Which insecure workflow command behaviours a step has opted into.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CommandPolicy {
+    pub allow_unsecure_commands: bool,
+    pub allow_unsecure_stop_tokens: bool,
+}
+
+impl CommandPolicy {
+    pub fn from_env(env: &HashMap<String, String>) -> Self {
+        Self {
+            allow_unsecure_commands: env_flag_enabled(env, ALLOW_UNSECURE_COMMANDS_ENV),
+            allow_unsecure_stop_tokens: env_flag_enabled(env, ALLOW_UNSECURE_STOP_TOKENS_ENV),
+        }
+    }
+}
+
+fn env_flag_enabled(env: &HashMap<String, String>, name: &str) -> bool {
+    env.get(name)
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+}
+
+/// A token that output could guess or emit by accident: empty, `pause-logging`,
+/// or the name of a workflow command.
+pub fn is_weak_stop_token(token: &str) -> bool {
+    token.is_empty()
+        || token.eq_ignore_ascii_case("pause-logging")
+        || REGISTERED_COMMANDS
+            .iter()
+            .any(|command| command.eq_ignore_ascii_case(token))
+}
+
+/// Whether `line` is the `::TOKEN::` command that resumes processing after `stop-commands`.
+/// Like the official runner, the name is matched case-insensitively and anything
+/// after the closing `::` is ignored.
+pub fn resumes_commands(line: &str, token: &str) -> bool {
+    split_command(line.trim_start()).is_some_and(|(name, _, _)| name.eq_ignore_ascii_case(token))
 }
 
 /// Parse a workflow command from a line of stdout.
 /// Format: `::command-name param=value::message`
 pub fn parse_command(line: &str) -> Option<WorkflowCommand> {
-    let line = line.trim_end_matches(['\r', '\n']);
-
-    if !line.starts_with("::") {
-        return None;
-    }
-
-    // Find the closing `::`
-    let rest = &line[2..];
-    let closing = rest.find("::")?;
-    let command_part = &rest[..closing];
-    let message = &rest[closing + 2..];
-
-    // Split command_part into command name and parameters
-    let (cmd_name, params) = match command_part.find(' ') {
-        Some(pos) => (&command_part[..pos], Some(&command_part[pos + 1..])),
-        None => (command_part, None),
-    };
+    let (cmd_name, params, message) = split_command(line)?;
 
     match cmd_name {
         "set-output" => {
@@ -75,6 +115,18 @@ pub fn parse_command(line: &str) -> Option<WorkflowCommand> {
             })
         }
         _ => None,
+    }
+}
+
+/// Splits `::name params::message` into its three parts.
+fn split_command(line: &str) -> Option<(&str, Option<&str>, &str)> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix("::")?;
+    let (command_part, message) = rest.split_once("::")?;
+
+    match command_part.split_once(' ') {
+        Some((name, params)) => Some((name, Some(params), message)),
+        None => Some((command_part, None, message)),
     }
 }
 

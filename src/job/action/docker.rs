@@ -13,7 +13,7 @@ use super::build_action_inputs;
 use super::metadata::ActionMetadata;
 use crate::docker::output::OutputProcessor;
 use crate::docker::resources::{JobDockerResources, stop_and_remove};
-use crate::job::commands::unsecure_commands_allowed;
+use crate::job::commands::CommandPolicy;
 use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env};
 use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
@@ -33,6 +33,7 @@ pub async fn run_docker_image_action(
     docker_resources: Option<&JobDockerResources>,
 ) -> Result<StepResult> {
     let env = build_step_env(step, job_state, workspace, base_env);
+    let command_policy = CommandPolicy::from_env(&env);
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
 
     let entrypoint = step.inputs.get("entrypoint").cloned();
@@ -52,6 +53,7 @@ pub async fn run_docker_image_action(
         entrypoint: entrypoint.as_deref(),
         args: &args,
         env: &env,
+        command_policy,
         step,
         job_state,
         workspace,
@@ -91,6 +93,8 @@ pub async fn run_docker_metadata_action(
     };
 
     let mut env = build_step_env(step, job_state, workspace, base_env);
+    // Read before the action's own `runs.env` is merged, so an action cannot opt itself in.
+    let command_policy = CommandPolicy::from_env(&env);
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
     env.extend(build_action_inputs(metadata, step, &expr_ctx));
     merge_action_env(&mut env, metadata, job_state);
@@ -111,6 +115,7 @@ pub async fn run_docker_metadata_action(
         entrypoint: entrypoint.as_deref(),
         args: &resolved_args,
         env: &env,
+        command_policy,
         step,
         job_state,
         workspace,
@@ -220,6 +225,7 @@ struct RunDockerParams<'a> {
     entrypoint: Option<&'a str>,
     args: &'a [String],
     env: &'a HashMap<String, String>,
+    command_policy: CommandPolicy,
     step: &'a Step,
     job_state: &'a mut JobState,
     workspace: &'a Workspace,
@@ -310,7 +316,7 @@ async fn run_docker_container(params: RunDockerParams<'_>) -> Result<StepResult>
         params.job_state,
         params.log_sender,
         params.cancel_token,
-        unsecure_commands_allowed(params.env),
+        params.command_policy,
     )
     .await;
 
@@ -367,7 +373,7 @@ async fn start_and_stream_logs(
     job_state: &mut JobState,
     log_sender: &LogSender,
     cancel_token: &CancellationToken,
-    allow_unsecure_commands: bool,
+    command_policy: CommandPolicy,
 ) -> Result<StepResult> {
     docker
         .start_container::<String>(container_id, None)
@@ -380,7 +386,7 @@ async fn start_and_stream_logs(
         log_sender.clone(),
         job_state.masks.clone(),
         job_state.debug_enabled,
-        allow_unsecure_commands,
+        command_policy,
     );
 
     let stream_task = {

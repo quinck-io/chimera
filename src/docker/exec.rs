@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::output::OutputProcessor;
-use crate::job::commands::unsecure_commands_allowed;
+use crate::job::commands::CommandPolicy;
 use crate::job::execute::{JobState, StepConclusion, StepResult};
 use crate::job::logs::LogSender;
 
@@ -60,7 +60,7 @@ pub async fn docker_exec(
         log_sender.clone(),
         job_state.masks.clone(),
         debug_enabled,
-        unsecure_commands_allowed(env),
+        CommandPolicy::from_env(env),
     );
 
     let stream_processor = processor.clone();

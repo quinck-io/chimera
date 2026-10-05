@@ -2,6 +2,7 @@ use super::*;
 use crate::github::auth::TokenManager;
 use crate::job::action::ActionCache;
 use crate::job::client::JobConclusion;
+use crate::job::commands::ALLOW_UNSECURE_COMMANDS_ENV;
 use crate::job::schema::{StepReference, StepReferenceKind};
 use rsa::RsaPrivateKey;
 use tokio_util::sync::CancellationToken;
@@ -154,10 +155,7 @@ async fn nonzero_exit_returns_failed() {
 }
 
 fn unsecure_commands_env() -> HashMap<String, String> {
-    HashMap::from([(
-        "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
-        "true".to_string(),
-    )])
+    HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "true".to_string())])
 }
 
 #[tokio::test]
