@@ -5,13 +5,12 @@ use anyhow::{Context, Result, bail};
 use bollard::Docker;
 use bollard::container::{Config, CreateContainerOptions, LogsOptions};
 use bollard::models::{EndpointSettings, HostConfig};
-use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::build_action_inputs;
 use super::metadata::ActionMetadata;
-use crate::docker::output::OutputProcessor;
+use crate::docker::output::{OutputProcessor, process_docker_output};
 use crate::docker::resources::{JobDockerResources, stop_and_remove};
 use crate::job::commands::CommandPolicy;
 use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env};
@@ -395,7 +394,7 @@ async fn start_and_stream_logs(
         let cid = container_id.to_string();
 
         tokio::spawn(async move {
-            let mut stream = docker.logs::<String>(
+            let stream = docker.logs::<String>(
                 &cid,
                 Some(LogsOptions {
                     follow: true,
@@ -404,12 +403,7 @@ async fn start_and_stream_logs(
                     ..Default::default()
                 }),
             );
-            while let Some(Ok(output)) = stream.next().await {
-                let text = output.to_string();
-                for line in text.lines() {
-                    processor.process_line(line).await;
-                }
-            }
+            process_docker_output(stream, &processor).await;
         })
     };
 

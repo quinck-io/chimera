@@ -545,3 +545,38 @@ runs:
 
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+/// Docker delivers output in arbitrary chunks, so a command written in two parts must
+/// still be read as one line.
+#[tokio::test]
+#[ignore]
+async fn container_mode_command_split_across_writes() {
+    let env = TestEnv::setup().await;
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+    let manifest = manifest_with_steps(
+        vec![
+            script_step(
+                "s1",
+                "printf '::set-output name=split::'; sleep 0.5; printf 'joined\\n'",
+            ),
+            script_step(
+                "s2",
+                r#"test "${{ steps.s1.outputs.split }}" = "joined" || exit 1"#,
+            ),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}

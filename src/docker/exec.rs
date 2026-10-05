@@ -4,11 +4,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::output::OutputProcessor;
+use super::output::{OutputProcessor, process_docker_output};
 use crate::job::commands::CommandPolicy;
 use crate::job::execute::{JobState, StepConclusion, StepResult};
 use crate::job::logs::LogSender;
@@ -52,7 +51,7 @@ pub async fn docker_exec(
         .await
         .context("starting docker exec")?;
 
-    let StartExecResults::Attached { mut output, .. } = exec_output else {
+    let StartExecResults::Attached { output, .. } = exec_output else {
         anyhow::bail!("docker exec did not return attached output");
     };
 
@@ -65,12 +64,7 @@ pub async fn docker_exec(
 
     let stream_processor = processor.clone();
     let stream_task = tokio::spawn(async move {
-        while let Some(Ok(output)) = output.next().await {
-            let text = output.to_string();
-            for line in text.lines() {
-                stream_processor.process_line(line).await;
-            }
-        }
+        process_docker_output(output, &stream_processor).await;
     });
     let stream_abort = stream_task.abort_handle();
 
