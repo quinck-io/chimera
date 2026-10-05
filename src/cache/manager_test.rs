@@ -40,8 +40,16 @@ async fn upload_scoped_blob(
         )
         .await
         .unwrap();
-    manager.write_chunk(id, 0, data).await.unwrap();
-    manager.commit_upload(id, data.len() as u64).await.unwrap();
+    let scope = CacheScope {
+        repo: repo.to_string(),
+        git_ref: git_ref.to_string(),
+        default_ref: git_ref.to_string(),
+    };
+    manager.write_chunk(id, &scope, 0, data).await.unwrap();
+    manager
+        .commit_upload(id, &scope, data.len() as u64)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

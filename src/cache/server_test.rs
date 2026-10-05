@@ -7,19 +7,29 @@ use tower::ServiceExt;
 
 use super::*;
 use crate::cache::manager::CacheManager;
+use crate::cache::scope::CacheGrant;
 
 const SCOPE_REPO: &str = "owner/repo";
 const SCOPE_REF: &str = "refs/heads/main";
 const DEFAULT_REF: &str = "refs/heads/main";
 
-fn scope_prefix() -> String {
-    let repo = encode_scope(SCOPE_REPO);
-    let git_ref = encode_scope(SCOPE_REF);
-    let default = encode_scope(DEFAULT_REF);
-    format!("/cache/{repo}/{git_ref}/{default}")
+fn scope(repo: &str, git_ref: &str) -> CacheScope {
+    CacheScope {
+        repo: repo.into(),
+        git_ref: git_ref.into(),
+        default_ref: DEFAULT_REF.into(),
+    }
 }
 
-async fn make_test_app(tmp: &TempDir) -> (Router, SharedManager) {
+fn main_scope() -> CacheScope {
+    scope(SCOPE_REPO, SCOPE_REF)
+}
+
+fn prefix_for(grant: &CacheGrant) -> String {
+    format!("/cache/{}", grant.token())
+}
+
+async fn make_test_app(tmp: &TempDir) -> (Router, SharedManager, Arc<ScopeRegistry>) {
     let entries_dir = tmp.path().join("entries");
     let data_dir = tmp.path().join("data");
     let tmp_dir = tmp.path().join("tmp");
@@ -30,15 +40,71 @@ async fn make_test_app(tmp: &TempDir) -> (Router, SharedManager) {
             .unwrap(),
     );
 
-    (router(manager.clone()), manager)
+    let scopes = Arc::new(ScopeRegistry::default());
+    (router(manager.clone(), scopes.clone()), manager, scopes)
+}
+
+/// Reserve, upload and commit `data` under `key` through the HTTP API.
+async fn upload_via_http(app: &Router, prefix: &str, key: &str, data: &'static [u8]) {
+    let cache_id = reserve_via_http(app, prefix, key).await;
+
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("{prefix}/_apis/artifactcache/caches/{cache_id}"))
+        .header("content-range", format!("bytes 0-{}/*", data.len() - 1))
+        .body(Body::from(Bytes::from_static(data)))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = commit_via_http(app, prefix, cache_id, data.len()).await;
+    assert_eq!(resp, StatusCode::NO_CONTENT);
+}
+
+async fn reserve_via_http(app: &Router, prefix: &str, key: &str) -> u64 {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("{prefix}/_apis/artifactcache/caches"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "key": key, "version": "v1" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    let reserve_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    reserve_resp["cacheId"].as_u64().unwrap()
+}
+
+async fn commit_via_http(app: &Router, prefix: &str, cache_id: u64, size: usize) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("{prefix}/_apis/artifactcache/caches/{cache_id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::json!({ "size": size }).to_string()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+async fn lookup_status(app: &Router, prefix: &str, key: &str) -> StatusCode {
+    let req = Request::builder()
+        .uri(format!(
+            "{prefix}/_apis/artifactcache/cache?keys={key}&version=v1"
+        ))
+        .header("host", "localhost:9999")
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
 }
 
 #[tokio::test]
 async fn lookup_miss() {
     let tmp = TempDir::new().unwrap();
-    let (app, _mgr) = make_test_app(&tmp).await;
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
 
-    let prefix = scope_prefix();
+    let grant = scopes.grant(main_scope());
+    let prefix = prefix_for(&grant);
     let req = Request::builder()
         .uri(format!(
             "{prefix}/_apis/artifactcache/cache?keys=nonexistent&version=v1"
@@ -53,9 +119,10 @@ async fn lookup_miss() {
 #[tokio::test]
 async fn full_http_roundtrip() {
     let tmp = TempDir::new().unwrap();
-    let (app, _mgr) = make_test_app(&tmp).await;
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
 
-    let prefix = scope_prefix();
+    let grant = scopes.grant(main_scope());
+    let prefix = prefix_for(&grant);
     let data = b"test cache data for http roundtrip";
 
     // 1. Reserve
@@ -124,9 +191,9 @@ async fn full_http_roundtrip() {
     assert_eq!(lookup_resp["scope"], SCOPE_REF);
 
     let archive_location = lookup_resp["archiveLocation"].as_str().unwrap();
-    assert!(archive_location.starts_with("http://localhost:9999/download/"));
+    assert!(archive_location.starts_with(&format!("http://localhost:9999{prefix}/download/")));
 
-    // 5. Download (global, no scope prefix)
+    // 5. Download (requires the job token too)
     let download_path = archive_location
         .strip_prefix("http://localhost:9999")
         .unwrap();
@@ -145,11 +212,13 @@ async fn full_http_roundtrip() {
 #[tokio::test]
 async fn download_invalid_hash_rejected() {
     let tmp = TempDir::new().unwrap();
-    let (app, _mgr) = make_test_app(&tmp).await;
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let grant = scopes.grant(main_scope());
+    let prefix = prefix_for(&grant);
 
     // Non-hex characters -- rejected as bad request (prevents path traversal)
     let req = Request::builder()
-        .uri("/download/nonexistent")
+        .uri(format!("{prefix}/download/nonexistent"))
         .body(Body::empty())
         .unwrap();
 
@@ -159,7 +228,7 @@ async fn download_invalid_hash_rejected() {
     // Valid hex but doesn't exist -- 404
     let fake_hash = "a".repeat(64);
     let req = Request::builder()
-        .uri(format!("/download/{fake_hash}"))
+        .uri(format!("{prefix}/download/{fake_hash}"))
         .body(Body::empty())
         .unwrap();
 
@@ -170,9 +239,10 @@ async fn download_invalid_hash_rejected() {
 #[tokio::test]
 async fn upload_chunk_missing_content_range() {
     let tmp = TempDir::new().unwrap();
-    let (app, _mgr) = make_test_app(&tmp).await;
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
 
-    let prefix = scope_prefix();
+    let grant = scopes.grant(main_scope());
+    let prefix = prefix_for(&grant);
     let req = Request::builder()
         .method("PATCH")
         .uri(format!("{prefix}/_apis/artifactcache/caches/1"))
@@ -186,7 +256,7 @@ async fn upload_chunk_missing_content_range() {
 #[tokio::test]
 async fn v4_twirp_request_returns_404() {
     let tmp = TempDir::new().unwrap();
-    let (app, _mgr) = make_test_app(&tmp).await;
+    let (app, _mgr, _scopes) = make_test_app(&tmp).await;
 
     let req = Request::builder()
         .method("POST")
@@ -202,7 +272,7 @@ async fn v4_twirp_request_returns_404() {
 #[tokio::test]
 async fn unknown_path_returns_404() {
     let tmp = TempDir::new().unwrap();
-    let (app, _mgr) = make_test_app(&tmp).await;
+    let (app, _mgr, _scopes) = make_test_app(&tmp).await;
 
     let req = Request::builder()
         .uri("/some/random/path")
@@ -216,12 +286,13 @@ async fn unknown_path_returns_404() {
 #[tokio::test]
 async fn concurrent_http_clients() {
     let tmp = TempDir::new().unwrap();
-    let (_app, mgr) = make_test_app(&tmp).await;
+    let (_app, mgr, scopes) = make_test_app(&tmp).await;
 
     // Start a real TCP server on port 0
-    let addr = start(mgr, 0).await.unwrap();
+    let addr = start(mgr, scopes.clone(), 0).await.unwrap();
     let base_url = format!("http://{addr}");
-    let prefix = scope_prefix();
+    let grant = scopes.grant(main_scope());
+    let prefix = prefix_for(&grant);
     let client = reqwest::Client::new();
 
     let mut handles = Vec::new();
@@ -283,106 +354,123 @@ async fn concurrent_http_clients() {
 #[tokio::test]
 async fn scope_isolation_between_repos() {
     let tmp = TempDir::new().unwrap();
-    let (app, _mgr) = make_test_app(&tmp).await;
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let repo_a = scopes.grant(scope("org/repo-a", SCOPE_REF));
+    let repo_b = scopes.grant(scope("org/repo-b", SCOPE_REF));
 
-    let data = b"scoped data";
-    let repo_a_prefix = format!(
-        "/cache/{}/{}/{}",
-        encode_scope("org/repo-a"),
-        encode_scope(SCOPE_REF),
-        encode_scope(DEFAULT_REF),
-    );
-    let repo_b_prefix = format!(
-        "/cache/{}/{}/{}",
-        encode_scope("org/repo-b"),
-        encode_scope(SCOPE_REF),
-        encode_scope(DEFAULT_REF),
-    );
+    upload_via_http(&app, &prefix_for(&repo_a), "shared-key", b"scoped data").await;
 
-    // Upload cache under repo-a
+    assert_eq!(
+        lookup_status(&app, &prefix_for(&repo_a), "shared-key").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        lookup_status(&app, &prefix_for(&repo_b), "shared-key").await,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn unknown_token_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let grant = scopes.grant(main_scope());
+    upload_via_http(&app, &prefix_for(&grant), "key", b"data").await;
+
+    let status = lookup_status(&app, "/cache/guessed-token", "key").await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn revoked_token_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let grant = scopes.grant(main_scope());
+    let prefix = prefix_for(&grant);
+    upload_via_http(&app, &prefix, "key", b"data").await;
+
+    drop(grant);
+
+    assert_eq!(
+        lookup_status(&app, &prefix, "key").await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn download_requires_valid_token() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, _scopes) = make_test_app(&tmp).await;
+    let hash = "a".repeat(64);
+
     let req = Request::builder()
-        .method("POST")
-        .uri(format!("{repo_a_prefix}/_apis/artifactcache/caches"))
-        .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({
-                "key": "shared-key",
-                "version": "v1"
-            }))
-            .unwrap(),
-        ))
+        .uri(format!("/cache/guessed-token/download/{hash}"))
+        .body(Body::empty())
         .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-    let reserve_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let cache_id = reserve_resp["cacheId"].as_u64().unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn pull_request_cannot_write_default_branch_cache() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let main = scopes.grant(main_scope());
+    let pull_request = scopes.grant(scope(SCOPE_REPO, "refs/pull/7/merge"));
+
+    upload_via_http(&app, &prefix_for(&pull_request), "poisoned", b"evil").await;
+
+    assert_eq!(
+        lookup_status(&app, &prefix_for(&pull_request), "poisoned").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        lookup_status(&app, &prefix_for(&main), "poisoned").await,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn pull_request_can_restore_default_branch_cache() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let main = scopes.grant(main_scope());
+    let pull_request = scopes.grant(scope(SCOPE_REPO, "refs/pull/7/merge"));
+
+    upload_via_http(&app, &prefix_for(&main), "deps", b"cached deps").await;
+
+    assert_eq!(
+        lookup_status(&app, &prefix_for(&pull_request), "deps").await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn cannot_commit_upload_reserved_by_another_scope() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let main = scopes.grant(main_scope());
+    let pull_request = scopes.grant(scope(SCOPE_REPO, "refs/pull/7/merge"));
+    let cache_id = reserve_via_http(&app, &prefix_for(&main), "deps").await;
 
     let req = Request::builder()
         .method("PATCH")
         .uri(format!(
-            "{repo_a_prefix}/_apis/artifactcache/caches/{cache_id}"
+            "{}/_apis/artifactcache/caches/{cache_id}",
+            prefix_for(&pull_request)
         ))
-        .header("content-range", format!("bytes 0-{}/*", data.len() - 1))
-        .body(Body::from(Bytes::from_static(data)))
+        .header("content-range", "bytes 0-3/*")
+        .body(Body::from(Bytes::from_static(b"evil")))
         .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let chunk_status = app.clone().oneshot(req).await.unwrap().status();
+    let commit_status = commit_via_http(&app, &prefix_for(&pull_request), cache_id, 0).await;
 
-    let req = Request::builder()
-        .method("POST")
-        .uri(format!(
-            "{repo_a_prefix}/_apis/artifactcache/caches/{cache_id}"
-        ))
-        .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({ "size": data.len() })).unwrap(),
-        ))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-
-    // Lookup from repo-a should succeed
-    let req = Request::builder()
-        .uri(format!(
-            "{repo_a_prefix}/_apis/artifactcache/cache?keys=shared-key&version=v1"
-        ))
-        .header("host", "localhost:9999")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    // Lookup from repo-b should miss
-    let req = Request::builder()
-        .uri(format!(
-            "{repo_b_prefix}/_apis/artifactcache/cache?keys=shared-key&version=v1"
-        ))
-        .header("host", "localhost:9999")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-}
-
-#[test]
-fn scope_encode_decode_roundtrip() {
-    let values = [
-        "owner/repo",
-        "refs/heads/main",
-        "refs/heads/feature/my-branch",
-        "refs/tags/v1.0.0",
-        "",
-    ];
-    for val in values {
-        let encoded = encode_scope(val);
-        let decoded = decode_scope(&encoded).unwrap();
-        assert_eq!(decoded, val);
-    }
-}
-
-#[test]
-fn decode_scope_invalid_base64() {
-    let result = decode_scope("!!!invalid!!!");
-    assert!(result.is_err());
+    assert_eq!(chunk_status, StatusCode::NOT_FOUND);
+    assert_ne!(commit_status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        lookup_status(&app, &prefix_for(&main), "deps").await,
+        StatusCode::NO_CONTENT
+    );
 }

@@ -1153,41 +1153,41 @@ The Twirp protocol (`ACTIONS_CACHE_SERVICE_V2`) is a separate code path that
 chimera never activates. Both v3 and v4 of `actions/cache` support the REST API
 when `ACTIONS_CACHE_URL` is set.
 
-**No authentication** is enforced on the local server. The official runner sends
-a bearer token, but chimera's server ignores it — only local/bridge network
-traffic can reach it.
+**Authentication** uses a per-job token embedded in the URL path, not the bearer
+token the toolkit sends (`ACTIONS_RUNTIME_TOKEN` is GitHub's, and chimera ignores
+it). The server listens on all interfaces because job containers reach it through
+their bridge gateway, so every request must carry a token the runner issued; unknown
+or revoked tokens get `401`.
 
 ### 14.2 ACTIONS_CACHE_URL Format
 
-The URL includes scope information encoded in the path so the server can enforce
-repository and ref isolation:
-
 ```
-ACTIONS_CACHE_URL=http://{host}:{port}/cache/{scope_repo}/{scope_ref}/{default_ref}/
+ACTIONS_CACHE_URL=http://{host}:{port}/cache/{token}/
 ```
 
-| Segment | Encoding | Example raw value | Example encoded |
-|---------|----------|-------------------|-----------------|
-| `scope_repo` | base64url (no padding) | `owner/repo` | `b3duZXIvcmVwbw` |
-| `scope_ref` | base64url (no padding) | `refs/heads/main` | `cmVmcy9oZWFkcy9tYWlu` |
-| `default_ref` | base64url (no padding) | `refs/heads/main` | `cmVmcy9oZWFkcy9tYWlu` |
+`token` is 32 random bytes (base64url, no padding) that the runner generates when a
+job starts and revokes when the job ends, however it ends. The server maps the token
+to the job's scope. The scope is never read from the request: a job can read and
+rewrite its own environment, so a client-supplied scope would let any job (such as a
+pull request from a fork) read other repositories' caches or poison the default
+branch's cache.
 
 **Host selection**:
 - **Host mode**: `localhost:{cache_port}`
 - **Container mode**: `{gateway_ip}:{cache_port}` — the Docker bridge network
   gateway IP (e.g. `172.18.0.1`) so the container can reach the host
 
-The scope values are extracted from the job manifest's `contextData`:
-- `scope_repo` = `github.repository`
-- `scope_ref` = `github.ref`
+The scope bound to the token is taken from the job manifest's `contextData`:
+- `repo` = `github.repository`
+- `git_ref` = `github.ref`
 - `default_ref` = `github.event.repository.default_branch` (prefixed with
-  `refs/heads/` if not already a ref)
+  `refs/heads/`)
 
 ### 14.3 REST API Endpoints
 
 All cache API paths are relative to `ACTIONS_CACHE_URL`. Since that URL already
-includes the `/cache/{scope_repo}/{scope_ref}/{default_ref}/` prefix, the
-`actions/cache` client appends its standard paths after the trailing slash.
+includes the `/cache/{token}/` prefix, the `actions/cache` client appends its
+standard paths after the trailing slash.
 
 #### Lookup (cache hit check)
 
@@ -1200,9 +1200,9 @@ match; subsequent keys are restore keys (prefix match fallback). The `version`
 is a hash of the cache paths and compression method.
 
 **Scope isolation rules**:
-1. Only entries from the same `scope_repo` are considered
-2. Try `scope_ref` first (exact and prefix matches)
-3. If no match and `scope_ref != default_ref`, fall back to `default_ref`
+1. Only entries from the token's `repo` are considered
+2. Try the token's `git_ref` first (exact and prefix matches)
+3. If no match and `git_ref != default_ref`, fall back to `default_ref`
    (feature branches can read from the default branch, not vice versa)
 4. Prefix matching: find the longest stored key that is a prefix of the search
    key, with matching version
@@ -1216,7 +1216,7 @@ literal `%2C`. The server decodes this remaining layer before splitting on comma
 ```json
 {
   "cacheKey": "cargo-Linux-abc123",
-  "archiveLocation": "http://{host}:{port}/download/{blake3_hash}",
+  "archiveLocation": "http://{host}:{port}/cache/{token}/download/{blake3_hash}",
   "scope": "refs/heads/main"
 }
 ```
@@ -1240,8 +1240,8 @@ Content-Type: application/json
 }
 ```
 
-Creates an upload session. The server associates it with the scope from the URL
-path.
+Creates an upload session bound to the token's scope. Chunk uploads and the commit
+for this session are only accepted from a token with the same repository and ref.
 
 **Response (200)**:
 ```json
@@ -1274,7 +1274,8 @@ upload time.
 
 **Response (400)**: Missing or malformed `Content-Range` header.
 
-**Response (404)**: Unknown `cacheId` (session expired or never existed).
+**Response (404)**: Unknown `cacheId` (session expired, never existed, or reserved
+by a different scope).
 
 #### Commit (finalize upload)
 
@@ -1303,11 +1304,10 @@ across all chunks. On commit:
 #### Download
 
 ```
-GET /download/{blake3_hash}
+GET /cache/{token}/download/{blake3_hash}
 ```
 
-This endpoint is **global** (not scoped) — it lives outside the
-`/cache/{scope}/...` prefix. The `archiveLocation` URL from a lookup response
+Requires a valid job token. The `archiveLocation` URL from a lookup response
 points here directly.
 
 The hash is validated to be exactly 64 lowercase hex characters before any
@@ -1434,11 +1434,11 @@ host and Docker bridge networks.
 | Append block | PUT | `{signed_url}&comp=appendblock` | URL-signed (no header) |
 | Seal blob | PUT | `{signed_url}&comp=seal` | URL-signed (no header) |
 | Live feed | WSS | `wss://feed.actions.githubusercontent.com/{id}` | Bearer (job token, in header) |
-| Cache lookup | GET | `{cache_url}/_apis/artifactcache/cache?keys=...&version=...` | None (local) |
-| Cache reserve | POST | `{cache_url}/_apis/artifactcache/caches` | None (local) |
-| Cache upload chunk | PATCH | `{cache_url}/_apis/artifactcache/caches/{id}` | None (local) |
-| Cache commit | POST | `{cache_url}/_apis/artifactcache/caches/{id}` | None (local) |
-| Cache download | GET | `http://{host}:{port}/download/{hash}` | None (local) |
+| Cache lookup | GET | `{cache_url}/_apis/artifactcache/cache?keys=...&version=...` | Job token (in URL path) |
+| Cache reserve | POST | `{cache_url}/_apis/artifactcache/caches` | Job token (in URL path) |
+| Cache upload chunk | PATCH | `{cache_url}/_apis/artifactcache/caches/{id}` | Job token (in URL path) |
+| Cache commit | POST | `{cache_url}/_apis/artifactcache/caches/{id}` | Job token (in URL path) |
+| Cache download | GET | `{cache_url}/download/{hash}` | Job token (in URL path) |
 
 ---
 
@@ -1575,8 +1575,8 @@ literal `,` as key separators.
 ### Cache: `archiveLocation` depends on `Host` header
 
 The lookup response's `archiveLocation` URL is constructed from the request's
-`Host` header (e.g. `http://localhost:9999/download/{hash}` or
-`http://172.18.0.1:9999/download/{hash}`). This makes it work transparently for
+`Host` header (e.g. `http://localhost:9999/cache/{token}/download/{hash}` or
+`http://172.18.0.1:9999/cache/{token}/download/{hash}`). This makes it work transparently for
 both host-mode and container-mode runners without configuration. If the `Host`
 header is missing, it falls back to `localhost:9999`.
 

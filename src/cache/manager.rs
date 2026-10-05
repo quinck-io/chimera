@@ -8,6 +8,7 @@ use tracing::{debug, info, warn};
 
 use super::entry::{CacheEntry, EntryIndex, load_entries_from_disk};
 use super::error::CacheError;
+use super::scope::CacheScope;
 use super::store::BlobStore;
 use super::upload::UploadTracker;
 
@@ -152,14 +153,25 @@ impl CacheManager {
     }
 
     /// Write a chunk to an upload session.
-    pub async fn write_chunk(&self, id: u64, offset: u64, data: &[u8]) -> Result<()> {
-        self.uploads.write_chunk(id, offset, data).await
+    pub async fn write_chunk(
+        &self,
+        id: u64,
+        scope: &CacheScope,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        self.uploads.write_chunk(id, scope, offset, data).await
     }
 
     /// Commit an upload: finalize the blob and create a cache entry.
-    pub async fn commit_upload(&self, id: u64, expected_size: u64) -> Result<()> {
+    pub async fn commit_upload(
+        &self,
+        id: u64,
+        scope: &CacheScope,
+        expected_size: u64,
+    ) -> Result<()> {
         let (key, version, scope_repo, scope_ref, tmp_path, size) =
-            self.uploads.commit(id, expected_size).await?;
+            self.uploads.commit(id, scope, expected_size).await?;
 
         let hash = self
             .store

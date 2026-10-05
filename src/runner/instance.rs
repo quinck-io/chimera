@@ -7,6 +7,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::cache::scope::{CacheScope, ScopeRegistry};
+use crate::cache::server::job_cache_url;
 use crate::config::{ChimeraPaths, RunnerCredentials, rsa_params_to_private_key};
 use crate::daemon::{DaemonState, JobInfo, RunnerPhase};
 use crate::docker::resources::{JobDockerResources, SetupParams};
@@ -33,6 +35,7 @@ pub struct Runner {
     pub(super) paths: ChimeraPaths,
     pub(super) state: Option<Arc<DaemonState>>,
     pub(super) cache_port: u16,
+    pub(super) cache_scopes: Arc<ScopeRegistry>,
 }
 
 impl Runner {
@@ -42,6 +45,7 @@ impl Runner {
         paths: ChimeraPaths,
         state: Arc<DaemonState>,
         cache_port: u16,
+        cache_scopes: Arc<ScopeRegistry>,
     ) -> Self {
         Self {
             name,
@@ -49,6 +53,7 @@ impl Runner {
             paths,
             state: Some(state),
             cache_port,
+            cache_scopes,
         }
     }
 
@@ -407,55 +412,13 @@ impl Runner {
             }
         }
 
-        // Inject ACTIONS_CACHE_URL for actions/cache support, with scope prefix
-        let git_ref = manifest
-            .context_data
-            .get("github")
-            .and_then(|g| g.get("ref"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("refs/heads/main");
-        let default_branch = manifest
-            .context_data
-            .get("github")
-            .and_then(|g| g.get("event"))
-            .and_then(|e| e.get("repository"))
-            .and_then(|r| r.get("default_branch"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("main");
-        let default_ref = format!("refs/heads/{default_branch}");
-
-        let scope_repo = crate::cache::server::encode_scope(repo);
-        let scope_ref = crate::cache::server::encode_scope(git_ref);
-        let scope_default = crate::cache::server::encode_scope(&default_ref);
-
-        if manifest.has_container() {
-            // On macOS, Docker Desktop runs in a Linux VM so the bridge gateway IP
-            // doesn't route to the macOS host. Use host.docker.internal instead.
-            let cache_host = if cfg!(target_os = "macos") {
-                "host.docker.internal".to_string()
-            } else {
-                docker_resources
-                    .as_ref()
-                    .and_then(|r| r.host_gateway_ip())
-                    .unwrap_or("172.17.0.1")
-                    .to_string()
-            };
-            base_env.insert(
-                "ACTIONS_CACHE_URL".into(),
-                format!(
-                    "http://{cache_host}:{}/cache/{scope_repo}/{scope_ref}/{scope_default}/",
-                    self.cache_port
-                ),
-            );
-        } else {
-            base_env.insert(
-                "ACTIONS_CACHE_URL".into(),
-                format!(
-                    "http://localhost:{}/cache/{scope_repo}/{scope_ref}/{scope_default}/",
-                    self.cache_port
-                ),
-            );
-        }
+        // Kept alive for the whole job: dropping it revokes the job's cache access.
+        let cache_grant = self.cache_scopes.grant(cache_scope(manifest, repo));
+        let cache_host = cache_host(manifest, docker_resources.as_ref());
+        base_env.insert(
+            "ACTIONS_CACHE_URL".into(),
+            job_cache_url(&cache_host, self.cache_port, cache_grant.token()),
+        );
 
         let action_cache = ActionCache::new(self.paths.actions_dir(), client.clone());
         let github_token = manifest.github_token().unwrap_or("").to_string();
@@ -628,6 +591,43 @@ async fn report_unreadable_job(
     if let Err(e) = report_setup_failure(job_client, &unreadable.skeleton, err).await {
         error!(error = %e, "failed to report the unreadable job to GitHub");
     }
+}
+
+/// The cache scope a job may use, taken from the job manifest (not from anything the job controls).
+fn cache_scope(manifest: &JobManifest, repo: &str) -> CacheScope {
+    let github = manifest.context_data.get("github");
+    let git_ref = github
+        .and_then(|g| g.get("ref"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("refs/heads/main");
+    let default_branch = github
+        .and_then(|g| g.get("event"))
+        .and_then(|e| e.get("repository"))
+        .and_then(|r| r.get("default_branch"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("main");
+
+    CacheScope {
+        repo: repo.to_string(),
+        git_ref: git_ref.to_string(),
+        default_ref: format!("refs/heads/{default_branch}"),
+    }
+}
+
+/// Address at which the job's steps reach the cache server.
+fn cache_host(manifest: &JobManifest, docker_resources: Option<&JobDockerResources>) -> String {
+    if !manifest.has_container() {
+        return "localhost".into();
+    }
+    // On macOS, Docker Desktop runs in a Linux VM so the bridge gateway IP
+    // doesn't route to the macOS host. Use host.docker.internal instead.
+    if cfg!(target_os = "macos") {
+        return "host.docker.internal".into();
+    }
+    docker_resources
+        .and_then(|r| r.host_gateway_ip())
+        .unwrap_or("172.17.0.1")
+        .to_string()
 }
 
 #[cfg(test)]
