@@ -70,6 +70,7 @@ fn make_runner() -> Runner {
         paths: ChimeraPaths::new(std::path::PathBuf::from("/tmp/chimera-test")),
         state: None,
         cache_port: 9999,
+        cache_scopes: Arc::new(crate::cache::scope::ScopeRegistry::default()),
     }
 }
 

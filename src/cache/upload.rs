@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 use super::error::CacheError;
+use super::scope::CacheScope;
 
 struct UploadSession {
     key: String,
@@ -15,6 +16,13 @@ struct UploadSession {
     scope_ref: String,
     tmp_path: PathBuf,
     bytes_written: u64,
+}
+
+impl UploadSession {
+    /// Upload ids are sequential, so a session must only be usable from the scope that reserved it.
+    fn is_owned_by(&self, scope: &CacheScope) -> bool {
+        self.scope_repo == scope.repo && self.scope_ref == scope.git_ref
+    }
 }
 
 /// Manages chunked upload sessions for the cache API.
@@ -65,13 +73,20 @@ impl UploadTracker {
     }
 
     /// Write a chunk to an upload session at the given offset.
-    pub async fn write_chunk(&self, id: u64, offset: u64, data: &[u8]) -> Result<()> {
+    pub async fn write_chunk(
+        &self,
+        id: u64,
+        scope: &CacheScope,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
         // Hold write lock for the entire operation to prevent races with commit().
         // The lock scope covers both the file I/O and the bytes_written update,
         // ensuring the session can't be removed mid-write.
         let mut sessions = self.sessions.write().await;
         let session = sessions
             .get_mut(&id)
+            .filter(|session| session.is_owned_by(scope))
             .ok_or(CacheError::UploadNotFound(id))?;
 
         let mut file = tokio::fs::OpenOptions::new()
@@ -98,14 +113,16 @@ impl UploadTracker {
     pub async fn commit(
         &self,
         id: u64,
+        scope: &CacheScope,
         expected_size: u64,
     ) -> Result<(String, String, String, String, PathBuf, u64)> {
-        let session = self
-            .sessions
-            .write()
-            .await
-            .remove(&id)
-            .ok_or(CacheError::UploadNotFound(id))?;
+        let session = {
+            let mut sessions = self.sessions.write().await;
+            if !sessions.get(&id).is_some_and(|s| s.is_owned_by(scope)) {
+                return Err(CacheError::UploadNotFound(id).into());
+            }
+            sessions.remove(&id).ok_or(CacheError::UploadNotFound(id))?
+        };
 
         if session.bytes_written != expected_size {
             // Clean up tmp file on mismatch

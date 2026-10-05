@@ -1,75 +1,111 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRef, FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
 use super::manager::CacheManager;
+use super::scope::{CacheScope, ScopeRegistry};
 use super::upload::parse_content_range;
 
 pub type SharedManager = Arc<CacheManager>;
 
-/// Base64url-encode a scope string (repo or ref) for embedding in URL paths.
-pub fn encode_scope(s: &str) -> String {
-    URL_SAFE_NO_PAD.encode(s.as_bytes())
+#[derive(Clone)]
+pub struct CacheState {
+    manager: SharedManager,
+    scopes: Arc<ScopeRegistry>,
 }
 
-/// Decode a base64url-encoded scope string from a URL path segment.
-pub fn decode_scope(s: &str) -> Result<String> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(s)
-        .context("invalid base64url scope")?;
-    String::from_utf8(bytes).context("scope is not valid UTF-8")
+impl FromRef<CacheState> for SharedManager {
+    fn from_ref(state: &CacheState) -> Self {
+        state.manager.clone()
+    }
 }
 
-/// Scope extracted from the URL path prefix: repo, ref, and default ref.
-struct CacheScope {
-    repo: String,
-    git_ref: String,
-    default_ref: String,
+/// Every cache route is prefixed by `/cache/{token}`, where the token is issued to a single
+/// job by the runner. The scope comes from the token, never from the request, and requests
+/// with an unknown or revoked token are rejected.
+struct Authorized {
+    token: String,
+    scope: CacheScope,
 }
 
-pub fn router(manager: SharedManager) -> Router {
+impl FromRequestParts<CacheState> for Authorized {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &CacheState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = parts
+            .uri
+            .path()
+            .strip_prefix("/cache/")
+            .and_then(|rest| rest.split('/').next())
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        let scope = state
+            .scopes
+            .resolve(token)
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        Ok(Self {
+            token: token.to_string(),
+            scope,
+        })
+    }
+}
+
+/// Base URL handed to a job as `ACTIONS_CACHE_URL`. The toolkit appends `_apis/artifactcache/...`.
+pub fn job_cache_url(host: &str, port: u16, token: &str) -> String {
+    format!("http://{host}:{port}/cache/{token}/")
+}
+
+pub fn router(manager: SharedManager, scopes: Arc<ScopeRegistry>) -> Router {
     // @actions/cache uploads chunks up to 128MB (default 32MB).
     // Axum's default body limit is 2MB, which silently rejects uploads.
     const UPLOAD_BODY_LIMIT: usize = 256 * 1024 * 1024;
 
     Router::new()
         .route(
-            "/cache/{scope_repo}/{scope_ref}/{default_ref}/_apis/artifactcache/cache",
+            "/cache/{token}/_apis/artifactcache/cache",
             get(handle_lookup),
         )
         .route(
-            "/cache/{scope_repo}/{scope_ref}/{default_ref}/_apis/artifactcache/caches",
+            "/cache/{token}/_apis/artifactcache/caches",
             post(handle_reserve),
         )
         .route(
-            "/cache/{scope_repo}/{scope_ref}/{default_ref}/_apis/artifactcache/caches/{id}",
+            "/cache/{token}/_apis/artifactcache/caches/{id}",
             patch(handle_upload_chunk).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
         .route(
-            "/cache/{scope_repo}/{scope_ref}/{default_ref}/_apis/artifactcache/caches/{id}",
+            "/cache/{token}/_apis/artifactcache/caches/{id}",
             post(handle_commit),
         )
-        .route("/download/{hash}", get(handle_download))
+        .route("/cache/{token}/download/{hash}", get(handle_download))
         .fallback(handle_unknown)
-        .with_state(manager)
+        .with_state(CacheState { manager, scopes })
 }
 
 /// Start the cache server, binding to the given port.
 /// Returns the actual bound address (useful when port=0 for tests).
-pub async fn start(manager: SharedManager, port: u16) -> Result<SocketAddr> {
-    let app = router(manager);
+///
+/// Binds all interfaces because job containers reach it through their bridge gateway;
+/// access control is enforced per request by the job token (see [`Authorized`]).
+pub async fn start(
+    manager: SharedManager,
+    scopes: Arc<ScopeRegistry>,
+    port: u16,
+) -> Result<SocketAddr> {
+    let app = router(manager, scopes);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
@@ -118,36 +154,14 @@ struct CommitBody {
     size: u64,
 }
 
-// --- Scope extraction ---
-
-fn extract_scope(
-    scope_repo: &str,
-    scope_ref: &str,
-    default_ref: &str,
-) -> Result<CacheScope, StatusCode> {
-    let repo = decode_scope(scope_repo).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let git_ref = decode_scope(scope_ref).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let default = decode_scope(default_ref).map_err(|_| StatusCode::BAD_REQUEST)?;
-    Ok(CacheScope {
-        repo,
-        git_ref,
-        default_ref: default,
-    })
-}
-
 // --- Handlers ---
 
 async fn handle_lookup(
     State(manager): State<SharedManager>,
-    Path((scope_repo, scope_ref, default_ref)): Path<(String, String, String)>,
+    Authorized { token, scope }: Authorized,
     headers: HeaderMap,
     Query(query): Query<LookupQuery>,
 ) -> Response {
-    let scope = match extract_scope(&scope_repo, &scope_ref, &default_ref) {
-        Ok(s) => s,
-        Err(status) => return status.into_response(),
-    };
-
     // @actions/cache encodes commas in keys with encodeURIComponent (%2C).
     // The HTTP client may re-encode the percent sign, producing %252C on the
     // wire. Axum's Query extractor decodes one layer, leaving literal "%2C".
@@ -183,7 +197,7 @@ async fn handle_lookup(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("localhost:9999");
 
-            let location = format!("http://{host}/download/{}", entry.blob_hash);
+            let location = format!("http://{host}/cache/{token}/download/{}", entry.blob_hash);
 
             debug!(cache_key = %entry.key, location = %location, "cache hit");
 
@@ -200,14 +214,9 @@ async fn handle_lookup(
 
 async fn handle_reserve(
     State(manager): State<SharedManager>,
-    Path((scope_repo, scope_ref, _default_ref)): Path<(String, String, String)>,
+    Authorized { scope, .. }: Authorized,
     axum::Json(body): axum::Json<ReserveBody>,
 ) -> Response {
-    let scope = match extract_scope(&scope_repo, &scope_ref, &_default_ref) {
-        Ok(s) => s,
-        Err(status) => return status.into_response(),
-    };
-
     info!(
         key = %body.key,
         version = %body.version,
@@ -233,7 +242,8 @@ async fn handle_reserve(
 
 async fn handle_upload_chunk(
     State(manager): State<SharedManager>,
-    Path((_scope_repo, _scope_ref, _default_ref, id)): Path<(String, String, String, u64)>,
+    Authorized { scope, .. }: Authorized,
+    Path((_token, id)): Path<(String, u64)>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -258,7 +268,7 @@ async fn handle_upload_chunk(
         "cache upload chunk"
     );
 
-    match manager.write_chunk(id, start, &body).await {
+    match manager.write_chunk(id, &scope, start, &body).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             debug!(error = %e, id, "upload chunk failed");
@@ -269,12 +279,13 @@ async fn handle_upload_chunk(
 
 async fn handle_commit(
     State(manager): State<SharedManager>,
-    Path((_scope_repo, _scope_ref, _default_ref, id)): Path<(String, String, String, u64)>,
+    Authorized { scope, .. }: Authorized,
+    Path((_token, id)): Path<(String, u64)>,
     axum::Json(body): axum::Json<CommitBody>,
 ) -> Response {
     info!(id, size = body.size, "cache commit");
 
-    match manager.commit_upload(id, body.size).await {
+    match manager.commit_upload(id, &scope, body.size).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             debug!(error = %e, id, "commit failed");
@@ -285,7 +296,8 @@ async fn handle_commit(
 
 async fn handle_download(
     State(manager): State<SharedManager>,
-    Path(hash): Path<String>,
+    _authorized: Authorized,
+    Path((_token, hash)): Path<(String, String)>,
 ) -> Response {
     // Validate hash to prevent path traversal attacks (e.g. "../../etc/passwd")
     if !super::store::is_valid_blob_hash(&hash) {

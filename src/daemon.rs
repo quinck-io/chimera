@@ -11,6 +11,7 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, error, info, warn};
 
 use crate::cache::manager::CacheManager;
+use crate::cache::scope::ScopeRegistry;
 use crate::cache::server as cache_server;
 use crate::config::{ChimeraConfig, ChimeraPaths, load_runner_credentials};
 use crate::runner::Runner;
@@ -261,9 +262,14 @@ impl Daemon {
             .context("initializing cache manager")?,
         );
 
-        let cache_addr = cache_server::start(cache_manager, cache_config.cache_port)
-            .await
-            .context("starting cache server")?;
+        let cache_scopes = Arc::new(ScopeRegistry::default());
+        let cache_addr = cache_server::start(
+            cache_manager,
+            Arc::clone(&cache_scopes),
+            cache_config.cache_port,
+        )
+        .await
+        .context("starting cache server")?;
         let cache_port = cache_addr.port();
 
         let state = Arc::new(DaemonState::new(&self.config.runners));
@@ -284,6 +290,7 @@ impl Daemon {
             let paths = self.paths.clone();
             let state_ref = Arc::clone(&state);
             let runner_name = name.clone();
+            let cache_scopes = Arc::clone(&cache_scopes);
             let make_runner = move || {
                 Runner::with_state(
                     runner_name.clone(),
@@ -291,6 +298,7 @@ impl Daemon {
                     paths.clone(),
                     Arc::clone(&state_ref),
                     cache_port,
+                    Arc::clone(&cache_scopes),
                 )
             };
 
