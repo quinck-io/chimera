@@ -156,9 +156,8 @@ fn extract_tarball(data: &[u8], dest: &Path) -> Result<()> {
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&target)?;
         } else {
-            let mut file = std::fs::File::create(&target)
-                .with_context(|| format!("creating {}", target.display()))?;
-            std::io::copy(&mut entry, &mut file)
+            entry
+                .unpack(&target)
                 .with_context(|| format!("writing {}", target.display()))?;
         }
     }

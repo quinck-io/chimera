@@ -195,6 +195,43 @@ fn path_traversal_entries_are_skipped() {
 }
 
 #[test]
+fn extraction_keeps_the_executable_bit_and_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    let script = b"#!/bin/sh\necho hi\n";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(script.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "owner-repo-abc123/entrypoint.sh", &script[..])
+        .unwrap();
+    let mut link = tar::Header::new_gnu();
+    link.set_entry_type(tar::EntryType::Symlink);
+    link.set_size(0);
+    builder
+        .append_link(&mut link, "owner-repo-abc123/run.sh", "entrypoint.sh")
+        .unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&builder.into_inner().unwrap()).unwrap();
+    let tarball = encoder.finish().unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    extract_tarball(&tarball, tmp.path()).unwrap();
+
+    let mode = std::fs::metadata(tmp.path().join("entrypoint.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0o111);
+    assert_eq!(
+        std::fs::read_link(tmp.path().join("run.sh")).unwrap(),
+        PathBuf::from("entrypoint.sh")
+    );
+}
+
+#[test]
 fn has_path_traversal_detection() {
     assert!(has_path_traversal(Path::new("../foo")));
     assert!(has_path_traversal(Path::new("foo/../../bar")));
