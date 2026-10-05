@@ -13,15 +13,10 @@ fn rsa_key_roundtrip() {
     assert_eq!(key.d(), reconstructed.d());
 }
 
-#[test]
-fn credentials_save_load_roundtrip() {
-    let tmp = TempDir::new().unwrap();
-    let runners_dir = tmp.path().join("runners");
+fn make_credentials(key: &RsaPrivateKey) -> RunnerCredentials {
+    let params = private_key_to_rsa_params(key).unwrap();
 
-    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
-    let params = private_key_to_rsa_params(&key).unwrap();
-
-    let creds = RunnerCredentials {
+    RunnerCredentials {
         info: RunnerInfo {
             agent_id: 42,
             agent_name: "test-runner".into(),
@@ -38,7 +33,15 @@ fn credentials_save_load_roundtrip() {
             authorization_url: "https://vstoken.actions.githubusercontent.com/abc".into(),
         },
         rsa_params: params,
-    };
+    }
+}
+
+#[test]
+fn credentials_save_load_roundtrip() {
+    let tmp = TempDir::new().unwrap();
+    let runners_dir = tmp.path().join("runners");
+    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    let creds = make_credentials(&key);
 
     save_runner_credentials(&runners_dir, "test-runner", &creds).unwrap();
     let loaded = load_runner_credentials(&runners_dir, "test-runner").unwrap();
@@ -174,4 +177,68 @@ fn jwt_signing_survives_key_roundtrip() {
     verifying_key
         .verify(message.as_bytes(), &signature)
         .expect("JWT signed with roundtripped key should verify with original public key");
+}
+
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn credentials_are_saved_owner_only() {
+    let tmp = TempDir::new().unwrap();
+    let runners_dir = tmp.path().join("runners");
+    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+
+    save_runner_credentials(&runners_dir, "test-runner", &make_credentials(&key)).unwrap();
+
+    let dir = runners_dir.join("test-runner");
+    assert_eq!(mode_of(&dir), 0o700);
+    for file in ["runner.json", "credentials.json", "rsa_params.json"] {
+        assert_eq!(mode_of(&dir.join(file)), 0o600, "{file}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn overwriting_world_readable_credentials_restricts_them() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let runners_dir = tmp.path().join("runners");
+    let dir = runners_dir.join("test-runner");
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join("rsa_params.json");
+    std::fs::write(&key_file, "{}").unwrap();
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+
+    save_runner_credentials(&runners_dir, "test-runner", &make_credentials(&key)).unwrap();
+
+    assert_eq!(mode_of(&key_file), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn loading_credentials_restricts_legacy_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let runners_dir = tmp.path().join("runners");
+    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    save_runner_credentials(&runners_dir, "test-runner", &make_credentials(&key)).unwrap();
+    let dir = runners_dir.join("test-runner");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for file in ["runner.json", "credentials.json", "rsa_params.json"] {
+        std::fs::set_permissions(dir.join(file), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    load_runner_credentials(&runners_dir, "test-runner").unwrap();
+
+    assert_eq!(mode_of(&dir), 0o700);
+    for file in ["runner.json", "credentials.json", "rsa_params.json"] {
+        assert_eq!(mode_of(&dir.join(file)), 0o600, "{file}");
+    }
 }
