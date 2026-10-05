@@ -669,3 +669,9 @@ fn container_credentials_resolve_from_secrets() {
     assert_eq!(credentials.username.as_deref(), Some("octocat"));
     assert_eq!(credentials.password.as_deref(), Some("s3cret"));
 }
+
+#[test]
+fn path_additions_put_the_latest_first() {
+    let paths: Vec<String> = ["/a", "/b", "/a", "/c"].map(String::from).into();
+    assert_eq!(newest_first(&paths), ["/c", "/a", "/b"]);
+}

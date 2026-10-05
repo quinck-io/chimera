@@ -509,7 +509,7 @@ pub fn build_step_env(
         let mut all_paths = job_state.path_prepends.clone();
         all_paths.extend(extra_paths);
         if !all_paths.is_empty() {
-            let prepend = all_paths.join(":");
+            let prepend = newest_first(&all_paths).join(":");
             let path = match env.get("PATH") {
                 Some(existing) if !existing.is_empty() => format!("{prepend}:{existing}"),
                 _ => prepend,
@@ -519,6 +519,17 @@ pub fn build_step_env(
     }
 
     env
+}
+
+/// Returns the PATH additions latest first, each at its latest position only.
+fn newest_first(paths: &[String]) -> Vec<&str> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .iter()
+        .rev()
+        .filter(|p| seen.insert(p.as_str()))
+        .map(|p| p.as_str())
+        .collect()
 }
 
 /// Spawn a task that reads stdout, parses workflow commands, and forwards log lines.
