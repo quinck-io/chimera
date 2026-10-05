@@ -74,6 +74,25 @@ async fn stop_commands_ignores_injected_commands() {
 }
 
 #[tokio::test]
+async fn commands_on_stderr_are_processed() {
+    let env = TestEnv::setup().await;
+    let manifest = manifest_with_steps(
+        vec![
+            script_step("s1", "echo '::set-output name=from_stderr::ok' >&2"),
+            script_step(
+                "s2",
+                r#"test "${{ steps.s1.outputs.from_stderr }}" = "ok" || exit 1"#,
+            ),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
 async fn set_output_command() {
     let env = TestEnv::setup().await;
     let manifest = manifest_with_steps(

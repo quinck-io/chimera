@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -420,16 +420,9 @@ pub async fn run_process(
         CommandPolicy::from_env(env),
     );
 
-    let stdout_task = spawn_stdout_reader(stdout, processor.clone());
-
-    let stderr_sender = log_sender.clone();
-    let stderr_task = tokio::spawn(async move {
-        let reader = BufReader::new(stderr);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            stderr_sender.send(line).await;
-        }
-    });
+    // The official runner parses workflow commands on both streams.
+    let stdout_task = spawn_output_reader(stdout, processor.clone());
+    let stderr_task = spawn_output_reader(stderr, processor.clone());
 
     let timed_wait = async {
         let (stdout_result, stderr_result, wait_result) =
@@ -534,13 +527,13 @@ fn newest_first(paths: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// Spawn a task that reads stdout, parses workflow commands, and forwards log lines.
-fn spawn_stdout_reader(
-    stdout: tokio::process::ChildStdout,
+/// Spawn a task that reads a process stream, parses workflow commands, and forwards log lines.
+fn spawn_output_reader(
+    stream: impl AsyncRead + Unpin + Send + 'static,
     processor: OutputProcessor,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let reader = BufReader::new(stdout);
+        let reader = BufReader::new(stream);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             processor.process_line(&line).await;
