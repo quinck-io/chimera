@@ -1191,8 +1191,8 @@ branch's cache.
 The scope bound to the token is taken from the job manifest's `contextData`:
 - `repo` = `github.repository`
 - `git_ref` = `github.ref`
-- `default_ref` = `github.event.repository.default_branch` (prefixed with
-  `refs/heads/`)
+- `fallback_refs` = `github.base_ref` (pull requests only), then
+  `github.event.repository.default_branch`, each prefixed with `refs/heads/`
 
 If the manifest has no `github.repository` or `github.ref`, the job gets no token
 and `ACTIONS_CACHE_URL` is not set: any placeholder scope would be shared with other
@@ -1222,8 +1222,8 @@ is a hash of the cache paths and compression method.
 **Scope isolation rules**:
 1. Only entries from the token's `repo` are considered
 2. Try the token's `git_ref` first (exact and prefix matches)
-3. If no match and `git_ref != default_ref`, fall back to `default_ref`
-   (feature branches can read from the default branch, not vice versa)
+3. If no match, try each of `fallback_refs` in order: a pull request can read
+   from its base branch, and any branch from the default branch, not vice versa
 4. Prefix matching: find the longest stored key that is a prefix of the search
    key, with matching version
 
@@ -1244,7 +1244,7 @@ literal `%2C`. The server decodes this remaining layer before splitting on comma
 The `archiveLocation` URL is built from the request's `Host` header, making it
 work automatically for both host-mode and container-mode requests. The `scope`
 field returns the actual ref where the cache was found (may differ from
-`scope_ref` if the hit came from `default_ref` fallback).
+`scope_ref` if the hit came from a fallback ref).
 
 **Response (204 — cache miss)**: Empty body.
 

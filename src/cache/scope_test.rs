@@ -6,7 +6,7 @@ fn main_scope() -> CacheScope {
     CacheScope {
         repo: "owner/repo".into(),
         git_ref: "refs/heads/main".into(),
-        default_ref: "refs/heads/main".into(),
+        fallback_refs: vec!["refs/heads/main".into()],
     }
 }
 
@@ -48,4 +48,29 @@ fn tokens_are_unique_and_unguessable() {
     assert_ne!(first.token(), second.token());
     // 32 random bytes, base64url without padding
     assert_eq!(first.token().len(), 43);
+}
+
+#[test]
+fn readable_refs_start_with_own_ref() {
+    let scope = CacheScope {
+        repo: "owner/repo".into(),
+        git_ref: "refs/pull/7/merge".into(),
+        fallback_refs: vec!["refs/heads/release".into(), "refs/heads/main".into()],
+    };
+
+    assert_eq!(
+        scope.readable_refs(),
+        vec!["refs/pull/7/merge", "refs/heads/release", "refs/heads/main"]
+    );
+}
+
+#[test]
+fn readable_refs_skip_duplicates() {
+    let scope = CacheScope {
+        repo: "owner/repo".into(),
+        git_ref: "refs/heads/main".into(),
+        fallback_refs: vec!["refs/heads/main".into(), "refs/heads/main".into()],
+    };
+
+    assert_eq!(scope.readable_refs(), vec!["refs/heads/main"]);
 }

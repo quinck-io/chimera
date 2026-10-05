@@ -604,6 +604,11 @@ fn cache_scope(manifest: &JobManifest) -> Option<CacheScope> {
     let repo = manifest.repository().ok()?;
     let github = manifest.context_data.get("github");
     let git_ref = github.and_then(|g| g.get("ref")).and_then(|v| v.as_str())?;
+    // Only set for pull request events.
+    let base_branch = github
+        .and_then(|g| g.get("base_ref"))
+        .and_then(|v| v.as_str())
+        .filter(|branch| !branch.is_empty());
     let default_branch = github
         .and_then(|g| g.get("event"))
         .and_then(|e| e.get("repository"))
@@ -611,10 +616,15 @@ fn cache_scope(manifest: &JobManifest) -> Option<CacheScope> {
         .and_then(|v| v.as_str())
         .unwrap_or("main");
 
+    let fallback_refs = base_branch
+        .into_iter()
+        .chain([default_branch])
+        .map(|branch| format!("refs/heads/{branch}"))
+        .collect();
     Some(CacheScope {
         repo,
         git_ref: git_ref.to_string(),
-        default_ref: format!("refs/heads/{default_branch}"),
+        fallback_refs,
     })
 }
 

@@ -10,8 +10,22 @@ use rsa::rand_core::{OsRng, RngCore};
 pub struct CacheScope {
     pub repo: String,
     pub git_ref: String,
-    /// Fallback ref for lookups, so feature branches can restore caches from the default branch.
-    pub default_ref: String,
+    /// Refs the job may also restore from, in order: for a pull request its base branch,
+    /// then the default branch. Writes always go to `git_ref`.
+    pub fallback_refs: Vec<String>,
+}
+
+impl CacheScope {
+    /// Refs a lookup searches, own ref first, without duplicates.
+    pub fn readable_refs(&self) -> Vec<&str> {
+        let mut refs = vec![self.git_ref.as_str()];
+        for fallback in &self.fallback_refs {
+            if !refs.contains(&fallback.as_str()) {
+                refs.push(fallback);
+            }
+        }
+        refs
+    }
 }
 
 /// Maps per-job access tokens to the scope the runner assigned to that job.

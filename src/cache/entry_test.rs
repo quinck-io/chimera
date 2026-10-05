@@ -44,13 +44,7 @@ fn exact_lookup() {
     let mut index = EntryIndex::new();
     index.insert(make_entry("rust-cargo-abc123", "v1", "hash1"));
 
-    let result = index.lookup(
-        &["rust-cargo-abc123".to_string()],
-        "v1",
-        REPO,
-        MAIN_REF,
-        MAIN_REF,
-    );
+    let result = index.lookup(&["rust-cargo-abc123".to_string()], "v1", REPO, &[MAIN_REF]);
     assert!(result.is_some());
     assert_eq!(result.unwrap().blob_hash, "hash1");
 }
@@ -61,13 +55,7 @@ fn prefix_lookup_longest_match() {
     index.insert(make_entry("rust-", "v1", "short"));
     index.insert(make_entry("rust-cargo-", "v1", "long"));
 
-    let result = index.lookup(
-        &["rust-cargo-abc123".to_string()],
-        "v1",
-        REPO,
-        MAIN_REF,
-        MAIN_REF,
-    );
+    let result = index.lookup(&["rust-cargo-abc123".to_string()], "v1", REPO, &[MAIN_REF]);
     assert!(result.is_some());
     assert_eq!(result.unwrap().blob_hash, "long");
 }
@@ -78,17 +66,17 @@ fn version_scoping() {
     index.insert(make_entry("key1", "v1", "hash_v1"));
     index.insert(make_entry("key1", "v2", "hash_v2"));
 
-    let result = index.lookup(&["key1".to_string()], "v1", REPO, MAIN_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v1", REPO, &[MAIN_REF]);
     assert_eq!(result.unwrap().blob_hash, "hash_v1");
 
-    let result = index.lookup(&["key1".to_string()], "v2", REPO, MAIN_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v2", REPO, &[MAIN_REF]);
     assert_eq!(result.unwrap().blob_hash, "hash_v2");
 }
 
 #[test]
 fn miss_returns_none() {
     let mut index = EntryIndex::new();
-    let result = index.lookup(&["nonexistent".to_string()], "v1", REPO, MAIN_REF, MAIN_REF);
+    let result = index.lookup(&["nonexistent".to_string()], "v1", REPO, &[MAIN_REF]);
     assert!(result.is_none());
 }
 
@@ -97,7 +85,7 @@ fn miss_wrong_version() {
     let mut index = EntryIndex::new();
     index.insert(make_entry("key1", "v1", "hash1"));
 
-    let result = index.lookup(&["key1".to_string()], "v2", REPO, MAIN_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v2", REPO, &[MAIN_REF]);
     assert!(result.is_none());
 }
 
@@ -113,8 +101,7 @@ fn restore_keys_no_false_prefix() {
         &["rust-cargo-abc123".to_string(), "rust-cargo-".to_string()],
         "v1",
         REPO,
-        MAIN_REF,
-        MAIN_REF,
+        &[MAIN_REF],
     );
     assert!(result.is_none());
 }
@@ -128,8 +115,7 @@ fn restore_keys_prefix_match() {
         &["rust-cargo-abc123".to_string(), "rust-".to_string()],
         "v1",
         REPO,
-        MAIN_REF,
-        MAIN_REF,
+        &[MAIN_REF],
     );
     // First key: "rust-cargo-abc123" starts with "rust-"? Yes! So it matches on first key.
     assert!(result.is_some());
@@ -146,13 +132,7 @@ fn prefix_lookup_skips_non_prefix_candidates() {
     index.insert(make_entry("rust-", "v1", "short_prefix"));
     index.insert(make_entry("rust-build-", "v1", "wrong_prefix"));
 
-    let result = index.lookup(
-        &["rust-cargo-xyz".to_string()],
-        "v1",
-        REPO,
-        MAIN_REF,
-        MAIN_REF,
-    );
+    let result = index.lookup(&["rust-cargo-xyz".to_string()], "v1", REPO, &[MAIN_REF]);
     assert!(result.is_some());
     assert_eq!(result.unwrap().blob_hash, "short_prefix");
 }
@@ -188,7 +168,7 @@ fn remove_entry() {
     assert!(removed.is_some());
     assert_eq!(removed.unwrap().blob_hash, "h1");
 
-    let result = index.lookup(&["key1".to_string()], "v1", REPO, MAIN_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v1", REPO, &[MAIN_REF]);
     assert!(result.is_none());
 }
 
@@ -232,7 +212,7 @@ fn lookup_updates_last_accessed() {
     index.insert(entry);
 
     let result = index
-        .lookup(&["key1".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["key1".to_string()], "v1", REPO, &[MAIN_REF])
         .unwrap();
     assert!(result.last_accessed_at > old_time);
 }
@@ -258,33 +238,15 @@ fn repo_isolation() {
     ));
 
     // repo-a can only see its own cache
-    let result = index.lookup(
-        &["key1".to_string()],
-        "v1",
-        "org/repo-a",
-        MAIN_REF,
-        MAIN_REF,
-    );
+    let result = index.lookup(&["key1".to_string()], "v1", "org/repo-a", &[MAIN_REF]);
     assert_eq!(result.unwrap().blob_hash, "hash_a");
 
     // repo-b can only see its own cache
-    let result = index.lookup(
-        &["key1".to_string()],
-        "v1",
-        "org/repo-b",
-        MAIN_REF,
-        MAIN_REF,
-    );
+    let result = index.lookup(&["key1".to_string()], "v1", "org/repo-b", &[MAIN_REF]);
     assert_eq!(result.unwrap().blob_hash, "hash_b");
 
     // unknown repo sees nothing
-    let result = index.lookup(
-        &["key1".to_string()],
-        "v1",
-        "org/repo-c",
-        MAIN_REF,
-        MAIN_REF,
-    );
+    let result = index.lookup(&["key1".to_string()], "v1", "org/repo-c", &[MAIN_REF]);
     assert!(result.is_none());
 }
 
@@ -295,7 +257,7 @@ fn ref_fallback_to_default_branch() {
     index.insert(make_scoped_entry("key1", "v1", "main_hash", REPO, MAIN_REF));
 
     // Feature branch can read from main (fallback)
-    let result = index.lookup(&["key1".to_string()], "v1", REPO, FEATURE_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v1", REPO, &[FEATURE_REF, MAIN_REF]);
     assert!(result.is_some());
     assert_eq!(result.unwrap().blob_hash, "main_hash");
 }
@@ -313,11 +275,11 @@ fn feature_branch_prefers_own_cache() {
     ));
 
     // Feature branch prefers its own cache
-    let result = index.lookup(&["key1".to_string()], "v1", REPO, FEATURE_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v1", REPO, &[FEATURE_REF, MAIN_REF]);
     assert_eq!(result.unwrap().blob_hash, "feature_hash");
 
     // Main still sees its own
-    let result = index.lookup(&["key1".to_string()], "v1", REPO, MAIN_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v1", REPO, &[MAIN_REF]);
     assert_eq!(result.unwrap().blob_hash, "main_hash");
 }
 
@@ -333,7 +295,7 @@ fn no_reverse_fallback() {
         FEATURE_REF,
     ));
 
-    let result = index.lookup(&["key1".to_string()], "v1", REPO, MAIN_REF, MAIN_REF);
+    let result = index.lookup(&["key1".to_string()], "v1", REPO, &[MAIN_REF]);
     assert!(result.is_none());
 }
 
@@ -354,8 +316,7 @@ fn ref_fallback_with_prefix_match() {
         &["rust-cargo-abc".to_string()],
         "v1",
         REPO,
-        FEATURE_REF,
-        MAIN_REF,
+        &[FEATURE_REF, MAIN_REF],
     );
     assert!(result.is_some());
     assert_eq!(result.unwrap().blob_hash, "main_prefix");
@@ -375,4 +336,22 @@ fn backward_compat_empty_scope_fields() {
     let entry: CacheEntry = serde_json::from_str(json).unwrap();
     assert_eq!(entry.scope_repo, "");
     assert_eq!(entry.scope_ref, "");
+}
+
+#[test]
+fn pull_request_prefers_base_branch_over_default_branch() {
+    let pr_ref = "refs/pull/7/merge";
+    let base_ref = "refs/heads/release";
+    let mut index = EntryIndex::new();
+    index.insert(make_scoped_entry("key1", "v1", "main_hash", REPO, MAIN_REF));
+    index.insert(make_scoped_entry("key1", "v1", "base_hash", REPO, base_ref));
+
+    let result = index.lookup(
+        &["key1".to_string()],
+        "v1",
+        REPO,
+        &[pr_ref, base_ref, MAIN_REF],
+    );
+
+    assert_eq!(result.unwrap().blob_hash, "base_hash");
 }

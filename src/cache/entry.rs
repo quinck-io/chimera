@@ -103,9 +103,8 @@ impl EntryIndex {
     }
 
     /// Look up a cache entry using GitHub's lookup semantics with scope isolation:
-    /// 1. For each search key, try exact then longest prefix match where repo and ref match scope_ref.
-    /// 2. If no match found and scope_ref != default_ref, retry with default_ref
-    ///    (feature branches can read from the default branch).
+    /// for each ref in order (the job's own ref first, then the refs it may restore from),
+    /// try every search key as an exact then longest prefix match within `scope_repo`.
     ///
     /// Returns a clone of the entry (so callers only need a read lock in the future).
     pub fn lookup(
@@ -113,20 +112,10 @@ impl EntryIndex {
         keys: &[String],
         version: &str,
         scope_repo: &str,
-        scope_ref: &str,
-        default_ref: &str,
+        refs: &[&str],
     ) -> Option<CacheEntry> {
-        // Try with the current ref first
-        if let Some(entry) = self.lookup_for_ref(keys, version, scope_repo, scope_ref) {
-            return Some(entry);
-        }
-
-        // Fall back to default ref if different
-        if scope_ref != default_ref {
-            return self.lookup_for_ref(keys, version, scope_repo, default_ref);
-        }
-
-        None
+        refs.iter()
+            .find_map(|git_ref| self.lookup_for_ref(keys, version, scope_repo, git_ref))
     }
 
     /// Internal lookup for a specific repo + ref combination.

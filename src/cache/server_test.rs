@@ -17,7 +17,7 @@ fn scope(repo: &str, git_ref: &str) -> CacheScope {
     CacheScope {
         repo: repo.into(),
         git_ref: git_ref.into(),
-        default_ref: DEFAULT_REF.into(),
+        fallback_refs: vec![DEFAULT_REF.into()],
     }
 }
 

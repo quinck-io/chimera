@@ -43,7 +43,7 @@ async fn upload_scoped_blob(
     let scope = CacheScope {
         repo: repo.to_string(),
         git_ref: git_ref.to_string(),
-        default_ref: git_ref.to_string(),
+        fallback_refs: vec![],
     };
     manager.write_chunk(id, &scope, 0, data).await.unwrap();
     manager
@@ -61,7 +61,7 @@ async fn full_roundtrip() {
     upload_blob(&manager, "my-key", "v1", data).await;
 
     let entry = manager
-        .lookup(&["my-key".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["my-key".to_string()], "v1", REPO, &[MAIN_REF])
         .await
         .unwrap();
     assert_eq!(entry.key, "my-key");
@@ -78,7 +78,7 @@ async fn cache_miss() {
     let manager = make_manager(&tmp, 1024 * 1024).await;
 
     let result = manager
-        .lookup(&["nonexistent".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["nonexistent".to_string()], "v1", REPO, &[MAIN_REF])
         .await;
     assert!(result.is_none());
     assert_eq!(manager.stats.misses.load(Ordering::Relaxed), 1);
@@ -94,11 +94,11 @@ async fn blob_dedup_across_entries() {
     upload_blob(&manager, "key-b", "v1", data).await;
 
     let entry_a = manager
-        .lookup(&["key-a".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["key-a".to_string()], "v1", REPO, &[MAIN_REF])
         .await
         .unwrap();
     let entry_b = manager
-        .lookup(&["key-b".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["key-b".to_string()], "v1", REPO, &[MAIN_REF])
         .await
         .unwrap();
 
@@ -128,13 +128,13 @@ async fn lru_eviction() {
 
     // "old" should have been evicted
     let old = manager
-        .lookup(&["old".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["old".to_string()], "v1", REPO, &[MAIN_REF])
         .await;
     assert!(old.is_none());
 
     // "new" should still exist
     let new = manager
-        .lookup(&["new".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["new".to_string()], "v1", REPO, &[MAIN_REF])
         .await;
     assert!(new.is_some());
 }
@@ -165,7 +165,7 @@ async fn persist_and_reload() {
         .unwrap();
 
     let entry = manager
-        .lookup(&["persist-key".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["persist-key".to_string()], "v1", REPO, &[MAIN_REF])
         .await
         .unwrap();
     assert_eq!(entry.key, "persist-key");
@@ -188,7 +188,7 @@ async fn concurrent_access() {
             let data = format!("data-{i}");
             upload_scoped_blob(&mgr, &key, "v1", REPO, MAIN_REF, data.as_bytes()).await;
 
-            let entry = mgr.lookup(&[key], "v1", REPO, MAIN_REF, MAIN_REF).await;
+            let entry = mgr.lookup(&[key], "v1", REPO, &[MAIN_REF]).await;
             assert!(entry.is_some());
         }));
     }
@@ -209,13 +209,13 @@ async fn stats_tracking() {
     upload_blob(&manager, "key", "v1", b"data").await;
 
     manager
-        .lookup(&["key".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["key".to_string()], "v1", REPO, &[MAIN_REF])
         .await;
     manager
-        .lookup(&["key".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["key".to_string()], "v1", REPO, &[MAIN_REF])
         .await;
     manager
-        .lookup(&["miss".to_string()], "v1", REPO, MAIN_REF, MAIN_REF)
+        .lookup(&["miss".to_string()], "v1", REPO, &[MAIN_REF])
         .await;
 
     assert_eq!(manager.stats.hits.load(Ordering::Relaxed), 2);
@@ -231,11 +231,11 @@ async fn cross_repo_isolation() {
     upload_scoped_blob(&manager, "key", "v1", "org/repo-b", MAIN_REF, b"data-b").await;
 
     let entry_a = manager
-        .lookup(&["key".to_string()], "v1", "org/repo-a", MAIN_REF, MAIN_REF)
+        .lookup(&["key".to_string()], "v1", "org/repo-a", &[MAIN_REF])
         .await
         .unwrap();
     let entry_b = manager
-        .lookup(&["key".to_string()], "v1", "org/repo-b", MAIN_REF, MAIN_REF)
+        .lookup(&["key".to_string()], "v1", "org/repo-b", &[MAIN_REF])
         .await
         .unwrap();
 
@@ -246,7 +246,7 @@ async fn cross_repo_isolation() {
 
     // Unknown repo sees nothing
     let result = manager
-        .lookup(&["key".to_string()], "v1", "org/repo-c", MAIN_REF, MAIN_REF)
+        .lookup(&["key".to_string()], "v1", "org/repo-c", &[MAIN_REF])
         .await;
     assert!(result.is_none());
 }
@@ -261,7 +261,7 @@ async fn ref_fallback() {
 
     // Feature branch can read from main (fallback)
     let entry = manager
-        .lookup(&["key".to_string()], "v1", REPO, FEATURE_REF, MAIN_REF)
+        .lookup(&["key".to_string()], "v1", REPO, &[FEATURE_REF, MAIN_REF])
         .await
         .unwrap();
     assert_eq!(entry.scope_ref, MAIN_REF);
@@ -269,13 +269,7 @@ async fn ref_fallback() {
     // Main cannot read from feature branch (no reverse fallback)
     upload_scoped_blob(&manager, "feature-only", "v1", REPO, FEATURE_REF, b"feat").await;
     let result = manager
-        .lookup(
-            &["feature-only".to_string()],
-            "v1",
-            REPO,
-            MAIN_REF,
-            MAIN_REF,
-        )
+        .lookup(&["feature-only".to_string()], "v1", REPO, &[MAIN_REF])
         .await;
     assert!(result.is_none());
 }

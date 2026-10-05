@@ -114,18 +114,16 @@ impl CacheManager {
         Ok(manager)
     }
 
-    /// Look up a cache entry with scope isolation.
-    /// Falls back to default_ref if no match on scope_ref (feature branch reads from default branch).
+    /// Look up a cache entry with scope isolation, trying `refs` in order.
     pub async fn lookup(
         &self,
         keys: &[String],
         version: &str,
         scope_repo: &str,
-        scope_ref: &str,
-        default_ref: &str,
+        refs: &[&str],
     ) -> Option<CacheEntry> {
         let mut entries = self.entries.write().await;
-        match entries.lookup(keys, version, scope_repo, scope_ref, default_ref) {
+        match entries.lookup(keys, version, scope_repo, refs) {
             Some(entry) => {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 // Persist updated last_accessed_at

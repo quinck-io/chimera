@@ -6,7 +6,7 @@ fn main_scope() -> CacheScope {
     CacheScope {
         repo: "owner/repo".into(),
         git_ref: "refs/heads/main".into(),
-        default_ref: "refs/heads/main".into(),
+        fallback_refs: vec!["refs/heads/main".into()],
     }
 }
 

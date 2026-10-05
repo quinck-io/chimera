@@ -321,9 +321,43 @@ fn cache_scope_comes_from_manifest() {
         CacheScope {
             repo: "owner/repo".into(),
             git_ref: "refs/pull/7/merge".into(),
-            default_ref: "refs/heads/develop".into(),
+            fallback_refs: vec!["refs/heads/develop".into()],
         }
     );
+}
+
+#[test]
+fn cache_scope_of_pull_request_falls_back_to_base_then_default_branch() {
+    let manifest = manifest_with_github(serde_json::json!({
+        "repository": "owner/repo",
+        "ref": "refs/pull/7/merge",
+        "base_ref": "release",
+        "event": { "repository": { "default_branch": "main" } }
+    }));
+
+    let scope = cache_scope(&manifest).unwrap();
+
+    assert_eq!(
+        scope.fallback_refs,
+        vec![
+            "refs/heads/release".to_string(),
+            "refs/heads/main".to_string()
+        ]
+    );
+}
+
+#[test]
+fn cache_scope_ignores_empty_base_ref() {
+    let manifest = manifest_with_github(serde_json::json!({
+        "repository": "owner/repo",
+        "ref": "refs/heads/feature",
+        "base_ref": "",
+        "event": { "repository": { "default_branch": "main" } }
+    }));
+
+    let scope = cache_scope(&manifest).unwrap();
+
+    assert_eq!(scope.fallback_refs, vec!["refs/heads/main".to_string()]);
 }
 
 #[test]

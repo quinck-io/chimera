@@ -185,13 +185,7 @@ async fn handle_lookup(
     );
 
     let entry = manager
-        .lookup(
-            &keys,
-            &query.version,
-            &scope.repo,
-            &scope.git_ref,
-            &scope.default_ref,
-        )
+        .lookup(&keys, &query.version, &scope.repo, &scope.readable_refs())
         .await;
     match entry {
         Some(entry) => {
