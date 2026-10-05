@@ -66,16 +66,23 @@ pub async fn ensure_image(
 
 /// Split "image:tag" into ("image", "tag"), defaulting tag to "latest".
 fn parse_image_ref(image: &str) -> (&str, &str) {
-    // Handle images with registry prefix (e.g., ghcr.io/owner/image:tag)
-    // The tag separator is the last colon that's not part of a port/registry
-    if let Some(colon_pos) = image.rfind(':') {
-        let after_colon = &image[colon_pos + 1..];
-        // If there's a slash after the colon, it's part of the registry path, not a tag
-        if !after_colon.contains('/') {
-            return (&image[..colon_pos], after_colon);
-        }
+    // A digest goes in the tag field, and the tag before it adds nothing to the pull.
+    if let Some((name, digest)) = image.split_once('@') {
+        return (strip_tag(name), digest);
     }
-    (image, "latest")
+    match tag_separator(image) {
+        Some(pos) => (&image[..pos], &image[pos + 1..]),
+        None => (image, "latest"),
+    }
+}
+
+fn tag_separator(name: &str) -> Option<usize> {
+    let pos = name.rfind(':')?;
+    (!name[pos + 1..].contains('/')).then_some(pos)
+}
+
+fn strip_tag(name: &str) -> &str {
+    tag_separator(name).map_or(name, |pos| &name[..pos])
 }
 
 #[cfg(test)]
@@ -106,5 +113,46 @@ mod tests {
             parse_image_ref("ghcr.io/owner/image"),
             ("ghcr.io/owner/image", "latest")
         );
+    }
+
+    #[test]
+    fn parse_image_with_tag_and_digest() {
+        assert_eq!(
+            parse_image_ref("ghcr.io/owner/image:v1@sha256:57e8ce5b"),
+            ("ghcr.io/owner/image", "sha256:57e8ce5b")
+        );
+    }
+
+    #[test]
+    fn parse_image_with_digest_only() {
+        assert_eq!(
+            parse_image_ref("node@sha256:57e8ce5b"),
+            ("node", "sha256:57e8ce5b")
+        );
+    }
+
+    #[test]
+    fn parse_image_with_registry_port() {
+        assert_eq!(
+            parse_image_ref("localhost:5000/image:v1"),
+            ("localhost:5000/image", "v1")
+        );
+        assert_eq!(
+            parse_image_ref("localhost:5000/image"),
+            ("localhost:5000/image", "latest")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn ensure_image_pulls_a_tag_pinned_to_a_digest() {
+        let docker = connect(None).unwrap();
+        let image =
+            "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+        let _ = docker.remove_image(image, None, None).await;
+
+        ensure_image(&docker, image, None).await.unwrap();
+
+        assert!(docker.inspect_image(image).await.is_ok());
     }
 }
