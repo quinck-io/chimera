@@ -1215,8 +1215,9 @@ standard paths after the trailing slash.
 GET {base}/_apis/artifactcache/cache?keys={key1},{key2}&version={version}
 ```
 
-The `keys` parameter is a comma-separated list. The first key is the exact
-match; subsequent keys are restore keys (prefix match fallback). The `version`
+The `keys` parameter is a comma-separated list: the primary key, then the
+restore keys. Keys are tried in order, each as an exact match and then as a
+prefix of stored keys. The `version`
 is a hash of the cache paths and compression method.
 
 **Scope isolation rules**:
@@ -1224,8 +1225,8 @@ is a hash of the cache paths and compression method.
 2. Try the token's `git_ref` first (exact and prefix matches)
 3. If no match, try each of `fallback_refs` in order: a pull request can read
    from its base branch, and any branch from the default branch, not vice versa
-4. Prefix matching: find the longest stored key that is a prefix of the search
-   key, with matching version
+4. Prefix matching: among stored keys with matching version that start with
+   the search key, return the most recently created one
 
 **Double-encoding quirk**: `actions/cache` encodes commas in keys with
 `encodeURIComponent` (`%2C`). The HTTP client may re-encode the percent sign,

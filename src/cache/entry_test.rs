@@ -50,14 +50,50 @@ fn exact_lookup() {
 }
 
 #[test]
-fn prefix_lookup_longest_match() {
+fn prefix_lookup_matches_keys_starting_with_search_key() {
+    let mut index = EntryIndex::new();
+    index.insert(make_entry("rust-cargo-abc123", "v1", "hash1"));
+
+    let result = index.lookup(&["rust-cargo-".to_string()], "v1", REPO, &[MAIN_REF]);
+
+    assert_eq!(result.unwrap().blob_hash, "hash1");
+}
+
+#[test]
+fn prefix_lookup_ignores_keys_shorter_than_search_key() {
     let mut index = EntryIndex::new();
     index.insert(make_entry("rust-", "v1", "short"));
     index.insert(make_entry("rust-cargo-", "v1", "long"));
 
     let result = index.lookup(&["rust-cargo-abc123".to_string()], "v1", REPO, &[MAIN_REF]);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().blob_hash, "long");
+
+    assert!(result.is_none());
+}
+
+#[test]
+fn prefix_lookup_returns_most_recently_created_match() {
+    let mut index = EntryIndex::new();
+    let mut older = make_entry("rust-cargo-zzz", "v1", "older");
+    older.created_at = Utc::now() - chrono::Duration::hours(1);
+    index.insert(older);
+    index.insert(make_entry("rust-cargo-aaa", "v1", "newer"));
+
+    let result = index.lookup(&["rust-cargo-".to_string()], "v1", REPO, &[MAIN_REF]);
+
+    assert_eq!(result.unwrap().blob_hash, "newer");
+}
+
+#[test]
+fn exact_match_wins_over_newer_prefix_match() {
+    let mut index = EntryIndex::new();
+    let mut exact = make_entry("rust-cargo", "v1", "exact");
+    exact.created_at = Utc::now() - chrono::Duration::hours(1);
+    index.insert(exact);
+    index.insert(make_entry("rust-cargo-abc", "v1", "prefix"));
+
+    let result = index.lookup(&["rust-cargo".to_string()], "v1", REPO, &[MAIN_REF]);
+
+    assert_eq!(result.unwrap().blob_hash, "exact");
 }
 
 #[test]
@@ -90,51 +126,60 @@ fn miss_wrong_version() {
 }
 
 #[test]
-fn restore_keys_no_false_prefix() {
+fn restore_key_matches_entry_saved_under_a_different_primary_key() {
     let mut index = EntryIndex::new();
     index.insert(make_entry("rust-cargo-old", "v1", "old_hash"));
 
-    // "rust-cargo-" is not a prefix of "rust-cargo-old" from the search key's perspective.
-    // Prefix matching checks: search_key.starts_with(candidate), not the reverse.
-    // So "rust-cargo-".starts_with("rust-cargo-old") = false -> no match.
     let result = index.lookup(
         &["rust-cargo-abc123".to_string(), "rust-cargo-".to_string()],
         "v1",
         REPO,
         &[MAIN_REF],
     );
-    assert!(result.is_none());
+
+    assert_eq!(result.unwrap().blob_hash, "old_hash");
 }
 
 #[test]
-fn restore_keys_prefix_match() {
+fn restore_keys_are_tried_in_order() {
     let mut index = EntryIndex::new();
-    index.insert(make_entry("rust-", "v1", "prefix_hash"));
+    index.insert(make_entry("linux-old", "v1", "linux_hash"));
+    index.insert(make_entry("any-old", "v1", "any_hash"));
 
     let result = index.lookup(
-        &["rust-cargo-abc123".to_string(), "rust-".to_string()],
+        &[
+            "linux-abc123".to_string(),
+            "linux-".to_string(),
+            "any-".to_string(),
+        ],
         "v1",
         REPO,
         &[MAIN_REF],
     );
-    // First key: "rust-cargo-abc123" starts with "rust-"? Yes! So it matches on first key.
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().blob_hash, "prefix_hash");
+
+    assert_eq!(result.unwrap().blob_hash, "linux_hash");
 }
 
 #[test]
-fn prefix_lookup_skips_non_prefix_candidates() {
+fn empty_restore_key_matches_nothing() {
     let mut index = EntryIndex::new();
-    // "rust-build-" sorts between "rust-" and "rust-cargo-xyz"
-    // but is NOT a prefix of "rust-cargo-xyz". The old code would
-    // break early on "rust-build-" because first chars matched but
-    // it wasn't a prefix -- missing the valid "rust-" prefix below it.
-    index.insert(make_entry("rust-", "v1", "short_prefix"));
-    index.insert(make_entry("rust-build-", "v1", "wrong_prefix"));
+    index.insert(make_entry("rust-cargo-old", "v1", "old_hash"));
 
-    let result = index.lookup(&["rust-cargo-xyz".to_string()], "v1", REPO, &[MAIN_REF]);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().blob_hash, "short_prefix");
+    let result = index.lookup(&["".to_string()], "v1", REPO, &[MAIN_REF]);
+
+    assert!(result.is_none());
+}
+
+#[test]
+fn prefix_lookup_skips_keys_sharing_only_leading_characters() {
+    let mut index = EntryIndex::new();
+    index.insert(make_entry("rust-build-xyz", "v1", "wrong_prefix"));
+    index.insert(make_entry("rust-cargo-xyz", "v1", "right_prefix"));
+    index.insert(make_entry("rust-dist-xyz", "v1", "wrong_prefix"));
+
+    let result = index.lookup(&["rust-cargo-".to_string()], "v1", REPO, &[MAIN_REF]);
+
+    assert_eq!(result.unwrap().blob_hash, "right_prefix");
 }
 
 #[test]
@@ -170,6 +215,30 @@ fn remove_entry() {
 
     let result = index.lookup(&["key1".to_string()], "v1", REPO, &[MAIN_REF]);
     assert!(result.is_none());
+}
+
+#[test]
+fn removing_an_entry_keeps_the_same_key_on_other_refs_searchable() {
+    let mut index = EntryIndex::new();
+    index.insert(make_scoped_entry(
+        "rust-abc",
+        "v1",
+        "main_hash",
+        REPO,
+        MAIN_REF,
+    ));
+    index.insert(make_scoped_entry(
+        "rust-abc",
+        "v1",
+        "feature_hash",
+        REPO,
+        FEATURE_REF,
+    ));
+
+    index.remove(REPO, FEATURE_REF, "rust-abc", "v1");
+    let result = index.lookup(&["rust-".to_string()], "v1", REPO, &[MAIN_REF]);
+
+    assert_eq!(result.unwrap().blob_hash, "main_hash");
 }
 
 #[test]
@@ -302,9 +371,8 @@ fn no_reverse_fallback() {
 #[test]
 fn ref_fallback_with_prefix_match() {
     let mut index = EntryIndex::new();
-    // Prefix key on main
     index.insert(make_scoped_entry(
-        "rust-",
+        "rust-cargo-abc",
         "v1",
         "main_prefix",
         REPO,
@@ -313,7 +381,7 @@ fn ref_fallback_with_prefix_match() {
 
     // Feature branch can prefix-match from main via fallback
     let result = index.lookup(
-        &["rust-cargo-abc".to_string()],
+        &["rust-cargo-".to_string()],
         "v1",
         REPO,
         &[FEATURE_REF, MAIN_REF],
