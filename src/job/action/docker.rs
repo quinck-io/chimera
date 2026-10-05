@@ -13,6 +13,7 @@ use super::build_action_inputs;
 use super::metadata::ActionMetadata;
 use crate::docker::output::OutputProcessor;
 use crate::docker::resources::{JobDockerResources, stop_and_remove};
+use crate::job::commands::unsecure_commands_allowed;
 use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env};
 use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
@@ -309,7 +310,7 @@ async fn run_docker_container(params: RunDockerParams<'_>) -> Result<StepResult>
         params.job_state,
         params.log_sender,
         params.cancel_token,
-        params.job_state.debug_enabled,
+        unsecure_commands_allowed(params.env),
     )
     .await;
 
@@ -366,7 +367,7 @@ async fn start_and_stream_logs(
     job_state: &mut JobState,
     log_sender: &LogSender,
     cancel_token: &CancellationToken,
-    debug_enabled: bool,
+    allow_unsecure_commands: bool,
 ) -> Result<StepResult> {
     docker
         .start_container::<String>(container_id, None)
@@ -375,8 +376,12 @@ async fn start_and_stream_logs(
 
     let timeout = step.timeout();
 
-    let processor =
-        OutputProcessor::new(log_sender.clone(), job_state.masks.clone(), debug_enabled);
+    let processor = OutputProcessor::new(
+        log_sender.clone(),
+        job_state.masks.clone(),
+        job_state.debug_enabled,
+        allow_unsecure_commands,
+    );
 
     let stream_task = {
         let processor = processor.clone();
@@ -437,7 +442,7 @@ async fn start_and_stream_logs(
         .unwrap_or(-1);
 
     Ok(StepResult {
-        conclusion: if exit_code == 0 {
+        conclusion: if exit_code == 0 && !processor.command_failed() {
             StepConclusion::Succeeded
         } else {
             StepConclusion::Failed

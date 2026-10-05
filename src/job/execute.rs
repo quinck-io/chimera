@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use super::JobClient;
 use super::action::{ActionCache, load_action_metadata, resolve_action};
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
+use super::commands::unsecure_commands_allowed;
 use super::expression::ExprContext;
 use super::live_feed::FeedSender;
 use super::logs::{JobLogger, LogLine, LogSender, StepLogger};
@@ -416,6 +417,7 @@ pub async fn run_process(
         log_sender.clone(),
         job_state.masks.clone(),
         job_state.debug_enabled,
+        unsecure_commands_allowed(env),
     );
 
     let stdout_task = spawn_stdout_reader(stdout, processor.clone());
@@ -461,7 +463,7 @@ pub async fn run_process(
 
     processor.apply_to_job_state(job_state).await;
 
-    let conclusion = if status.success() {
+    let conclusion = if status.success() && !processor.command_failed() {
         StepConclusion::Succeeded
     } else {
         StepConclusion::Failed

@@ -153,6 +153,13 @@ async fn nonzero_exit_returns_failed() {
     drop(logger);
 }
 
+fn unsecure_commands_env() -> HashMap<String, String> {
+    HashMap::from([(
+        "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
+        "true".to_string(),
+    )])
+}
+
 #[tokio::test]
 async fn set_env_updates_job_state() {
     let (_tmp, ws, client, _mock) = setup_execute().await;
@@ -165,7 +172,7 @@ async fn set_env_updates_job_state() {
         HashMap::new(),
         serde_json::json!({}),
     );
-    let base_env = HashMap::new();
+    let base_env = unsecure_commands_env();
 
     run_host_step(
         &step,
@@ -194,7 +201,7 @@ async fn add_path_updates_path() {
         HashMap::new(),
         serde_json::json!({}),
     );
-    let base_env = HashMap::new();
+    let base_env = unsecure_commands_env();
 
     run_host_step(
         &step,
@@ -252,7 +259,7 @@ async fn env_propagation_across_steps() {
         HashMap::new(),
         serde_json::json!({}),
     );
-    let base_env = HashMap::new();
+    let base_env = unsecure_commands_env();
 
     run_host_step(
         &step1,
