@@ -164,6 +164,26 @@ fn command_policy_flags_are_independent() {
 }
 
 #[test]
+fn command_policy_reads_runner_env() {
+    let runner_env = |name: &str| (name == ALLOW_UNSECURE_COMMANDS_ENV).then(|| "true".to_string());
+
+    let policy = CommandPolicy::from_step_and_runner_env(&HashMap::new(), runner_env);
+
+    assert!(policy.allow_unsecure_commands);
+    assert!(!policy.allow_unsecure_stop_tokens);
+}
+
+#[test]
+fn command_policy_step_cannot_disable_runner_opt_in() {
+    let step_env = HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "false".to_string())]);
+    let runner_env = |name: &str| (name == ALLOW_UNSECURE_COMMANDS_ENV).then(|| "true".to_string());
+
+    let policy = CommandPolicy::from_step_and_runner_env(&step_env, runner_env);
+
+    assert!(policy.allow_unsecure_commands);
+}
+
+#[test]
 fn weak_stop_tokens() {
     for token in [
         "",

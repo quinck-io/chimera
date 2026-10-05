@@ -49,17 +49,28 @@ pub struct CommandPolicy {
 }
 
 impl CommandPolicy {
+    /// An opt-in counts when set on the step or on chimera's own process, as with the
+    /// official runner, where admins enable it for every job through the runner's environment.
     pub fn from_env(env: &HashMap<String, String>) -> Self {
+        Self::from_step_and_runner_env(env, |name| std::env::var(name).ok())
+    }
+
+    fn from_step_and_runner_env(
+        step_env: &HashMap<String, String>,
+        runner_env: impl Fn(&str) -> Option<String>,
+    ) -> Self {
+        let enabled = |name: &str| {
+            is_true(step_env.get(name).map(String::as_str)) || is_true(runner_env(name).as_deref())
+        };
         Self {
-            allow_unsecure_commands: env_flag_enabled(env, ALLOW_UNSECURE_COMMANDS_ENV),
-            allow_unsecure_stop_tokens: env_flag_enabled(env, ALLOW_UNSECURE_STOP_TOKENS_ENV),
+            allow_unsecure_commands: enabled(ALLOW_UNSECURE_COMMANDS_ENV),
+            allow_unsecure_stop_tokens: enabled(ALLOW_UNSECURE_STOP_TOKENS_ENV),
         }
     }
 }
 
-fn env_flag_enabled(env: &HashMap<String, String>, name: &str) -> bool {
-    env.get(name)
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+fn is_true(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
 /// A token that output could guess or emit by accident: empty, `pause-logging`,

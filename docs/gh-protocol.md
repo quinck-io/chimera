@@ -1143,6 +1143,7 @@ Otherwise, any step that prints untrusted text (a PR title, a test log) could se
 so a token that is empty, `pause-logging`, or a workflow command name is rejected unless
 `ACTIONS_ALLOW_UNSECURE_STOPCOMMAND_TOKENS=true`. For `docker` actions both flags are read from the
 step's environment, before the action's own `runs.env`, so an action cannot opt itself in.
+Either flag also counts when set in chimera's own environment, which enables it for every job.
 
 ---
 
