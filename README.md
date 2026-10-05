@@ -1,5 +1,6 @@
 # chimera 🐉
 
+<img width="457" height="498" alt="uzfnXZgm" src="https://github.com/user-attachments/assets/7f0cfe71-f943-4c89-b2be-b23bd3d7bd1c" />
 
 Protocol-compatible GitHub Actions runner replacement, written from scratch in Rust.
 
