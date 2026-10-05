@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, FromRef, FromRequestParts, Path, Query, State};
+use axum::extract::{
+    DefaultBodyLimit, FromRef, FromRequestParts, Path, Query, RawPathParams, State,
+};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -46,11 +48,12 @@ impl FromRequestParts<CacheState> for Authorized {
         parts: &mut Parts,
         state: &CacheState,
     ) -> Result<Self, Self::Rejection> {
-        let token = parts
-            .uri
-            .path()
-            .strip_prefix("/cache/")
-            .and_then(|rest| rest.split('/').next())
+        let params = RawPathParams::from_request_parts(parts, state)
+            .await
+            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        let token = params
+            .iter()
+            .find_map(|(name, value)| (name == "token").then_some(value))
             .ok_or(StatusCode::UNAUTHORIZED)?;
         let scope = state
             .scopes

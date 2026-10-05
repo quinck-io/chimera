@@ -1183,6 +1183,15 @@ The scope bound to the token is taken from the job manifest's `contextData`:
 - `default_ref` = `github.event.repository.default_branch` (prefixed with
   `refs/heads/`)
 
+If the manifest has no `github.repository` or `github.ref`, the job gets no token
+and `ACTIONS_CACHE_URL` is not set: any placeholder scope would be shared with other
+such jobs or fall into a real branch's write scope.
+
+**Isolation limits**: the token isolates container jobs and network clients from
+each other. Host-mode jobs run as the daemon user, so they can read each other's
+environment (including the token) and the cache directory on disk; they are not
+isolated from each other.
+
 ### 14.3 REST API Endpoints
 
 All cache API paths are relative to `ACTIONS_CACHE_URL`. Since that URL already
