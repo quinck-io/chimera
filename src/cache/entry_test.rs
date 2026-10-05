@@ -355,3 +355,14 @@ fn pull_request_prefers_base_branch_over_default_branch() {
 
     assert_eq!(result.unwrap().blob_hash, "base_hash");
 }
+
+#[test]
+fn references_blob_only_within_readable_scope() {
+    let mut index = EntryIndex::new();
+    index.insert(make_scoped_entry("key1", "v1", "hash1", REPO, FEATURE_REF));
+
+    assert!(index.references_blob("hash1", REPO, &[FEATURE_REF, MAIN_REF]));
+    assert!(!index.references_blob("hash1", REPO, &[MAIN_REF]));
+    assert!(!index.references_blob("hash1", "other/repo", &[FEATURE_REF]));
+    assert!(!index.references_blob("hash2", REPO, &[FEATURE_REF]));
+}

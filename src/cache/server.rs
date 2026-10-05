@@ -293,12 +293,18 @@ async fn handle_commit(
 
 async fn handle_download(
     State(manager): State<SharedManager>,
-    _authorized: Authorized,
+    Authorized { scope, .. }: Authorized,
     Path((_token, hash)): Path<(String, String)>,
 ) -> Response {
     // Validate hash to prevent path traversal attacks (e.g. "../../etc/passwd")
     if !super::store::is_valid_blob_hash(&hash) {
         return StatusCode::BAD_REQUEST.into_response();
+    }
+    if !manager
+        .can_read_blob(&hash, &scope.repo, &scope.readable_refs())
+        .await
+    {
+        return StatusCode::NOT_FOUND.into_response();
     }
 
     let blob_path = match manager.blob_path(&hash) {

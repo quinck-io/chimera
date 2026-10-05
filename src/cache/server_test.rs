@@ -485,3 +485,28 @@ async fn cannot_commit_upload_reserved_by_another_scope() {
         StatusCode::NO_CONTENT
     );
 }
+
+#[tokio::test]
+async fn cannot_download_blob_of_another_repo() {
+    let tmp = TempDir::new().unwrap();
+    let (app, _mgr, scopes) = make_test_app(&tmp).await;
+    let repo_a = scopes.grant(scope("org/repo-a", SCOPE_REF));
+    let repo_b = scopes.grant(scope("org/repo-b", SCOPE_REF));
+    let data: &[u8] = b"private to repo a";
+    upload_via_http(&app, &prefix_for(&repo_a), "key", data).await;
+    let hash = blake3::hash(data).to_hex();
+
+    let own = download_status(&app, &prefix_for(&repo_a), &hash).await;
+    let foreign = download_status(&app, &prefix_for(&repo_b), &hash).await;
+
+    assert_eq!(own, StatusCode::OK);
+    assert_eq!(foreign, StatusCode::NOT_FOUND);
+}
+
+async fn download_status(app: &Router, prefix: &str, hash: &str) -> StatusCode {
+    let req = Request::builder()
+        .uri(format!("{prefix}/download/{hash}"))
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}

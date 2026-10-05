@@ -214,6 +214,15 @@ impl CacheManager {
         Ok(())
     }
 
+    /// Blobs are shared between repositories with identical content, so access is decided
+    /// by the entries that point to the blob, not by the blob itself.
+    pub async fn can_read_blob(&self, hash: &str, scope_repo: &str, refs: &[&str]) -> bool {
+        self.entries
+            .read()
+            .await
+            .references_blob(hash, scope_repo, refs)
+    }
+
     /// Get the filesystem path for a blob.
     pub fn blob_path(&self, hash: &str) -> Result<PathBuf, CacheError> {
         self.store.blob_path(hash)

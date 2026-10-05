@@ -1328,7 +1328,9 @@ GET /cache/{token}/download/{blake3_hash}
 ```
 
 Requires a valid job token. The `archiveLocation` URL from a lookup response
-points here directly.
+points here directly. Blobs are deduplicated across repositories, so the blob is
+served only if a cache entry the token's scope can restore points to it; otherwise
+the response is 404, as if it did not exist.
 
 The hash is validated to be exactly 64 lowercase hex characters before any
 filesystem access (prevents path traversal). The response streams the blob file

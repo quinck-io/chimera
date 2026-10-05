@@ -186,6 +186,15 @@ impl EntryIndex {
         entries
     }
 
+    /// Whether an entry readable from `refs` in `repo` stores the blob `hash`.
+    pub fn references_blob(&self, hash: &str, repo: &str, refs: &[&str]) -> bool {
+        self.exact.values().any(|entry| {
+            entry.blob_hash == hash
+                && entry.scope_repo == repo
+                && refs.contains(&entry.scope_ref.as_str())
+        })
+    }
+
     pub fn all_entries(&self) -> Vec<&CacheEntry> {
         self.exact.values().collect()
     }
