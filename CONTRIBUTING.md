@@ -92,10 +92,6 @@ These tests require a machine running chimera registered as a self-hosted runner
 - Prefer clarity over cleverness
 - Tests go in `{module}_test.rs` files next to the module they test
 
-## Security vulnerabilities
-
-Please report security issues privately — see [SECURITY.md](SECURITY.md).
-
 ## Reporting bugs
 
 Open an issue with:

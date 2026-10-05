@@ -63,11 +63,11 @@ Use the modern Rust module convention: name files after the module, not `mod.rs`
 
 ```
 // good
-src/broker/session.rs
-src/broker/poller.rs
+src/github/auth.rs
+src/github/broker.rs
 
 // bad
-src/broker/mod.rs  (only acceptable as a thin re-export file, not for logic)
+src/github/mod.rs  (only acceptable as a thin re-export file, not for logic)
 ```
 
 Keep module boundaries meaningful. A module should represent a coherent concept, not just a file for organizing functions.
@@ -94,7 +94,7 @@ Don't mock internal modules. Test them directly. Mock only external HTTP APIs us
 
 Integration tests live in `tests/` and exercise the execution engine end-to-end. When adding a new feature that affects job execution (new expression function, workflow command, step type, etc.), add integration tests using the harness in `tests/common/mod.rs`.
 
-Unit tests live in a separate file next to the module they test, named `{module}_test.rs`. For example, `src/config.rs` has tests in `src/config_test.rs`, and `src/broker/auth.rs` has tests in `src/broker/auth_test.rs`. Each test file is included at the bottom of the main module file using the `#[path]` attribute:
+Unit tests live in a separate file next to the module they test, named `{module}_test.rs`. For example, `src/config.rs` has tests in `src/config_test.rs`, and `src/github/auth.rs` has tests in `src/github/auth_test.rs`. Each test file is included at the bottom of the main module file using the `#[path]` attribute:
 
 ```rust
 #[cfg(test)]
