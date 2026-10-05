@@ -139,3 +139,43 @@ async fn composite_action_forwards_hyphenated_input() {
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+#[tokio::test]
+async fn composite_action_runs_a_script_from_its_own_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::setup().await;
+    let action_dir = env.workspace.workspace_dir().join(".github/actions/entry");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        r#"
+name: 'Entry'
+description: 'Adds its own path to PATH, then calls a script from it'
+runs:
+  using: 'composite'
+  steps:
+    - run: echo "$ACTION_PATH" >> $GITHUB_PATH
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+    - run: entrypoint.sh
+      shell: bash
+"#,
+    )
+    .unwrap();
+    let script = action_dir.join("entrypoint.sh");
+    std::fs::write(&script, "#!/usr/bin/env bash\necho entrypoint ran\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let manifest = manifest_with_steps(
+        vec![composite_step(
+            "entry",
+            ".github/actions/entry",
+            serde_json::json!({}),
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}

@@ -84,8 +84,18 @@ async fn run_composite_action_inner(
         .as_ref()
         .context("composite action has no steps")?;
 
+    let action_path = docker_resources
+        .filter(|r| r.job_container_id().is_some())
+        .map(|r| {
+            r.remap_to_container_path(action_dir)
+                .context("cannot remap action dir to container path")
+        })
+        .transpose()?
+        .unwrap_or_else(|| action_dir.display().to_string());
+
     // Build action inputs once — they stay constant across sub-steps
-    let initial_env = build_step_env(step, job_state, workspace, base_env);
+    let mut initial_env = build_step_env(step, job_state, workspace, base_env);
+    initial_env.insert("GITHUB_ACTION_PATH".into(), action_path.clone());
     let expr_ctx = ExprContext::new(&initial_env, job_state, false, false);
     let action_inputs = build_action_inputs(metadata, step, &expr_ctx);
 
@@ -100,6 +110,7 @@ async fn run_composite_action_inner(
         // (via ::add-path::, GITHUB_PATH, ::set-env::, GITHUB_ENV) are picked up.
         let mut composite_env = build_step_env(step, job_state, workspace, base_env);
         composite_env.extend(action_inputs.clone());
+        composite_env.insert("GITHUB_ACTION_PATH".into(), action_path.clone());
 
         // Evaluate `if:` condition — skip the step if it evaluates to false
         if let Some(condition) = nested_obj.get(ykey("if")).and_then(|v| v.as_str()) {
