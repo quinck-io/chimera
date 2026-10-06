@@ -1,13 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
 
 use super::*;
 use crate::job::action::download::ActionCache;
 use crate::job::action::metadata::{ActionInput, ActionMetadata, ActionRuns};
 use crate::job::execute::{JobState, StepConclusion};
 use crate::job::logs::StepLogger;
+use crate::job::masker::SecretMasker;
 use crate::job::schema::{Step, StepReference};
 use crate::job::workspace::Workspace;
 use tokio_util::sync::CancellationToken;
@@ -84,11 +82,11 @@ async fn nested_script_steps_execute() {
 
     let step = make_step();
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();
@@ -132,11 +130,11 @@ async fn failure_propagates() {
 
     let step = make_step();
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();
@@ -183,11 +181,11 @@ async fn inputs_available_as_env() {
     step.inputs.insert("name".into(), "world".into());
 
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();
@@ -229,11 +227,11 @@ async fn recursion_depth_limit() {
 
     let step = make_step();
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let cache = ActionCache::new(tmp.path().join("cache"), reqwest::Client::new());
     let base_env = HashMap::new();

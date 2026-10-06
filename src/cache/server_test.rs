@@ -510,3 +510,13 @@ async fn download_status(app: &Router, prefix: &str, hash: &str) -> StatusCode {
         .unwrap();
     app.clone().oneshot(req).await.unwrap().status()
 }
+
+#[test]
+fn redact_token_hides_the_job_token_segment() {
+    assert_eq!(
+        redact_token("/cache/abc123/_apis/unknown"),
+        "/cache/***/_apis/unknown"
+    );
+    assert_eq!(redact_token("/cache/abc123"), "/cache/***");
+    assert_eq!(redact_token("/other/path"), "/other/path");
+}

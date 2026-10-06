@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::RwLock;
-
 use crate::job::commands::{
     ALLOW_UNSECURE_COMMANDS_ENV, ALLOW_UNSECURE_STOP_TOKENS_ENV, CommandPolicy, WorkflowCommand,
     is_weak_stop_token, parse_command, resumes_commands,
 };
 use crate::job::execute::JobState;
 use crate::job::logs::LogSender;
+use crate::job::masker::SecretMasker;
 
 /// Bundles the buffers and settings needed to process stdout/stderr output lines.
 ///
@@ -17,7 +16,7 @@ use crate::job::logs::LogSender;
 #[derive(Clone)]
 pub struct OutputProcessor {
     sender: LogSender,
-    masks: Arc<RwLock<Vec<String>>>,
+    masks: SecretMasker,
     env_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
     path_buf: Arc<tokio::sync::Mutex<Vec<String>>>,
     output_buf: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
@@ -33,7 +32,7 @@ pub struct OutputProcessor {
 impl OutputProcessor {
     pub fn new(
         sender: LogSender,
-        masks: Arc<RwLock<Vec<String>>>,
+        masks: SecretMasker,
         debug_enabled: bool,
         policy: CommandPolicy,
     ) -> Self {
@@ -85,7 +84,7 @@ impl OutputProcessor {
                 self.output_buf.lock().await.push((name, value));
             }
             WorkflowCommand::AddMask(secret) => {
-                self.masks.write().await.push(secret);
+                self.masks.add(&secret);
             }
             WorkflowCommand::Debug(msg) => {
                 if self.debug_enabled {

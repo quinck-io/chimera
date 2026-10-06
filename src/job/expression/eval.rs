@@ -429,6 +429,11 @@ fn check_args(name: &str, args: &[Expr], expected: usize) -> Result<(), String> 
 
 fn hash_files(workspace: &str, patterns: &[String]) -> Result<Value, String> {
     let workspace_path = std::path::Path::new(workspace);
+    // Like the official runner, only files inside the workspace count, so neither
+    // `../` patterns nor symlinks can hash (and so probe) files elsewhere on the host.
+    let workspace_root = workspace_path
+        .canonicalize()
+        .map_err(|e| format!("failed to resolve workspace '{workspace}': {e}"))?;
     let mut matched_paths = Vec::new();
 
     for pattern in patterns {
@@ -438,8 +443,16 @@ fn hash_files(workspace: &str, patterns: &[String]) -> Result<Value, String> {
 
         for entry in entries {
             let path = entry.map_err(|e| format!("glob error: {e}"))?;
-            if path.is_file() {
-                matched_paths.push(path);
+            if !path.is_file() {
+                continue;
+            }
+            match path.canonicalize() {
+                Ok(real_path) if real_path.starts_with(&workspace_root) => {
+                    matched_paths.push(path);
+                }
+                _ => {
+                    debug!(path = %path.display(), "hashFiles: ignoring file outside the workspace")
+                }
             }
         }
     }
@@ -453,9 +466,10 @@ fn hash_files(workspace: &str, patterns: &[String]) -> Result<Value, String> {
 
     let mut hasher = Sha256::new();
     for path in &matched_paths {
-        let contents =
-            std::fs::read(path).map_err(|e| format!("failed to read '{}': {e}", path.display()))?;
-        hasher.update(&contents);
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| format!("failed to read '{}': {e}", path.display()))?;
+        std::io::copy(&mut file, &mut hasher)
+            .map_err(|e| format!("failed to read '{}': {e}", path.display()))?;
     }
 
     Ok(Value::String(format!("{:x}", hasher.finalize())))

@@ -47,17 +47,7 @@ pub fn parse_uses(uses: &str) -> anyhow::Result<ActionSource> {
         if parts.len() < 2 {
             anyhow::bail!("invalid uses '{uses}', expected owner/repo@ref");
         }
-        let path = if parts.len() == 3 {
-            Some(parts[2].to_string())
-        } else {
-            None
-        };
-        Ok(ActionSource::Remote {
-            owner: parts[0].to_string(),
-            repo: parts[1].to_string(),
-            git_ref: git_ref.to_string(),
-            path,
-        })
+        ActionSource::remote(parts[0], parts[1], git_ref, parts.get(2).copied())
     } else if uses.starts_with("./") {
         Ok(ActionSource::Local { path: uses.into() })
     } else if uses.starts_with("docker://") {

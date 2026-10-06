@@ -181,8 +181,6 @@ impl JobClient {
             serde_json::from_str(&body_text).context("parsing raw job manifest JSON")?;
         let normalized = manifest::normalize_manifest(&raw);
 
-        debug!(normalized = %normalized, "normalized manifest");
-
         serde_json::from_value(normalized.clone()).map_err(|source| {
             match reporting_skeleton(&normalized) {
                 Some(skeleton) => UnreadableJob { skeleton, source }.into(),

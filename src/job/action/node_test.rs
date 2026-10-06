@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
 
 use super::*;
 use crate::job::execute::{JobState, StepConclusion};
 use crate::job::logs::StepLogger;
+use crate::job::masker::SecretMasker;
 use crate::job::schema::{Step, StepReference};
 use crate::job::workspace::Workspace;
 use tokio_util::sync::CancellationToken;
@@ -80,11 +78,11 @@ async fn node_action_executes_script() {
     let metadata = make_node_metadata("index.js");
     let step = make_action_step("Test");
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 
@@ -141,11 +139,11 @@ if (process.env.INPUT_TOKEN !== 'my-secret') {
     step.inputs.insert("token".into(), "my-secret".into());
 
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 
@@ -200,11 +198,11 @@ if (process.env.INPUT_FLAVOR !== 'vanilla') {
 
     let step = make_action_step("Test");
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 
@@ -244,11 +242,11 @@ async fn nonzero_exit_fails() {
     let metadata = make_node_metadata("index.js");
     let step = make_action_step("Test");
     let mut state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         HashMap::new(),
         serde_json::json!({}),
     );
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
     let base_env = HashMap::new();
 

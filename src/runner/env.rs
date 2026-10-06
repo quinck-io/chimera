@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::job::schema::JobManifest;
 use crate::job::workspace::Workspace;
+use crate::runner::orphans;
 use crate::utils::{arch_label, os_label};
 
 /// Build the base environment variables for step execution.
@@ -17,6 +18,10 @@ pub fn build_base_env(
 
     // Workspace and runner paths
     env.insert("GITHUB_ACTIONS".into(), "true".into());
+    env.insert(
+        orphans::TRACKING_ID_ENV.into(),
+        orphans::tracking_id(&manifest.plan.job_id),
+    );
     env.insert(
         "GITHUB_WORKSPACE".into(),
         workspace.workspace_dir().to_string_lossy().into_owned(),
@@ -64,11 +69,6 @@ pub fn build_base_env(
     // every other host tool from the first `core.addPath()` onwards.
     if let Ok(path) = std::env::var("PATH") {
         env.insert("PATH".into(), path);
-    }
-
-    // GITHUB_TOKEN from manifest variables
-    if let Some(token) = manifest.github_token() {
-        env.insert("GITHUB_TOKEN".into(), token.into());
     }
 
     // Extract fields from context_data.github

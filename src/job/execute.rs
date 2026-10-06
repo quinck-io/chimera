@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -19,6 +19,7 @@ use super::commands::CommandPolicy;
 use super::expression::ExprContext;
 use super::live_feed::FeedSender;
 use super::logs::{JobLogger, LogLine, LogSender, StepLogger};
+use super::masker::SecretMasker;
 use super::schema::{Evaluable, JobManifest, Step};
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
@@ -43,7 +44,7 @@ pub struct JobState {
     pub env: HashMap<String, String>,
     pub path_prepends: Vec<String>,
     pub outputs: HashMap<String, String>,
-    pub masks: Arc<RwLock<Vec<String>>>,
+    pub masks: SecretMasker,
     /// Per-action state for pre→post transfer via SaveState workflow command.
     /// Key: action context_name, Value: map of state name→value.
     pub action_states: HashMap<String, HashMap<String, String>>,
@@ -68,7 +69,7 @@ pub struct JobState {
 
 impl JobState {
     pub fn new(
-        masks: Arc<RwLock<Vec<String>>>,
+        masks: SecretMasker,
         secrets: HashMap<String, String>,
         context_data: serde_json::Value,
     ) -> Self {
@@ -405,6 +406,10 @@ pub async fn run_process(
         .args(args)
         .current_dir(working_dir)
         .envs(env)
+        // Its own process group lets a timeout or cancellation kill everything the
+        // step started, not just the shell.
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -438,7 +443,7 @@ pub async fn run_process(
                 Ok(result) => result?,
                 Err(_) => {
                     warn!("process timed out, killing");
-                    let _ = child.kill().await;
+                    kill_process_group(&mut child).await;
                     return Ok(StepResult {
                         conclusion: StepConclusion::Failed,
                     });
@@ -447,7 +452,7 @@ pub async fn run_process(
         }
         _ = cancel_token.cancelled() => {
             warn!("job cancelled, killing process");
-            let _ = child.kill().await;
+            kill_process_group(&mut child).await;
             return Ok(StepResult {
                 conclusion: StepConclusion::Cancelled,
             });
@@ -463,6 +468,15 @@ pub async fn run_process(
     };
 
     Ok(StepResult { conclusion })
+}
+
+async fn kill_process_group(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        // SAFETY: killpg(2) only sends a signal and has no memory-safety requirements.
+        // The child leads its own group (`process_group(0)`), so its pid is the group id.
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    let _ = child.kill().await;
 }
 
 /// Build the full environment for a step execution.
@@ -565,7 +579,7 @@ pub fn resolve_container_specs(
     manifest: &JobManifest,
 ) -> (Option<JobContainerSpec>, Vec<ServiceContainerSpec>) {
     let job_state = JobState::new(
-        Arc::new(RwLock::new(Vec::new())),
+        SecretMasker::default(),
         job_secrets(manifest),
         manifest.context_data.clone(),
     );
@@ -601,12 +615,8 @@ pub async fn run_all_steps(
     node_runtimes: &NodeRuntimes,
     feed_sender: Option<&FeedSender>,
 ) -> Result<(JobConclusion, HashMap<String, String>)> {
-    let masks = collect_secret_masks(manifest);
-    masks
-        .write()
-        .await
-        .extend(context_secrets(manifest).map(|(_, v)| v.to_string()));
     let secrets = job_secrets(manifest);
+    let masks = job_secret_masker(manifest, &secrets);
 
     let mut job_state = JobState::new(masks.clone(), secrets, manifest.context_data.clone());
 
@@ -1154,6 +1164,15 @@ pub async fn run_all_steps(
             job_state.outputs.extend(outs.clone());
         }
     }
+    // Dependent jobs receive outputs unmasked, so like the official runner a
+    // secret-bearing output is dropped rather than handed on.
+    job_state.outputs.retain(|name, value| {
+        let reveals_secret = job_state.masks.reveals_secret(value);
+        if reveals_secret {
+            warn!(output = %name, "skipping job output that may contain a secret");
+        }
+        !reveals_secret
+    });
 
     let conclusion = if job_cancelled {
         JobConclusion::Cancelled
@@ -1165,14 +1184,11 @@ pub async fn run_all_steps(
     Ok((conclusion, job_state.outputs.clone()))
 }
 
-fn collect_secret_masks(manifest: &JobManifest) -> Arc<RwLock<Vec<String>>> {
-    let masks: Vec<String> = manifest
-        .variables
-        .values()
-        .filter(|v| v.is_secret && !v.value.is_empty())
-        .map(|v| v.value.clone())
-        .collect();
-    Arc::new(RwLock::new(masks))
+/// Masks the job's secrets and its access token, which every step receives as
+/// `ACTIONS_RUNTIME_TOKEN` and the official runner masks as well.
+fn job_secret_masker(manifest: &JobManifest, secrets: &HashMap<String, String>) -> SecretMasker {
+    let access_token = manifest.access_token().ok();
+    SecretMasker::new(secrets.values().map(String::as_str).chain(access_token))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1183,7 +1199,7 @@ async fn create_step_logger(
     job_id: &str,
     step_id: &str,
     step_name: &str,
-    masks: Arc<RwLock<Vec<String>>>,
+    masks: SecretMasker,
     feed_sender: Option<&FeedSender>,
     job_log_tx: Option<&mpsc::Sender<LogLine>>,
 ) -> StepLogger {

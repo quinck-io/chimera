@@ -132,3 +132,45 @@ fn resolve_fallback_with_subpath() {
         _ => panic!("expected Remote"),
     }
 }
+
+#[test]
+fn remote_accepts_branch_refs_and_subpaths() {
+    let source = ActionSource::remote("my-org", "repo.js", "feature/v1.2+x", Some("sub/dir"));
+
+    assert!(source.is_ok());
+}
+
+#[test]
+fn remote_rejects_refs_that_climb_out_of_the_cache() {
+    for git_ref in [
+        "../../etc",
+        "main/../..",
+        "/abs",
+        "",
+        "a//b",
+        "v1?x=1",
+        "v1#frag",
+    ] {
+        let source = ActionSource::remote("owner", "repo", git_ref, None);
+
+        assert!(source.is_err(), "{git_ref:?} should be rejected");
+    }
+}
+
+#[test]
+fn remote_rejects_unsafe_owner_repo_and_path() {
+    assert!(ActionSource::remote("..", "repo", "v1", None).is_err());
+    assert!(ActionSource::remote("owner", "re/po", "v1", None).is_err());
+    assert!(ActionSource::remote("owner", "repo", "v1", Some("../../tmp/evil")).is_err());
+    assert!(ActionSource::remote("owner", "repo", "v1", Some("/tmp/evil")).is_err());
+}
+
+#[test]
+fn resolve_rejects_traversal_in_the_action_ref() {
+    let mut step = make_action_step("actions/checkout", StepReferenceKind::Repository);
+    step.reference.git_ref = Some("../../../tmp".into());
+
+    let source = resolve_action(&step);
+
+    assert!(source.is_err());
+}

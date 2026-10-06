@@ -221,3 +221,26 @@ fn resume_rejects_other_lines() {
     assert!(!resumes_commands("::tokx::", "tok"));
     assert!(!resumes_commands("echo ::tok::", "tok"));
 }
+
+#[test]
+fn add_mask_unescapes_its_value() {
+    let cmd = parse_command("::add-mask::50%25 off%0Asecond line");
+
+    assert_eq!(
+        cmd,
+        Some(WorkflowCommand::AddMask("50% off\nsecond line".into()))
+    );
+}
+
+#[test]
+fn properties_unescape_their_delimiters() {
+    let cmd = parse_command("::set-output name=a%3Ab%2Cc::value");
+
+    assert_eq!(
+        cmd,
+        Some(WorkflowCommand::SetOutput {
+            name: "a:b,c".into(),
+            value: "value".into(),
+        })
+    );
+}

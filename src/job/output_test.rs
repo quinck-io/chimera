@@ -1,7 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
 
 use super::OutputProcessor;
 use crate::job::commands::{
@@ -9,6 +6,7 @@ use crate::job::commands::{
 };
 use crate::job::execute::JobState;
 use crate::job::logs::{LogLine, LogSender};
+use crate::job::masker::SecretMasker;
 
 fn make_processor(debug_enabled: bool) -> (OutputProcessor, tokio::sync::mpsc::Receiver<LogLine>) {
     build_processor(debug_enabled, CommandPolicy::default())
@@ -28,7 +26,7 @@ fn build_processor(
     debug_enabled: bool,
     policy: CommandPolicy,
 ) -> (OutputProcessor, tokio::sync::mpsc::Receiver<LogLine>) {
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let (tx, rx) = tokio::sync::mpsc::channel(256);
     let sender = LogSender::new_for_test(tx, masks.clone());
     let processor = OutputProcessor::new(sender, masks, debug_enabled, policy);
@@ -36,7 +34,7 @@ fn build_processor(
 }
 
 fn make_job_state() -> JobState {
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     JobState::new(masks, HashMap::new(), serde_json::json!({}))
 }
 
