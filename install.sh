@@ -41,6 +41,13 @@ main() {
     log "Downloading chimera for ${target}..."
     curl -fsSL "$download_url" -o "${tmpdir}/chimera.tar.gz"
 
+    log "Verifying checksum..."
+    curl -fsSL "${download_url}.sha256" -o "${tmpdir}/chimera.tar.gz.sha256"
+    expected="$(cut -d ' ' -f 1 "${tmpdir}/chimera.tar.gz.sha256")"
+    actual="$(sha256_of "${tmpdir}/chimera.tar.gz")"
+    [ -n "$expected" ] && [ "$expected" = "$actual" ] \
+        || err "Checksum mismatch: expected '${expected}', got '${actual}'"
+
     log "Extracting..."
     tar xzf "${tmpdir}/chimera.tar.gz" -C "$tmpdir"
 
@@ -53,6 +60,14 @@ main() {
     chmod +x "${INSTALL_DIR}/${BINARY}"
 
     log "Installed chimera $(${INSTALL_DIR}/${BINARY} --version 2>/dev/null || echo "${version}")"
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    else
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    fi
 }
 
 log() { printf '  %s\n' "$*"; }

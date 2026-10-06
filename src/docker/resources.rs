@@ -230,8 +230,10 @@ impl JobDockerResources {
                 "{}:{JOB_TEMP_PATH}",
                 params.runner_temp_host_path.to_string_lossy()
             );
+            // The action cache is shared by every job on this machine, so a job must
+            // not be able to rewrite the code another job is about to run.
             let actions_mount = format!(
-                "{}:/github/actions",
+                "{}:/github/actions:ro",
                 params.actions_host_path.to_string_lossy()
             );
             let tool_cache_mount = format!(

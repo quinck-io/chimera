@@ -78,7 +78,7 @@ async fn flush_on_sender_drop() {
         .mount(&mock_server)
         .await;
 
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
     logger.sender().send("hello world".into()).await;
@@ -97,7 +97,7 @@ async fn flush_on_interval() {
         .mount(&mock_server)
         .await;
 
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
     logger.sender().send("line 1".into()).await;
@@ -119,7 +119,7 @@ async fn flush_on_large_buffer() {
         .mount(&mock_server)
         .await;
 
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
     let big_line = "x".repeat(70_000);
@@ -152,7 +152,7 @@ async fn masking_replaces_secrets() {
         .mount(&mock_server)
         .await;
 
-    let masks = Arc::new(RwLock::new(vec!["supersecret".to_string()]));
+    let masks = SecretMasker::new(["supersecret"]);
     let logger = StepLogger::legacy(client, "plan-1", "step-1", masks, None).await;
 
     logger
@@ -170,7 +170,7 @@ async fn masking_replaces_secrets() {
 
 #[tokio::test]
 async fn collector_collects_lines() {
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let logger = StepLogger::results_for_test(masks);
 
     logger.sender().send("line one".into()).await;
@@ -184,7 +184,7 @@ async fn collector_collects_lines() {
 
 #[tokio::test]
 async fn collector_masks_secrets() {
-    let masks = Arc::new(RwLock::new(vec!["secret123".to_string()]));
+    let masks = SecretMasker::new(["secret123"]);
     let logger = StepLogger::results_for_test(masks);
 
     logger.sender().send("token is secret123 here".into()).await;
@@ -249,7 +249,7 @@ async fn job_logger_streams_and_publishes_once() {
     .await;
 
     let job_logger = JobLogger::new(client.clone(), "plan-1".into(), "job-1".into());
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let step = StepLogger::results(
         client,
         "plan-1".into(),
@@ -303,7 +303,7 @@ async fn step_without_job_logger_still_uploads_its_own_blob() {
     )
     .await;
 
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let step = StepLogger::results(
         client,
         "plan-1".into(),

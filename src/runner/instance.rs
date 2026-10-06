@@ -373,6 +373,7 @@ impl Runner {
         if let Some(ref mut resources) = docker_resources {
             resources.cleanup().await;
         }
+        super::orphans::kill_orphans(&manifest.plan.job_id).await;
 
         if let Err(e) = workspace.cleanup() {
             warn!(error = %e, "workspace cleanup failed");
@@ -478,7 +479,7 @@ impl Runner {
         let _ = heartbeat_handle.await;
 
         let outputs_payload = outputs_to_variable_values(&job_outputs);
-        debug!(job_outputs = ?job_outputs, outputs_payload = %outputs_payload, "completing job");
+        debug!(outputs = ?job_outputs.keys().collect::<Vec<_>>(), "completing job");
         job_client
             .complete_job(
                 &manifest.plan.plan_id,

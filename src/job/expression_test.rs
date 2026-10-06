@@ -1658,3 +1658,31 @@ fn job_services_port_numeric_bracket() {
         "5432"
     );
 }
+
+#[test]
+fn hash_files_ignores_files_outside_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(root.path().join("outside.txt"), b"secret").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.path().join("outside.txt"), workspace.join("link.txt"))
+        .unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITHUB_WORKSPACE".into(),
+        workspace.to_string_lossy().into(),
+    );
+    let ctx = ctx_with_env(&env);
+
+    let via_parent = parse_and_eval("hashFiles('../outside.txt')", &ctx)
+        .unwrap()
+        .to_display();
+    let via_symlink = parse_and_eval("hashFiles('link.txt')", &ctx)
+        .unwrap()
+        .to_display();
+
+    assert_eq!(via_parent, "");
+    assert_eq!(via_symlink, "");
+}

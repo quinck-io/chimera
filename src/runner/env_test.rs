@@ -69,13 +69,13 @@ fn sets_github_context_vars() {
 }
 
 #[test]
-fn sets_github_token() {
+fn does_not_expose_github_token_unless_the_workflow_maps_it() {
     let manifest = minimal_manifest();
     let (_tmp, ws) = test_workspace();
 
     let env = build_base_env(&manifest, &ws, "test-runner");
 
-    assert_eq!(env.get("GITHUB_TOKEN").unwrap(), "ghs_test123");
+    assert!(!env.contains_key("GITHUB_TOKEN"));
 }
 
 #[test]
@@ -214,7 +214,6 @@ fn container_env_preserves_non_path_vars() {
     // Non-path variables should still be present
     assert_eq!(env.get("GITHUB_ACTIONS").unwrap(), "true");
     assert_eq!(env.get("GITHUB_REPOSITORY").unwrap(), "owner/repo");
-    assert_eq!(env.get("GITHUB_TOKEN").unwrap(), "ghs_test123");
 
     // Container is always Linux regardless of host OS
     assert_eq!(env.get("RUNNER_OS").unwrap(), "Linux");
@@ -237,4 +236,14 @@ fn sets_ref_details_and_runner_defaults() {
     assert_eq!(env["GITHUB_REPOSITORY_ID"], "42");
     assert_eq!(env["CI"], "true");
     assert_eq!(env["RUNNER_ENVIRONMENT"], "self-hosted");
+}
+
+#[test]
+fn tags_steps_with_the_job_tracking_id() {
+    let manifest = minimal_manifest();
+    let (_tmp, ws) = test_workspace();
+
+    let env = build_base_env(&manifest, &ws, "test-runner");
+
+    assert_eq!(env.get("RUNNER_TRACKING_ID").unwrap(), "chimera_j");
 }

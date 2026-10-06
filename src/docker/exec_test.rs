@@ -1,13 +1,12 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::job::execute::{JobState, StepConclusion};
 use crate::job::logs::LogSender;
+use crate::job::masker::SecretMasker;
 
 /// Integration test: requires Docker daemon running.
 #[tokio::test]
@@ -42,7 +41,7 @@ async fn exec_echo_in_container() {
         .await
         .unwrap();
 
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let (tx, _rx) = tokio::sync::mpsc::channel(256);
     let sender = LogSender::new_for_test(tx, masks.clone());
     let mut job_state = JobState::new(masks, HashMap::new(), serde_json::json!({}));
@@ -110,7 +109,7 @@ async fn exec_failing_command() {
         .await
         .unwrap();
 
-    let masks = Arc::new(RwLock::new(Vec::new()));
+    let masks = SecretMasker::default();
     let (tx, _rx) = tokio::sync::mpsc::channel(256);
     let sender = LogSender::new_for_test(tx, masks.clone());
     let mut job_state = JobState::new(masks, HashMap::new(), serde_json::json!({}));

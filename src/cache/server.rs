@@ -215,7 +215,7 @@ async fn handle_lookup(
 
             let location = format!("http://{host}/cache/{token}/download/{}", entry.blob_hash);
 
-            debug!(cache_key = %entry.key, location = %location, "cache hit");
+            debug!(cache_key = %entry.key, blob = %entry.blob_hash, "cache hit");
 
             let body = LookupResponse {
                 cache_key: entry.key,
@@ -356,21 +356,34 @@ async fn handle_download(
 }
 
 async fn handle_unknown(uri: Uri) -> Response {
+    let path = redact_token(uri.path());
     // Both actions/cache v3 and v4 use the legacy REST API (_apis/artifactcache/*)
     // when ACTIONS_CACHE_URL is set. The Twirp protocol is only used when
     // ACTIONS_CACHE_SERVICE_V2 is set (which chimera never does). If we see Twirp
     // requests, something has gone wrong with environment variable injection.
-    if uri.path().contains("twirp") || uri.path().contains("CacheService") {
+    if path.contains("twirp") || path.contains("CacheService") {
         warn!(
-            path = %uri.path(),
+            path = %path,
             "received Twirp cache request — this means ACTIONS_CACHE_SERVICE_V2 is set \
              unexpectedly. Chimera's cache server uses the REST API which both actions/cache \
              v3 and v4 support when ACTIONS_CACHE_URL is set"
         );
     } else {
-        warn!(path = %uri.path(), "unknown cache API request");
+        warn!(path = %path, "unknown cache API request");
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+/// Hides the job token in a `/cache/{token}/...` path, since a logged token could be
+/// replayed against the job's cache scope for as long as the job runs.
+fn redact_token(path: &str) -> String {
+    let Some(rest) = path.strip_prefix("/cache/") else {
+        return path.to_string();
+    };
+    match rest.split_once('/') {
+        Some((_, tail)) => format!("/cache/***/{tail}"),
+        None => "/cache/***".to_string(),
+    }
 }
 
 /// Decode `%2C` (and `%2c`) back to `,` in a query parameter value.

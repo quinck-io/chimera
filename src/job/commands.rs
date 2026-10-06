@@ -94,35 +94,36 @@ pub fn resumes_commands(line: &str, token: &str) -> bool {
 /// Format: `::command-name param=value::message`
 pub fn parse_command(line: &str) -> Option<WorkflowCommand> {
     let (cmd_name, params, message) = split_command(line)?;
+    let message = unescape_data(message);
 
     match cmd_name {
         "set-output" => {
             let name = extract_param(params?, "name")?;
             Some(WorkflowCommand::SetOutput {
                 name,
-                value: message.to_string(),
+                value: message,
             })
         }
         "set-env" => {
             let name = extract_param(params?, "name")?;
             Some(WorkflowCommand::SetEnv {
                 name,
-                value: message.to_string(),
+                value: message,
             })
         }
-        "add-path" => Some(WorkflowCommand::AddPath(message.to_string())),
-        "add-mask" => Some(WorkflowCommand::AddMask(message.to_string())),
-        "debug" => Some(WorkflowCommand::Debug(message.to_string())),
-        "warning" => Some(WorkflowCommand::Warning(message.to_string())),
-        "error" => Some(WorkflowCommand::Error(message.to_string())),
-        "group" => Some(WorkflowCommand::Group(message.to_string())),
+        "add-path" => Some(WorkflowCommand::AddPath(message)),
+        "add-mask" => Some(WorkflowCommand::AddMask(message)),
+        "debug" => Some(WorkflowCommand::Debug(message)),
+        "warning" => Some(WorkflowCommand::Warning(message)),
+        "error" => Some(WorkflowCommand::Error(message)),
+        "group" => Some(WorkflowCommand::Group(message)),
         "endgroup" => Some(WorkflowCommand::EndGroup),
-        "stop-commands" => Some(WorkflowCommand::StopCommands(message.to_string())),
+        "stop-commands" => Some(WorkflowCommand::StopCommands(message)),
         "save-state" => {
             let name = extract_param(params?, "name")?;
             Some(WorkflowCommand::SaveState {
                 name,
-                value: message.to_string(),
+                value: message,
             })
         }
         _ => None,
@@ -146,10 +147,23 @@ fn extract_param(params: &str, key: &str) -> Option<String> {
     for part in params.split(',') {
         let part = part.trim();
         if let Some(value) = part.strip_prefix(&prefix) {
-            return Some(value.to_string());
+            return Some(unescape_property(value));
         }
     }
     None
+}
+
+/// Reverses the escaping `@actions/core` applies to a command's message, without
+/// which a value set by `core.setSecret` containing `%` or a newline would never match.
+fn unescape_data(data: &str) -> String {
+    data.replace("%0D", "\r")
+        .replace("%0A", "\n")
+        .replace("%25", "%")
+}
+
+/// Properties additionally escape the `:` and `,` that delimit them.
+fn unescape_property(value: &str) -> String {
+    unescape_data(&value.replace("%3A", ":").replace("%2C", ","))
 }
 
 #[cfg(test)]
