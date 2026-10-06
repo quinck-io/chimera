@@ -1,18 +1,40 @@
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use tracing::{debug, warn};
 
 use super::resolve::ActionSource;
 
+const GITHUB_API_URL: &str = "https://api.github.com";
+
+/// Downloaded actions, shared by every job on the machine.
+///
+/// Entries are stored by commit rather than by ref. A moving ref like `v4` or `main`
+/// is resolved again for each job, so a job always runs the commit the ref points
+/// to now, and the cache never pins an action to its first download.
 pub struct ActionCache {
     cache_dir: PathBuf,
     client: reqwest::Client,
+    api_url: String,
+    /// Refs resolved during this job, so an action's pre, main and post steps all
+    /// run the same commit even if its ref moves while the job is running.
+    resolved: Mutex<HashMap<String, String>>,
 }
 
 impl ActionCache {
     pub fn new(cache_dir: PathBuf, client: reqwest::Client) -> Self {
-        Self { cache_dir, client }
+        Self::with_api_url(cache_dir, client, GITHUB_API_URL.into())
+    }
+
+    fn with_api_url(cache_dir: PathBuf, client: reqwest::Client, api_url: String) -> Self {
+        Self {
+            cache_dir,
+            client,
+            api_url,
+            resolved: Mutex::new(HashMap::new()),
+        }
     }
 
     pub async fn get_action(
@@ -28,13 +50,16 @@ impl ActionCache {
                 git_ref,
                 path,
             } => {
-                let cache_path = self.cache_dir.join(owner).join(repo).join(git_ref);
+                let commit = self
+                    .resolve_commit(owner, repo, git_ref, access_token)
+                    .await?;
+                let cache_path = self.cache_dir.join(owner).join(repo).join(&commit);
 
                 if !cache_path.exists() {
-                    self.download_tarball(owner, repo, git_ref, &cache_path, access_token)
+                    self.download_tarball(owner, repo, &commit, &cache_path, access_token)
                         .await?;
                 } else {
-                    debug!(owner, repo, git_ref, "action cache hit");
+                    debug!(owner, repo, git_ref, commit, "action cache hit");
                 }
 
                 if let Some(subpath) = path {
@@ -50,6 +75,59 @@ impl ActionCache {
         }
     }
 
+    /// The commit `git_ref` points to right now. A full commit SHA is used as is.
+    async fn resolve_commit(
+        &self,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+        access_token: &str,
+    ) -> Result<String> {
+        if is_commit_sha(git_ref) {
+            return Ok(git_ref.to_ascii_lowercase());
+        }
+
+        let action = format!("{owner}/{repo}@{git_ref}");
+        if let Some(commit) = self.lock_resolved().get(&action) {
+            return Ok(commit.clone());
+        }
+
+        let url = format!("{}/repos/{owner}/{repo}/commits/{git_ref}", self.api_url);
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("token {access_token}"))
+            .header("Accept", "application/vnd.github.sha")
+            .header("User-Agent", "chimera")
+            .send()
+            .await
+            .with_context(|| format!("resolving {action}"))?;
+
+        if !response.status().is_success() {
+            bail!("failed to resolve {action}: HTTP {}", response.status());
+        }
+
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("reading the commit {action} resolves to"))?;
+        let commit = body.trim();
+        if !is_commit_sha(commit) {
+            bail!("resolving {action} returned '{commit}' instead of a commit SHA");
+        }
+        let commit = commit.to_ascii_lowercase();
+
+        debug!(%action, %commit, "resolved action ref");
+        self.lock_resolved().insert(action, commit.clone());
+        Ok(commit)
+    }
+
+    fn lock_resolved(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.resolved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     async fn download_tarball(
         &self,
         owner: &str,
@@ -58,7 +136,7 @@ impl ActionCache {
         dest: &Path,
         access_token: &str,
     ) -> Result<()> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/tarball/{git_ref}");
+        let url = format!("{}/repos/{owner}/{repo}/tarball/{git_ref}", self.api_url);
         debug!(%url, "downloading action tarball");
 
         let response = self
@@ -122,6 +200,10 @@ impl ActionCache {
         .await
         .context("extract task panicked")?
     }
+}
+
+fn is_commit_sha(git_ref: &str) -> bool {
+    git_ref.len() == 40 && git_ref.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Returns true if the path contains `..` components that could escape the destination.
