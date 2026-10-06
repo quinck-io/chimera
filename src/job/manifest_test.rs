@@ -895,3 +895,15 @@ fn github_job_comes_from_the_system_variable() {
         "send-notification"
     );
 }
+
+#[test]
+fn github_token_comes_from_the_system_variable() {
+    let raw = json!({
+        "variables": { "system.github.token": { "value": "ghs_abc", "isSecret": true } },
+        "contextData": { "t": 2, "d": [{ "k": "github", "v": { "t": 2, "d": [] } }] }
+    });
+
+    let normalized = normalize_manifest(&raw);
+
+    assert_eq!(normalized["contextData"]["github"]["token"], "ghs_abc");
+}

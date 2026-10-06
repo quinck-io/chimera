@@ -73,15 +73,21 @@ pub fn normalize_manifest(raw: &Value) -> Value {
         .get("contextData")
         .map(normalize_context_data)
         .unwrap_or_else(|| json!({}));
-    if let Some(job) = obj
-        .get("variables")
-        .and_then(|v| v.get("system.github.job"))
-        .and_then(|v| v.get("value"))
-        && let Some(github) = context_data
-            .get_mut("github")
-            .and_then(|g| g.as_object_mut())
+    // Like the official runner, `github.job` and `github.token` come from system
+    // variables rather than the context data GitHub sends.
+    if let Some(github) = context_data
+        .get_mut("github")
+        .and_then(|g| g.as_object_mut())
     {
-        github.entry("job").or_insert_with(|| job.clone());
+        for key in ["job", "token"] {
+            if let Some(value) = obj
+                .get("variables")
+                .and_then(|v| v.get(format!("system.github.{key}")))
+                .and_then(|v| v.get("value"))
+            {
+                github.entry(key).or_insert_with(|| value.clone());
+            }
+        }
     }
     result.insert("contextData".into(), context_data);
 
