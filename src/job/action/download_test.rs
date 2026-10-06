@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::*;
 
@@ -25,28 +25,176 @@ fn make_test_tarball(files: &[(&str, &str)]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-#[tokio::test]
-async fn cache_hit_skips_download() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cache_dir = tmp.path().join("actions");
-    let action_dir = cache_dir.join("actions/checkout/v4");
-    std::fs::create_dir_all(&action_dir).unwrap();
-    std::fs::write(action_dir.join("action.yml"), "name: checkout").unwrap();
+const OLD_COMMIT: &str = "1111111111111111111111111111111111111111";
+const NEW_COMMIT: &str = "2222222222222222222222222222222222222222";
 
-    let cache = ActionCache::new(cache_dir, reqwest::Client::new());
-    let source = ActionSource::Remote {
+fn remote(git_ref: &str) -> ActionSource {
+    ActionSource::Remote {
         owner: "actions".into(),
         repo: "checkout".into(),
-        git_ref: "v4".into(),
+        git_ref: git_ref.into(),
         path: None,
-    };
+    }
+}
+
+fn cache_for(server: &wiremock::MockServer, cache_dir: PathBuf) -> ActionCache {
+    ActionCache::with_api_url(cache_dir, reqwest::Client::new(), server.uri())
+}
+
+fn cached_action(cache_dir: &Path, commit: &str, name: &str) -> PathBuf {
+    let action_dir = cache_dir.join("actions/checkout").join(commit);
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(action_dir.join("action.yml"), format!("name: {name}")).unwrap();
+    action_dir
+}
+
+async fn mount_ref(server: &wiremock::MockServer, git_ref: &str, commit: &str) {
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(format!(
+            "/repos/actions/checkout/commits/{git_ref}"
+        )))
+        .and(wiremock::matchers::header(
+            "accept",
+            "application/vnd.github.sha",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(commit))
+        .mount(server)
+        .await;
+}
+
+async fn mount_tarball(server: &wiremock::MockServer, commit: &str, name: &str) {
+    let tarball = make_test_tarball(&[("action.yml", &format!("name: {name}"))]);
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(format!(
+            "/repos/actions/checkout/tarball/{commit}"
+        )))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(tarball))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn commit_sha_ref_is_served_from_cache_without_resolving() {
+    let server = wiremock::MockServer::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = tmp.path().join("actions");
+    let action_dir = cached_action(&cache_dir, OLD_COMMIT, "checkout");
+    let cache = cache_for(&server, cache_dir);
 
     let result = cache
-        .get_action(&source, tmp.path(), "fake-token")
+        .get_action(&remote(OLD_COMMIT), tmp.path(), "fake-token")
         .await
         .unwrap();
+
     assert_eq!(result, action_dir);
-    assert!(result.join("action.yml").exists());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn moving_ref_that_still_points_to_the_cached_commit_is_a_cache_hit() {
+    let server = wiremock::MockServer::start().await;
+    mount_ref(&server, "v4", OLD_COMMIT).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = tmp.path().join("actions");
+    let action_dir = cached_action(&cache_dir, OLD_COMMIT, "checkout");
+    let cache = cache_for(&server, cache_dir);
+
+    let result = cache
+        .get_action(&remote("v4"), tmp.path(), "fake-token")
+        .await
+        .unwrap();
+
+    assert_eq!(result, action_dir);
+}
+
+#[tokio::test]
+async fn moving_ref_that_advanced_downloads_the_new_commit() {
+    let server = wiremock::MockServer::start().await;
+    mount_ref(&server, "v4", NEW_COMMIT).await;
+    mount_tarball(&server, NEW_COMMIT, "checkout-updated").await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = tmp.path().join("actions");
+    cached_action(&cache_dir, OLD_COMMIT, "checkout");
+    let cache = cache_for(&server, cache_dir.clone());
+
+    let result = cache
+        .get_action(&remote("v4"), tmp.path(), "fake-token")
+        .await
+        .unwrap();
+
+    assert_eq!(result, cache_dir.join("actions/checkout").join(NEW_COMMIT));
+    let metadata = std::fs::read_to_string(result.join("action.yml")).unwrap();
+    assert_eq!(metadata, "name: checkout-updated");
+}
+
+#[tokio::test]
+async fn a_ref_is_resolved_once_per_job() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(
+            "/repos/actions/checkout/commits/v4",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(OLD_COMMIT))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = tmp.path().join("actions");
+    cached_action(&cache_dir, OLD_COMMIT, "checkout");
+    let cache = cache_for(&server, cache_dir);
+
+    for _ in 0..3 {
+        cache
+            .get_action(&remote("v4"), tmp.path(), "fake-token")
+            .await
+            .unwrap();
+    }
+
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn unresolvable_ref_fails() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(
+            "/repos/actions/checkout/commits/missing",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(422))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = cache_for(&server, tmp.path().join("actions"));
+
+    let result = cache
+        .get_action(&remote("missing"), tmp.path(), "fake-token")
+        .await;
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("actions/checkout@missing"), "{error}");
+}
+
+#[tokio::test]
+async fn resolution_must_return_a_commit_sha() {
+    let server = wiremock::MockServer::start().await;
+    mount_ref(&server, "v4", "<html>not a sha</html>").await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = cache_for(&server, tmp.path().join("actions"));
+
+    let result = cache
+        .get_action(&remote("v4"), tmp.path(), "fake-token")
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn commit_sha_detection() {
+    assert!(is_commit_sha(OLD_COMMIT));
+    assert!(is_commit_sha("ABCDEF0123456789abcdef0123456789abcdef01"));
+    assert!(!is_commit_sha("v4"));
+    assert!(!is_commit_sha("abc1234"));
+    assert!(!is_commit_sha("g".repeat(40).as_str()));
 }
 
 #[tokio::test]
@@ -74,41 +222,15 @@ async fn tarball_extraction() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cache_dir = tmp.path().join("actions");
+    let dest = tmp.path().join("actions/test-owner/test-action/v1");
+    let cache = cache_for(&mock_server, tmp.path().join("actions"));
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .unwrap();
-
-    let cache = ActionCache {
-        cache_dir: cache_dir.clone(),
-        client,
-    };
-
-    // Override the download URL by manually calling download_tarball
-    let dest = cache_dir.join("test-owner/test-action/v1");
-    let url = format!(
-        "{}/repos/test-owner/test-action/tarball/v1",
-        mock_server.uri()
-    );
-
-    let response = cache
-        .client
-        .get(&url)
-        .header("Authorization", "token fake-token")
-        .header("User-Agent", "chimera")
-        .send()
+    cache
+        .download_tarball("test-owner", "test-action", "v1", &dest, "fake-token")
         .await
         .unwrap();
 
-    let bytes = response.bytes().await.unwrap();
-    std::fs::create_dir_all(&dest).unwrap();
-    extract_tarball(&bytes, &dest).unwrap();
-
     assert!(dest.join("action.yml").exists());
-    assert!(dest.join("index.js").exists());
-
     let content = std::fs::read_to_string(dest.join("index.js")).unwrap();
     assert!(content.contains("console.log"));
 }
