@@ -136,7 +136,10 @@ fn run_status(root: PathBuf) -> Result<()> {
         && let Ok(snapshot) = read_state_file(&state_path)
         && is_process_alive(snapshot.pid)
     {
-        print!("{}", format_status_display(&snapshot));
+        print!(
+            "{}",
+            format_status_display(&snapshot, env!("CARGO_PKG_VERSION"))
+        );
         return Ok(());
     }
 

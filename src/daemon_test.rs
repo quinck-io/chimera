@@ -113,6 +113,7 @@ fn state_file_roundtrip() {
 
     let snapshot = StateSnapshot {
         pid: 12345,
+        version: Some("1.0.0".into()),
         started_at: now,
         runners,
     };
@@ -137,6 +138,7 @@ fn state_file_atomic_write() {
 
     let snapshot = StateSnapshot {
         pid: 1,
+        version: Some("1.0.0".into()),
         started_at: Utc::now(),
         runners: HashMap::new(),
     };
@@ -171,6 +173,7 @@ fn state_file_with_job_info() {
 
     let snapshot = StateSnapshot {
         pid: 42,
+        version: Some("1.0.0".into()),
         started_at: now,
         runners,
     };
@@ -259,6 +262,69 @@ fn is_process_alive_for_dead_process() {
 }
 
 // --- Status display tests ---
+
+fn snapshot_with_version(version: Option<&str>) -> StateSnapshot {
+    StateSnapshot {
+        pid: 7,
+        version: version.map(str::to_string),
+        started_at: Utc::now(),
+        runners: HashMap::new(),
+    }
+}
+
+#[test]
+fn status_display_shows_daemon_version() {
+    let snapshot = snapshot_with_version(Some("1.2.3"));
+
+    let out = format_status_display(&snapshot, "1.2.3");
+
+    assert!(
+        out.starts_with("Daemon: running v1.2.3 (pid 7"),
+        "got: {out}"
+    );
+    assert!(!out.contains("restart"), "got: {out}");
+}
+
+#[test]
+fn status_display_flags_version_mismatch() {
+    let snapshot = snapshot_with_version(Some("1.2.3"));
+
+    let out = format_status_display(&snapshot, "1.3.0");
+
+    assert!(out.contains("v1.2.3"), "got: {out}");
+    assert!(
+        out.contains("installed binary is v1.3.0, restart to apply"),
+        "got: {out}"
+    );
+}
+
+#[test]
+fn status_display_handles_unknown_daemon_version() {
+    let snapshot = snapshot_with_version(None);
+
+    let out = format_status_display(&snapshot, "1.3.0");
+
+    assert!(
+        out.starts_with("Daemon: running unknown (pid 7"),
+        "got: {out}"
+    );
+    assert!(out.contains("restart to apply"), "got: {out}");
+}
+
+#[test]
+fn state_file_without_version_still_parses() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("state.json");
+    std::fs::write(
+        &path,
+        r#"{"pid":1,"started_at":"2026-01-01T00:00:00Z","runners":{}}"#,
+    )
+    .unwrap();
+
+    let loaded = read_state_file(&path).unwrap();
+
+    assert_eq!(loaded.version, None);
+}
 
 #[test]
 fn format_runner_status_idle() {

@@ -170,6 +170,7 @@ impl DaemonState {
         let runners = self.runners.read().await;
         StateSnapshot {
             pid: self.pid,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
             started_at: self.started_at,
             runners: runners.clone(),
         }
@@ -181,6 +182,9 @@ impl DaemonState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StateSnapshot {
     pub pid: u32,
+    /// Absent in state files written by daemons predating this field.
+    #[serde(default)]
+    pub version: Option<String>,
     pub started_at: DateTime<Utc>,
     pub runners: HashMap<String, RunnerStatus>,
 }
@@ -414,15 +418,25 @@ impl Daemon {
 
 // --- Status display ---
 
-pub fn format_status_display(snapshot: &StateSnapshot) -> String {
+/// `installed_version` is the version of the binary running `status`, which can
+/// differ from the daemon's after an upgrade without a restart.
+pub fn format_status_display(snapshot: &StateSnapshot, installed_version: &str) -> String {
     let mut out = String::new();
 
+    let daemon_version = snapshot.version.as_deref();
+    let version_label = daemon_version.map_or("unknown".to_string(), |v| format!("v{v}"));
     let uptime = Utc::now() - snapshot.started_at;
     out.push_str(&format!(
-        "Daemon: running (pid {}, uptime {})\n",
+        "Daemon: running {version_label} (pid {}, uptime {})",
         snapshot.pid,
         format_duration(uptime),
     ));
+    if daemon_version != Some(installed_version) {
+        out.push_str(&format!(
+            " — installed binary is v{installed_version}, restart to apply"
+        ));
+    }
+    out.push('\n');
     out.push('\n');
     out.push_str("Runners:\n");
 
