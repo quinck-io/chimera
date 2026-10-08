@@ -24,7 +24,6 @@ fn make_test_workspace(tmp: &tempfile::TempDir) -> Workspace {
 fn make_composite_metadata(steps_yaml: &str) -> ActionMetadata {
     let steps: Vec<serde_yaml::Value> = serde_yaml::from_str(steps_yaml).unwrap();
     ActionMetadata {
-        name: Some("Composite Test".into()),
         inputs: HashMap::new(),
 
         runs: ActionRuns {

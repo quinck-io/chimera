@@ -79,7 +79,6 @@ pub fn build_base_env(
             ("run_number", "GITHUB_RUN_NUMBER"),
             ("run_attempt", "GITHUB_RUN_ATTEMPT"),
             ("job", "GITHUB_JOB"),
-            ("action", "GITHUB_ACTION"),
             ("actor", "GITHUB_ACTOR"),
             ("repository", "GITHUB_REPOSITORY"),
             ("repository_owner", "GITHUB_REPOSITORY_OWNER"),

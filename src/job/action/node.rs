@@ -60,11 +60,6 @@ pub async fn run_node_action(
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
     env.extend(build_action_inputs(metadata, step, &expr_ctx));
 
-    // Set action-specific env vars
-    if let Some(name) = &metadata.name {
-        env.insert("GITHUB_ACTION".into(), name.clone());
-    }
-
     // For post steps: inject STATE_<name> env vars from saved state
     if entry_point == "post" {
         let action_ctx = step

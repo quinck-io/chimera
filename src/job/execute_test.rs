@@ -680,3 +680,60 @@ fn path_additions_put_the_latest_first() {
     let paths: Vec<String> = ["/a", "/b", "/a", "/c"].map(String::from).into();
     assert_eq!(newest_first(&paths), ["/c", "/a", "/b"]);
 }
+
+fn step_env_github_action(step: &Step) -> Option<String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(
+        &tmp.path().join("work"),
+        &tmp.path().join("tmp"),
+        &tmp.path().join("tool-cache"),
+        "test-runner",
+        "owner/repo",
+    )
+    .unwrap();
+    let state = JobState::new(
+        SecretMasker::default(),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
+
+    build_step_env(step, &state, &ws, &HashMap::new())
+        .get("GITHUB_ACTION")
+        .cloned()
+}
+
+#[test]
+fn github_action_is_the_step_context_name() {
+    let mut step = make_step("abc-123", "true");
+    step.context_name = Some("__aws-actions_configure-aws-credentials".into());
+
+    let action = step_env_github_action(&step);
+
+    assert_eq!(
+        action.as_deref(),
+        Some("__aws-actions_configure-aws-credentials")
+    );
+}
+
+#[test]
+fn github_action_falls_back_to_step_id() {
+    let step = make_step("abc-123", "true");
+
+    let action = step_env_github_action(&step);
+
+    assert_eq!(action.as_deref(), Some("abc-123"));
+}
+
+#[test]
+fn github_action_of_pre_and_post_steps_matches_main_step() {
+    let mut pre = make_step("pre", "true");
+    pre.context_name = Some("__actions_checkout_pre".into());
+    let mut post = make_step("post", "true");
+    post.context_name = Some("__actions_checkout_post".into());
+
+    let pre_action = step_env_github_action(&pre);
+    let post_action = step_env_github_action(&post);
+
+    assert_eq!(pre_action.as_deref(), Some("__actions_checkout"));
+    assert_eq!(post_action.as_deref(), Some("__actions_checkout"));
+}

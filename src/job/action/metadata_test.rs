@@ -28,7 +28,6 @@ runs:
     .unwrap();
 
     let metadata = load_action_metadata(tmp.path()).unwrap();
-    assert_eq!(metadata.name.as_deref(), Some("Test Action"));
     assert!(metadata.runs.is_node());
     assert!(!metadata.runs.is_composite());
     assert!(!metadata.runs.is_docker());
@@ -231,6 +230,5 @@ runs:
     .unwrap();
 
     let metadata = load_action_metadata(tmp.path()).unwrap();
-    assert_eq!(metadata.name.as_deref(), Some("YAML Extension"));
     assert!(metadata.runs.is_node());
 }

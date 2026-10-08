@@ -44,7 +44,6 @@ fn split_args_mixed_quotes() {
 
 fn make_docker_metadata(image: &str) -> ActionMetadata {
     ActionMetadata {
-        name: None,
         inputs: HashMap::new(),
         runs: ActionRuns {
             using: ActionRuntime::Docker,
@@ -106,7 +105,6 @@ fn resolve_image_registry_with_prefix() {
 #[test]
 fn resolve_image_missing_field() {
     let m = ActionMetadata {
-        name: None,
         inputs: HashMap::new(),
         runs: ActionRuns {
             using: ActionRuntime::Docker,
@@ -136,7 +134,6 @@ fn make_metadata_with_entrypoints(
     args: Option<Vec<String>>,
 ) -> ActionMetadata {
     ActionMetadata {
-        name: None,
         inputs: HashMap::new(),
         runs: ActionRuns {
             using: ActionRuntime::Docker,

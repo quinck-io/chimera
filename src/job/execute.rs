@@ -488,6 +488,7 @@ pub fn build_step_env(
 ) -> HashMap<String, String> {
     let mut env = base_env.clone();
     env.extend(job_state.env.clone());
+    env.insert("GITHUB_ACTION".into(), action_context_name(step).into());
     if let Some(step_env) = &step.environment {
         for (k, v) in step_env {
             let ctx = ExprContext::new(&env, job_state, false, false);
@@ -528,6 +529,19 @@ pub fn build_step_env(
     }
 
     env
+}
+
+/// The step's identity as the official runner exposes it in `GITHUB_ACTION`: the step
+/// `id` or the generated `__owner_repo`/`__run` name. Pre and post steps report their
+/// main step's name, since actions use it to recognise their own steps.
+fn action_context_name(step: &Step) -> &str {
+    let Some(ctx_name) = step.context_name.as_deref() else {
+        return &step.id;
+    };
+    ctx_name
+        .strip_suffix("_post")
+        .or_else(|| ctx_name.strip_suffix("_pre"))
+        .unwrap_or(ctx_name)
 }
 
 /// Returns the PATH additions latest first, each at its latest position only.

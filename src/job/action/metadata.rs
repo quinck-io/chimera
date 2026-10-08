@@ -7,7 +7,6 @@ use serde::de::Deserializer;
 
 #[derive(Debug, Deserialize)]
 pub struct ActionMetadata {
-    pub name: Option<String>,
     #[serde(default)]
     pub inputs: HashMap<String, ActionInput>,
     pub runs: ActionRuns,

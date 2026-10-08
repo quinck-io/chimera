@@ -41,7 +41,6 @@ fn make_action_step(name: &str) -> Step {
 
 fn make_node_metadata(main_script: &str) -> ActionMetadata {
     ActionMetadata {
-        name: Some("Test Action".into()),
         inputs: HashMap::new(),
 
         runs: crate::job::action::metadata::ActionRuns {
