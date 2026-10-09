@@ -179,3 +179,67 @@ runs:
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+/// GitHub reads every `with:` and `env:` value of a composite sub-step as a string, so
+/// an unquoted `true` or `3` reaches the nested action like its quoted form.
+#[tokio::test]
+async fn composite_action_passes_non_string_scalars_as_strings() {
+    let env = TestEnv::setup().await;
+    let actions_dir = env.workspace.workspace_dir().join(".github/actions");
+    std::fs::create_dir_all(actions_dir.join("inner")).unwrap();
+    std::fs::write(
+        actions_dir.join("inner/action.yml"),
+        r#"
+name: 'Inner'
+description: 'Checks the inputs it receives'
+inputs:
+  cache:
+    default: 'false'
+  retries:
+    default: '1'
+runs:
+  using: 'composite'
+  steps:
+    - run: |
+        test "${{ inputs.cache }}" = "true" || exit 1
+        test "${{ inputs.retries }}" = "3" || exit 1
+      shell: bash
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(actions_dir.join("outer")).unwrap();
+    std::fs::write(
+        actions_dir.join("outer/action.yml"),
+        r#"
+name: 'Outer'
+description: 'Passes unquoted scalars down'
+runs:
+  using: 'composite'
+  steps:
+    - uses: ./.github/actions/inner
+      with:
+        cache: true
+        retries: 3
+    - run: |
+        test "$VERBOSE" = "false" || exit 1
+        test "$PORT" = "8080" || exit 1
+      shell: bash
+      env:
+        VERBOSE: false
+        PORT: 8080
+"#,
+    )
+    .unwrap();
+
+    let manifest = manifest_with_steps(
+        vec![composite_step(
+            "outer",
+            ".github/actions/outer",
+            serde_json::json!({}),
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}

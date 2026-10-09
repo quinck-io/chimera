@@ -182,6 +182,37 @@ runs:
 }
 
 #[test]
+fn non_string_scalars_read_as_strings() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("action.yml"),
+        r#"
+name: 'Scalars'
+inputs:
+  cache:
+    default: true
+  retries:
+    default: 3
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    VERBOSE: false
+    PORT: 8080
+"#,
+    )
+    .unwrap();
+
+    let metadata = load_action_metadata(tmp.path()).unwrap();
+
+    assert_eq!(metadata.inputs["cache"].default.as_deref(), Some("true"));
+    assert_eq!(metadata.inputs["retries"].default.as_deref(), Some("3"));
+    let env = metadata.runs.env.unwrap();
+    assert_eq!(env["VERBOSE"], "false");
+    assert_eq!(env["PORT"], "8080");
+}
+
+#[test]
 fn pre_and_post_scripts() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(

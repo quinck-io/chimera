@@ -255,3 +255,16 @@ async fn recursion_depth_limit() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("recursion depth"));
 }
+
+#[test]
+fn scalar_to_string_reads_yaml_scalars_like_github() {
+    let parse = |yaml: &str| scalar_to_string(&serde_yaml::from_str(yaml).unwrap());
+
+    assert_eq!(parse("text").as_deref(), Some("text"));
+    assert_eq!(parse("'true'").as_deref(), Some("true"));
+    assert_eq!(parse("true").as_deref(), Some("true"));
+    assert_eq!(parse("false").as_deref(), Some("false"));
+    assert_eq!(parse("3").as_deref(), Some("3"));
+    assert_eq!(parse("1.5").as_deref(), Some("1.5"));
+    assert_eq!(parse("[a, b]"), None);
+}

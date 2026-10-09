@@ -25,6 +25,17 @@ fn ykey(s: &str) -> serde_yaml::Value {
     serde_yaml::Value::String(s.into())
 }
 
+/// GitHub reads `with:` and `env:` values as strings, so an unquoted `true` or `3`
+/// must arrive as `"true"` or `"3"` instead of being dropped.
+fn scalar_to_string(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_composite_action<'a>(
     action_dir: &'a Path,
@@ -212,9 +223,9 @@ async fn run_nested_script(
     let mut step_env = env.clone();
     if let Some(serde_yaml::Value::Mapping(env_map)) = step_map.get(ykey("env")) {
         for (k, v) in env_map {
-            if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+            if let (Some(key), Some(val)) = (k.as_str(), scalar_to_string(v)) {
                 let env_ctx = ExprContext::new(&step_env, job_state, false, false);
-                let resolved_val = crate::job::expression::resolve_template(val, &env_ctx);
+                let resolved_val = crate::job::expression::resolve_template(&val, &env_ctx);
                 step_env.insert(key.to_string(), resolved_val);
             }
         }
@@ -310,8 +321,8 @@ async fn run_nested_action(
     let mut inputs = HashMap::new();
     if let Some(serde_yaml::Value::Mapping(with_map)) = step_map.get(ykey("with")) {
         for (k, v) in with_map {
-            if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-                inputs.insert(key.to_string(), val.to_string());
+            if let (Some(key), Some(val)) = (k.as_str(), scalar_to_string(v)) {
+                inputs.insert(key.to_string(), val);
             }
         }
     }
