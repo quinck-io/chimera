@@ -8,13 +8,13 @@ use chimera::docker::container::{JobContainerSpec, ServiceContainerSpec};
 use chimera::docker::resources::{JobDockerResources, SetupParams};
 use chimera::github::auth::TokenManager;
 use chimera::job::action::ActionCache;
+use chimera::job::cancel::JobCancel;
 use chimera::job::client::JobClient;
 use chimera::job::execute::run_all_steps;
 use chimera::job::schema::JobManifest;
 use chimera::job::workspace::Workspace;
 use chimera::runner::env::{build_base_env, build_container_env};
 
-use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -72,6 +72,15 @@ impl TestEnv {
         &self,
         manifest: &JobManifest,
     ) -> anyhow::Result<(chimera::job::client::JobConclusion, HashMap<String, String>)> {
+        self.run_with_cancel(manifest, JobCancel::new()).await
+    }
+
+    /// Run a manifest in host mode with a cancel the test controls.
+    pub async fn run_with_cancel(
+        &self,
+        manifest: &JobManifest,
+        cancel: JobCancel,
+    ) -> anyhow::Result<(chimera::job::client::JobConclusion, HashMap<String, String>)> {
         let base_env = build_base_env(manifest, &self.workspace, "test-runner");
         let action_cache = ActionCache::new(self.actions_dir.clone(), reqwest::Client::new());
 
@@ -83,7 +92,7 @@ impl TestEnv {
             "test-runner",
             &action_cache,
             "fake-token",
-            CancellationToken::new(),
+            cancel,
             None,
             &chimera::node::NodeRuntimes::single("node".into()),
             None,
@@ -111,7 +120,7 @@ impl TestEnv {
             "test-runner",
             &action_cache,
             "fake-token",
-            CancellationToken::new(),
+            JobCancel::new(),
             Some(docker_resources),
             &node_runtimes,
             None,

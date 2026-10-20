@@ -1,6 +1,7 @@
 use super::*;
 use crate::github::auth::TokenManager;
 use crate::job::action::ActionCache;
+use crate::job::cancel::JobCancel;
 use crate::job::client::JobConclusion;
 use crate::job::commands::ALLOW_UNSECURE_COMMANDS_ENV;
 use crate::job::schema::{StepReference, StepReferenceKind};
@@ -367,7 +368,7 @@ async fn continue_on_error_works() {
         "test-runner",
         &action_cache,
         "fake-token",
-        CancellationToken::new(),
+        JobCancel::new(),
         None,
         &crate::node::NodeRuntimes::single("node".into()),
         None,
@@ -426,7 +427,7 @@ async fn failure_stops_remaining_steps() {
         "test-runner",
         &action_cache,
         "fake-token",
-        CancellationToken::new(),
+        JobCancel::new(),
         None,
         &crate::node::NodeRuntimes::single("node".into()),
         None,
@@ -478,7 +479,7 @@ async fn secrets_from_context_data_resolved() {
         "test-runner",
         &action_cache,
         "fake-token",
-        CancellationToken::new(),
+        JobCancel::new(),
         None,
         &crate::node::NodeRuntimes::single("node".into()),
         None,
@@ -529,9 +530,9 @@ async fn cancel_token_returns_cancelled_between_steps() {
     let base_env = HashMap::new();
     let action_cache = ActionCache::new(tmp.path().join("actions"), reqwest::Client::new());
 
-    let cancel_token = CancellationToken::new();
+    let cancel = JobCancel::new();
     // Cancel immediately — step 1 may run but the conclusion should be "cancelled"
-    cancel_token.cancel();
+    cancel.force();
 
     let result = run_all_steps(
         &manifest,
@@ -541,7 +542,7 @@ async fn cancel_token_returns_cancelled_between_steps() {
         "test-runner",
         &action_cache,
         "fake-token",
-        cancel_token,
+        cancel,
         None,
         &crate::node::NodeRuntimes::single("node".into()),
         None,

@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::JobClient;
 use super::action::{ActionCache, load_action_metadata, resolve_action};
+use super::cancel::JobCancel;
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
 use super::commands::CommandPolicy;
 use super::expression::ExprContext;
@@ -681,7 +682,7 @@ pub async fn run_all_steps(
     runner_name: &str,
     action_cache: &ActionCache,
     access_token: &str,
-    cancel_token: CancellationToken,
+    cancel: JobCancel,
     docker_resources: Option<&JobDockerResources>,
     node_runtimes: &NodeRuntimes,
     feed_sender: Option<&FeedSender>,
@@ -772,7 +773,7 @@ pub async fn run_all_steps(
         trackers = pre_trackers;
 
         for pre_step in &pre_steps {
-            if cancel_token.is_cancelled() {
+            if cancel.is_requested() {
                 job_cancelled = true;
             }
 
@@ -806,6 +807,13 @@ pub async fn run_all_steps(
                 continue;
             }
 
+            let step_token = cancel.step_token(survives_cancel(
+                pre_step,
+                base_env,
+                &mut job_state,
+                job_failed,
+                job_cancelled,
+            ));
             let start_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_started();
             report_step_started(
@@ -840,7 +848,7 @@ pub async fn run_all_steps(
                 runner_name,
                 action_cache,
                 access_token,
-                &cancel_token,
+                &step_token,
                 docker_resources,
                 node_runtimes,
             )
@@ -900,7 +908,7 @@ pub async fn run_all_steps(
     for (idx, step) in manifest.steps.iter().enumerate() {
         let idx = idx + pre_step_count;
         // Check for cancellation between steps
-        if cancel_token.is_cancelled() {
+        if cancel.is_requested() {
             job_cancelled = true;
         }
 
@@ -945,6 +953,13 @@ pub async fn run_all_steps(
             continue;
         }
 
+        let step_token = cancel.step_token(survives_cancel(
+            step,
+            base_env,
+            &mut job_state,
+            job_failed,
+            job_cancelled,
+        ));
         let start_time = format_timeline_timestamp(Utc::now());
         trackers[idx].mark_started();
 
@@ -980,7 +995,7 @@ pub async fn run_all_steps(
             runner_name,
             action_cache,
             access_token,
-            &cancel_token,
+            &step_token,
             docker_resources,
             node_runtimes,
         )
@@ -1104,6 +1119,10 @@ pub async fn run_all_steps(
         }
 
         for post_step in &post_steps {
+            if cancel.is_requested() {
+                job_cancelled = true;
+            }
+
             let tracker_idx = trackers
                 .iter()
                 .position(|t| t.id == post_step.id)
@@ -1136,6 +1155,13 @@ pub async fn run_all_steps(
                 continue;
             }
 
+            let step_token = cancel.step_token(survives_cancel(
+                post_step,
+                base_env,
+                &mut job_state,
+                job_failed,
+                job_cancelled,
+            ));
             let start_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_started();
             report_step_started(
@@ -1170,7 +1196,7 @@ pub async fn run_all_steps(
                 runner_name,
                 action_cache,
                 access_token,
-                &cancel_token,
+                &step_token,
                 docker_resources,
                 node_runtimes,
             )
@@ -1246,7 +1272,9 @@ pub async fn run_all_steps(
         !reveals_secret
     });
 
-    let conclusion = if job_cancelled {
+    // A cancel that arrives while only surviving steps run cancels no step, but
+    // the job is still cancelled.
+    let conclusion = if job_cancelled || cancel.is_requested() {
         JobConclusion::Cancelled
     } else if job_failed {
         JobConclusion::Failed
@@ -1254,6 +1282,25 @@ pub async fn run_all_steps(
         JobConclusion::Succeeded
     };
     Ok((conclusion, job_state.outputs.clone()))
+}
+
+/// Whether a step's `if:` still holds once the job is cancelled. Like the official
+/// runner, a cancel only stops a step whose condition no longer holds, so cleanup
+/// guarded by `always()` or `cancelled()` runs to the end.
+fn survives_cancel(
+    step: &Step,
+    base_env: &HashMap<String, String>,
+    job_state: &mut JobState,
+    job_failed: bool,
+    job_cancelled: bool,
+) -> bool {
+    update_job_status(&mut job_state.context_data, job_failed, true);
+    let survives = {
+        let ctx = ExprContext::new(base_env, job_state, job_failed, true);
+        super::expression::evaluate_condition(step.condition.as_deref(), &ctx)
+    };
+    update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
+    survives
 }
 
 /// Masks the job's secrets and its access token, which every step receives as

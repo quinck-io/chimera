@@ -68,6 +68,17 @@ struct JobRequestBody {
 struct CancellationBody {
     #[serde(rename = "jobId")]
     job_id: String,
+    #[serde(default)]
+    timeout: Option<String>,
+}
+
+/// A JobCancellation message: which job to stop, and how long the job may take
+/// to wind down before it is killed.
+#[derive(Debug, PartialEq)]
+pub struct JobCancellation {
+    pub job_id: String,
+    /// `None` when the message has no timeout or one that cannot be read.
+    pub timeout: Option<Duration>,
 }
 
 impl BrokerMessage {
@@ -78,16 +89,39 @@ impl BrokerMessage {
         Ok((req.runner_request_id, req.run_service_url))
     }
 
-    /// Parse the body of a JobCancellation message into the job ID.
-    pub fn parse_cancellation_job_id(&self) -> Result<String> {
+    /// Parse the body of a JobCancellation message.
+    pub fn parse_cancellation(&self) -> Result<JobCancellation> {
         let body = self
             .body
             .as_deref()
             .context("cancellation message has no body")?;
         let parsed: CancellationBody =
             serde_json::from_str(body).context("parsing cancellation body")?;
-        Ok(parsed.job_id)
+        Ok(JobCancellation {
+            job_id: parsed.job_id,
+            timeout: parsed.timeout.as_deref().and_then(parse_timespan),
+        })
     }
+}
+
+/// Parse a .NET `TimeSpan` the way the broker writes one: `[d.]hh:mm:ss[.fffffff]`.
+fn parse_timespan(text: &str) -> Option<Duration> {
+    let mut parts = text.split(':');
+    let (day_hours, minutes, seconds) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let (days, hours) = match day_hours.split_once('.') {
+        Some((days, hours)) => (days.parse::<u64>().ok()?, hours.parse::<u64>().ok()?),
+        None => (0, day_hours.parse::<u64>().ok()?),
+    };
+    let minutes = minutes.parse::<u64>().ok()?;
+    let seconds = seconds
+        .parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s >= 0.0)?;
+    let whole = ((days * 24 + hours) * 60 + minutes) * 60;
+    Some(Duration::from_secs(whole) + Duration::from_secs_f64(seconds))
 }
 
 #[derive(Debug, thiserror::Error)]

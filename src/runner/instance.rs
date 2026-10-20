@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::job::cancel::JobCancel;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::cache::scope::{CacheScope, ScopeRegistry};
@@ -176,8 +176,8 @@ impl Runner {
             error!(error = %e, "failed to ack job");
         }
 
-        let cancel_token = CancellationToken::new();
-        let poller_handle = spawn_cancel_poller(broker, cancel_token.clone());
+        let cancel = JobCancel::new();
+        let poller_handle = spawn_cancel_poller(broker, cancel.clone());
 
         let result = self
             .execute_job(
@@ -185,12 +185,12 @@ impl Runner {
                 token_manager,
                 &runner_request_id,
                 &run_service_url,
-                cancel_token.clone(),
+                cancel.clone(),
             )
             .await;
 
-        // Stop the cancel poller regardless of how the job ended
-        cancel_token.cancel();
+        // Stop the cancel poller and its grace timer regardless of how the job ended
+        cancel.force();
         let _ = poller_handle.await;
 
         if let Err(e) = result {
@@ -204,7 +204,7 @@ impl Runner {
         token_manager: Arc<TokenManager>,
         runner_request_id: &str,
         run_service_url: &str,
-        cancel_token: CancellationToken,
+        cancel: JobCancel,
     ) -> Result<()> {
         info!(runner_request_id, run_service_url, "acquiring job");
 
@@ -263,7 +263,7 @@ impl Runner {
         // Otherwise GitHub hangs waiting for a completion that never comes.
         let job_client = Arc::new(job_client);
         let result = self
-            .run_job(&manifest, &job_client, client, cancel_token, &repo)
+            .run_job(&manifest, &job_client, client, cancel, &repo)
             .await;
 
         if let Err(ref e) = result {
@@ -289,7 +289,7 @@ impl Runner {
         manifest: &JobManifest,
         job_client: &Arc<JobClient>,
         client: &reqwest::Client,
-        cancel_token: CancellationToken,
+        cancel: JobCancel,
         repo: &str,
     ) -> Result<()> {
         let workspace = Workspace::create(
@@ -363,7 +363,7 @@ impl Runner {
                 manifest,
                 job_client,
                 client,
-                cancel_token,
+                cancel,
                 &workspace,
                 &node_runtimes,
                 &mut docker_resources,
@@ -388,7 +388,7 @@ impl Runner {
         manifest: &JobManifest,
         job_client: &Arc<JobClient>,
         client: &reqwest::Client,
-        cancel_token: CancellationToken,
+        cancel: JobCancel,
         workspace: &Workspace,
         node_runtimes: &crate::node::NodeRuntimes,
         docker_resources: &mut Option<JobDockerResources>,
@@ -455,7 +455,7 @@ impl Runner {
             &self.name,
             &action_cache,
             &github_token,
-            cancel_token.clone(),
+            cancel.clone(),
             docker_resources.as_ref(),
             node_runtimes,
             live_feed.as_ref().map(|f| f.sender()),
@@ -469,7 +469,7 @@ impl Runner {
 
         let (mut conclusion, job_outputs) = job_result.context("running job steps")?;
 
-        if cancel_token.is_cancelled() && conclusion != JobConclusion::Cancelled {
+        if cancel.is_requested() && conclusion != JobConclusion::Cancelled {
             conclusion = JobConclusion::Cancelled;
         }
 

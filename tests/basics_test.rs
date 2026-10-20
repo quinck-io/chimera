@@ -358,8 +358,8 @@ async fn cancel_token_cancels_job() {
         env.workspace.runner_temp().join("actions"),
         reqwest::Client::new(),
     );
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    cancel_token.cancel();
+    let cancel = chimera::job::cancel::JobCancel::new();
+    cancel.force();
 
     let (conclusion, _) = chimera::job::execute::run_all_steps(
         &manifest,
@@ -369,7 +369,7 @@ async fn cancel_token_cancels_job() {
         "test-runner",
         &action_cache,
         "fake-token",
-        cancel_token,
+        cancel,
         None,
         &chimera::node::NodeRuntimes::single("node".into()),
         None,

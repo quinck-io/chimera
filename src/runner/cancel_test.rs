@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::github::auth::TokenManager;
 use crate::github::broker::BrokerClient;
 
-use super::spawn_cancel_poller;
+use crate::job::cancel::JobCancel;
+
+use super::{cancel_grace, spawn_cancel_poller};
 
 async fn setup() -> (MockServer, Arc<TokenManager>, watch::Sender<bool>) {
     let mock_server = MockServer::start().await;
@@ -59,14 +60,14 @@ async fn cancel_poller_triggers_token_on_cancellation() {
         tm,
     );
 
-    let cancel_token = CancellationToken::new();
-    let handle = spawn_cancel_poller(&broker, cancel_token.clone());
+    let cancel = JobCancel::new();
+    let handle = spawn_cancel_poller(&broker, cancel.clone());
 
-    tokio::time::timeout(Duration::from_secs(5), cancel_token.cancelled())
+    tokio::time::timeout(Duration::from_secs(5), cancel.requested())
         .await
-        .expect("cancel token should be triggered within 5s");
+        .expect("cancel should be requested within 5s");
 
-    assert!(cancel_token.is_cancelled());
+    assert!(cancel.is_requested());
     let _ = handle.await;
 }
 
@@ -87,13 +88,31 @@ async fn cancel_poller_stops_when_token_cancelled_externally() {
         tm,
     );
 
-    let cancel_token = CancellationToken::new();
-    let handle = spawn_cancel_poller(&broker, cancel_token.clone());
+    let cancel = JobCancel::new();
+    let handle = spawn_cancel_poller(&broker, cancel.clone());
 
-    cancel_token.cancel();
+    cancel.force();
 
     tokio::time::timeout(Duration::from_secs(5), handle)
         .await
         .expect("poller should exit within 5s")
         .expect("poller task should not panic");
+}
+
+#[test]
+fn cancel_grace_is_the_timeout_less_15_seconds() {
+    assert_eq!(
+        cancel_grace(Some(Duration::from_secs(300))),
+        Duration::from_secs(285)
+    );
+}
+
+#[test]
+fn cancel_grace_gives_at_least_45_seconds() {
+    assert_eq!(cancel_grace(Some(Duration::ZERO)), Duration::from_secs(45));
+}
+
+#[test]
+fn cancel_grace_defaults_to_five_minutes_less_15_seconds() {
+    assert_eq!(cancel_grace(None), Duration::from_secs(285));
 }

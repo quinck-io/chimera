@@ -278,3 +278,55 @@ async fn poll_401_returns_error() {
         "expected BrokerError::Unauthorized, got: {err}"
     );
 }
+
+fn cancellation_message(body: &str) -> BrokerMessage {
+    BrokerMessage {
+        message_id: 1,
+        message_type: MessageType::JobCancellation,
+        body: Some(body.into()),
+    }
+}
+
+#[test]
+fn cancellation_carries_job_id_and_timeout() {
+    let msg = cancellation_message(r#"{"jobId":"job-1","timeout":"00:05:00"}"#);
+
+    let cancellation = msg.parse_cancellation().unwrap();
+
+    assert_eq!(
+        cancellation,
+        JobCancellation {
+            job_id: "job-1".into(),
+            timeout: Some(Duration::from_secs(300)),
+        }
+    );
+}
+
+#[test]
+fn cancellation_without_timeout_has_none() {
+    let msg = cancellation_message(r#"{"jobId":"job-1"}"#);
+
+    assert_eq!(msg.parse_cancellation().unwrap().timeout, None);
+}
+
+#[test]
+fn cancellation_with_unreadable_timeout_has_none() {
+    let msg = cancellation_message(r#"{"jobId":"job-1","timeout":"soon"}"#);
+
+    assert_eq!(msg.parse_cancellation().unwrap().timeout, None);
+}
+
+#[test]
+fn timespan_parses_days_and_fractions() {
+    assert_eq!(parse_timespan("00:05:00"), Some(Duration::from_secs(300)));
+    assert_eq!(
+        parse_timespan("1.02:03:04"),
+        Some(Duration::from_secs(93_784))
+    );
+    assert_eq!(
+        parse_timespan("00:00:01.5"),
+        Some(Duration::from_millis(1500))
+    );
+    assert_eq!(parse_timespan("05:00"), None);
+    assert_eq!(parse_timespan("-00:05:00"), None);
+}
