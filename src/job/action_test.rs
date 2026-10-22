@@ -53,3 +53,45 @@ fn remote_action_with_pre_does_not_warn() {
 
     assert_eq!(local_pre_warning(&source, &metadata(NODE_WITH_PRE)), None);
 }
+
+fn action_step(inputs: &[(&str, &str)]) -> Step {
+    Step {
+        id: "1".into(),
+        display_name: "Run action".into(),
+        reference: Default::default(),
+        inputs: inputs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+        condition: None,
+        timeout_in_minutes: None,
+        continue_on_error: None,
+        order: 1,
+        environment: None,
+        context_name: None,
+    }
+}
+
+#[test]
+fn action_inputs_take_the_evaluated_with_verbatim_and_evaluate_defaults() {
+    let metadata = metadata(
+        "inputs:\n  value: {}\n  target:\n    default: ${{ env.BASE }}/out\n  unset: {}\nruns:\n  using: node20\n  main: index.js\n",
+    );
+    let step = action_step(&[("value", "${{ secrets.MY_SECRET }}")]);
+    let state = crate::job::execute::JobState::new(
+        Default::default(),
+        HashMap::from([("MY_SECRET".to_string(), "leaked".to_string())]),
+        serde_json::json!({}),
+    );
+    let env = HashMap::from([("BASE".to_string(), "dist".to_string())]);
+
+    let inputs = build_action_inputs(
+        &metadata,
+        &step,
+        &ExprContext::new(&env, &state, false, false),
+    );
+
+    assert_eq!(inputs["INPUT_VALUE"], "${{ secrets.MY_SECRET }}");
+    assert_eq!(inputs["INPUT_TARGET"], "dist/out");
+    assert!(!inputs.contains_key("INPUT_UNSET"));
+}

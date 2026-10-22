@@ -45,9 +45,12 @@ impl ActionStage {
 }
 
 /// Build INPUT_<NAME> env vars for an action step.
-/// Both step inputs and action.yml defaults are expression-resolved, matching
-/// the official runner behavior (expressions like `${{ hashFiles(...) }}` in
-/// `with:` blocks are evaluated by the runner, not the server).
+///
+/// `step.inputs` is the step's `with:` already evaluated, once, when the step
+/// started, so it is taken verbatim: evaluating it again would run any `${{ }}`
+/// that a value merely contains (a PR title, a step output), letting it read
+/// `secrets`. Only the action.yml defaults, which nothing has evaluated yet, are
+/// evaluated here.
 pub fn build_action_inputs(
     metadata: &ActionMetadata,
     step: &Step,
@@ -57,10 +60,9 @@ pub fn build_action_inputs(
     for (name, input_def) in &metadata.inputs {
         let upper_name = format!("INPUT_{}", name.to_uppercase().replace(' ', "_"));
         if let Some(value) = step.inputs.get(name) {
-            let resolved = crate::job::expression::resolve_template(value, expr_ctx);
-            inputs.insert(upper_name, resolved);
+            inputs.insert(upper_name, value.clone());
         } else if let Some(default) = &input_def.default {
-            let resolved = crate::job::expression::resolve_expression(default, expr_ctx);
+            let resolved = crate::job::expression::resolve_template(default, expr_ctx);
             inputs.insert(upper_name, resolved);
         }
     }

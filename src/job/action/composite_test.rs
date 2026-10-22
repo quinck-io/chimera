@@ -686,3 +686,32 @@ fn evaluate_action_outputs_resolves_against_the_action_steps_and_inputs() {
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs["greeting"], "hello-world");
 }
+
+#[test]
+fn sub_step_inputs_and_env_do_not_evaluate_what_an_expression_returned() {
+    let state = JobState::new(
+        SecretMasker::default(),
+        HashMap::from([("MY_SECRET".to_string(), "leaked".to_string())]),
+        serde_json::json!({}),
+    );
+    let sub_step = parse_one(
+        r#"
+uses: actions/cache@v4
+env:
+  COPY: ${{ inputs.title }}
+with:
+  title: ${{ inputs.title }}
+"#,
+    )
+    .unwrap();
+    let env = HashMap::from([(
+        "INPUT_TITLE".to_string(),
+        "${{ secrets.MY_SECRET }}".to_string(),
+    )]);
+
+    let inputs = sub_step.inputs(&env, &state);
+    let own_env = sub_step.own_env(&env, &state);
+
+    assert_eq!(inputs["title"], "${{ secrets.MY_SECRET }}");
+    assert_eq!(own_env["COPY"], "${{ secrets.MY_SECRET }}");
+}

@@ -34,16 +34,13 @@ pub async fn run_docker_image_action(
 ) -> Result<StepResult> {
     let env = build_step_env(step, job_state, workspace, base_env);
     let command_policy = CommandPolicy::from_env(&env);
-    let expr_ctx = ExprContext::new(&env, job_state, false, false);
 
+    // Already evaluated with the rest of the step's `with:`.
     let entrypoint = step.inputs.get("entrypoint").cloned();
     let args = step
         .inputs
         .get("args")
-        .map(|a| {
-            let resolved = crate::job::expression::resolve_expression(a, &expr_ctx);
-            split_shell_args(&resolved)
-        })
+        .map(|args| split_shell_args(args))
         .unwrap_or_default();
 
     debug!(image, ?entrypoint, ?args, "running inline docker action");

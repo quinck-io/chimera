@@ -580,7 +580,38 @@ async fn kill_process_group(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
 }
 
-/// Build the full environment for a step execution.
+/// The step with its `env:` and, for an action, its `with:` evaluated. Like the
+/// official runner, each is evaluated exactly once, when the step starts; from
+/// then on both are read verbatim, so a `${{ }}` that an evaluated value merely
+/// contains (a PR title, a step output) is never evaluated in turn.
+pub fn evaluate_step(
+    step: &Step,
+    job_state: &JobState,
+    workspace: &Workspace,
+    base_env: &HashMap<String, String>,
+) -> Step {
+    let mut evaluated = step.clone();
+    let mut outer_env = base_env.clone();
+    outer_env.extend(job_state.env.clone());
+    let env_ctx = ExprContext::new(&outer_env, job_state, false, false);
+    evaluated.environment = step
+        .environment
+        .as_ref()
+        .map(|step_env| super::expression::resolve_template_map(step_env, &env_ctx));
+
+    // A script step's inputs are its script, shell and working directory, which it
+    // evaluates itself.
+    if step.is_script() {
+        return evaluated;
+    }
+    let env = build_step_env(&evaluated, job_state, workspace, base_env);
+    let inputs_ctx = ExprContext::new(&env, job_state, false, false);
+    evaluated.inputs = super::expression::resolve_template_map(&step.inputs, &inputs_ctx);
+    evaluated
+}
+
+/// Build the full environment for a step execution. The step's own `env:` must
+/// already be evaluated (see `evaluate_step`).
 pub fn build_step_env(
     step: &Step,
     job_state: &JobState,
@@ -591,11 +622,7 @@ pub fn build_step_env(
     env.extend(job_state.env.clone());
     env.insert("GITHUB_ACTION".into(), action_context_name(step).into());
     if let Some(step_env) = &step.environment {
-        for (k, v) in step_env {
-            let ctx = ExprContext::new(&env, job_state, false, false);
-            let resolved = super::expression::resolve_expression(v, &ctx);
-            env.insert(k.clone(), resolved);
-        }
+        env.extend(step_env.clone());
     }
 
     // Pre, main and post steps of an action share one state bucket, like the official
@@ -1393,6 +1420,7 @@ async fn execute_step(
         .is_some();
 
     log_sender.send_banner(runner_name, has_docker).await;
+    let step = &evaluate_step(step, job_state, workspace, base_env);
     debug!(
         step = %step.display_name,
         is_script = step.is_script(),

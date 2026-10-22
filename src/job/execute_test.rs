@@ -955,3 +955,96 @@ fn job_status_counts_a_requested_cancel_as_cancelled() {
 
     assert!(status.is_cancelled());
 }
+
+fn job_state_with_secret() -> JobState {
+    JobState::new(
+        SecretMasker::default(),
+        HashMap::from([("MY_SECRET".to_string(), "leaked".to_string())]),
+        serde_json::json!({}),
+    )
+}
+
+fn uses_step(inputs: &[(&str, &str)], env: &[(&str, &str)]) -> Step {
+    let to_map = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    };
+    Step {
+        reference: StepReference {
+            name: "actions/cache".into(),
+            kind: StepReferenceKind::Repository,
+            ..Default::default()
+        },
+        inputs: to_map(inputs),
+        environment: Some(to_map(env)),
+        ..make_step("act", "unused")
+    }
+}
+
+#[test]
+fn evaluate_step_evaluates_env_then_inputs_against_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(
+        &tmp.path().join("work"),
+        &tmp.path().join("tmp"),
+        &tmp.path().join("tool-cache"),
+        "test-runner",
+        "owner/repo",
+    )
+    .unwrap();
+    let base_env = HashMap::from([("BASE".to_string(), "dist".to_string())]);
+    let step = uses_step(
+        &[("path", "${{ env.TARGET }}/cache")],
+        &[("TARGET", "${{ env.BASE }}/out")],
+    );
+
+    let evaluated = evaluate_step(&step, &empty_job_state(), &ws, &base_env);
+
+    assert_eq!(evaluated.environment.unwrap()["TARGET"], "dist/out");
+    assert_eq!(evaluated.inputs["path"], "dist/out/cache");
+}
+
+#[test]
+fn evaluate_step_does_not_evaluate_what_an_expression_returned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(
+        &tmp.path().join("work"),
+        &tmp.path().join("tmp"),
+        &tmp.path().join("tool-cache"),
+        "test-runner",
+        "owner/repo",
+    )
+    .unwrap();
+    let base_env = HashMap::from([("TITLE".to_string(), "${{ secrets.MY_SECRET }}".to_string())]);
+    let step = uses_step(
+        &[("title", "${{ env.TITLE }}")],
+        &[("COPY", "${{ env.TITLE }}")],
+    );
+    let state = job_state_with_secret();
+
+    let evaluated = evaluate_step(&step, &state, &ws, &base_env);
+    let env = build_step_env(&evaluated, &state, &ws, &base_env);
+
+    assert_eq!(evaluated.inputs["title"], "${{ secrets.MY_SECRET }}");
+    assert_eq!(env["COPY"], "${{ secrets.MY_SECRET }}");
+}
+
+#[test]
+fn evaluate_step_leaves_a_script_steps_inputs_to_the_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(
+        &tmp.path().join("work"),
+        &tmp.path().join("tmp"),
+        &tmp.path().join("tool-cache"),
+        "test-runner",
+        "owner/repo",
+    )
+    .unwrap();
+    let step = make_step("run", "echo ${{ env.BASE }}");
+
+    let evaluated = evaluate_step(&step, &empty_job_state(), &ws, &HashMap::new());
+
+    assert_eq!(evaluated.inputs["script"], "echo ${{ env.BASE }}");
+}

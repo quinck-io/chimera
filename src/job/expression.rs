@@ -172,6 +172,17 @@ pub fn resolve_template(template: &str, ctx: &ExprContext) -> String {
     result
 }
 
+/// Resolve every value of an `env:` or `with:` mapping with `resolve_template`.
+pub fn resolve_template_map(
+    values: &HashMap<String, String>,
+    ctx: &ExprContext,
+) -> HashMap<String, String> {
+    values
+        .iter()
+        .map(|(key, value)| (key.clone(), resolve_template(value, ctx)))
+        .collect()
+}
+
 /// Find the closing `}}` of a `${{ ... }}` expression, skipping over `}}`
 /// that appears inside single-quoted strings in the expression language.
 pub fn find_closing_braces(s: &str) -> Option<usize> {

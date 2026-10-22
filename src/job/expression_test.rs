@@ -1775,3 +1775,20 @@ fn hash_files_ignores_files_outside_the_workspace() {
     assert_eq!(via_parent, "");
     assert_eq!(via_symlink, "");
 }
+
+#[test]
+fn resolve_template_map_resolves_each_value_once() {
+    let env = HashMap::from([
+        ("BASE".to_string(), "dist".to_string()),
+        ("RAW".to_string(), "${{ env.BASE }}".to_string()),
+    ]);
+    let values = HashMap::from([
+        ("path".to_string(), "${{ env.BASE }}/out".to_string()),
+        ("raw".to_string(), "${{ env.RAW }}".to_string()),
+    ]);
+
+    let resolved = resolve_template_map(&values, &ctx_with_env(&env));
+
+    assert_eq!(resolved["path"], "dist/out");
+    assert_eq!(resolved["raw"], "${{ env.BASE }}");
+}

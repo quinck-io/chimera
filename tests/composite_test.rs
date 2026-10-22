@@ -831,3 +831,111 @@ runs:
         ]
     );
 }
+
+/// A step output that happens to contain `${{ }}`, written without the runner
+/// ever evaluating it.
+const LITERAL_SECRET: &str = "${{ secrets.MY_SECRET }}";
+const WRITE_LITERAL_SECRET_OUTPUT: &str =
+    r#"printf 'payload=$%s\n' '{{ secrets.MY_SECRET }}' >> "$GITHUB_OUTPUT""#;
+
+/// `with:` and `env:` inside a composite action are evaluated exactly once, so a
+/// value that merely contains `${{ }}` reaches a nested action, its post step and a
+/// nested composite action verbatim instead of being evaluated into a secret.
+#[tokio::test]
+async fn composite_nested_action_inputs_are_evaluated_once() {
+    let env = TestEnv::setup().await;
+    let workspace_dir = env.workspace.workspace_dir();
+    let log = env.tmp.path().join("log");
+    write_node_action_with_post(workspace_dir, &log);
+    write_action(
+        workspace_dir,
+        "record",
+        r#"
+name: record
+inputs:
+  value: {}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        VALUE: ${{ inputs.value }}
+      run: printf '%s\n%s\n' "$VALUE" "$FROM_ENV" > "$GITHUB_WORKSPACE/recorded"
+"#,
+    );
+    write_action(
+        workspace_dir,
+        "outer",
+        &format!(
+            r#"
+name: outer
+runs:
+  using: composite
+  steps:
+    - id: mark
+      shell: bash
+      run: {WRITE_LITERAL_SECRET_OUTPUT}
+    - uses: ./.github/actions/with-post
+      with:
+        marker: ${{{{ steps.mark.outputs.payload }}}}
+    - uses: ./.github/actions/record
+      env:
+        FROM_ENV: ${{{{ steps.mark.outputs.payload }}}}
+      with:
+        value: ${{{{ steps.mark.outputs.payload }}}}
+"#
+        ),
+    );
+
+    let manifest = manifest_with_steps_and_context(
+        vec![composite_step(
+            "outer",
+            ".github/actions/outer",
+            serde_json::json!({}),
+        )],
+        &env.mock_server.uri(),
+        serde_json::json!({ "secrets": { "MY_SECRET": "leaked" } }),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(
+        read_log(&log),
+        [
+            format!("main {LITERAL_SECRET} action=outer mode=undefined"),
+            format!("post {LITERAL_SECRET} state-of-{LITERAL_SECRET}"),
+        ]
+    );
+    let recorded = std::fs::read_to_string(workspace_dir.join("recorded")).unwrap();
+    assert_eq!(recorded, format!("{LITERAL_SECRET}\n{LITERAL_SECRET}\n"));
+}
+
+/// The same holds for a workflow step's own `with:` and `env:`, in its main and
+/// its post step.
+#[tokio::test]
+async fn action_inputs_are_evaluated_once() {
+    let env = TestEnv::setup().await;
+    let log = env.tmp.path().join("log");
+    write_node_action_with_post(env.workspace.workspace_dir(), &log);
+    let mut action = local_action_step("act", "./.github/actions/with-post");
+    action["inputs"] = serde_json::json!({ "marker": "${{ steps.mark.outputs.payload }}" });
+    action["environment"] = serde_json::json!({ "MODE": "${{ steps.mark.outputs.payload }}" });
+    let write_token_output = r#"printf 'payload=$%s\n' '{{ github.token }}' >> "$GITHUB_OUTPUT""#;
+
+    let manifest = manifest_with_steps_and_context(
+        vec![script_step("mark", write_token_output), action],
+        &env.mock_server.uri(),
+        serde_json::json!({ "github": { "token": "ghs_leaked" } }),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    let literal = "${{ github.token }}";
+    assert_eq!(
+        read_log(&log),
+        [
+            format!("main {literal} action=act mode={literal}"),
+            format!("post {literal} state-of-{literal}"),
+        ]
+    );
+}
