@@ -215,6 +215,77 @@ async fn poll_loop_backoff_on_error() {
 }
 
 #[tokio::test]
+async fn poll_loop_gives_up_after_max_consecutive_errors() {
+    let (mock_server, tm, shutdown_tx) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("error"))
+        .expect(u64::from(super::MAX_CONSECUTIVE_ERRORS))
+        .mount(&mock_server)
+        .await;
+    let broker = BrokerClient::new(
+        reqwest::Client::new(),
+        mock_server.uri(),
+        "session-123".into(),
+        tm,
+    );
+    let runner = make_runner();
+    let mut rx = shutdown_tx.subscribe();
+
+    let err = runner.poll_loop(&broker, &mut rx).await.unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("polling failed 10 times in a row"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn poll_loop_error_streak_resets_after_a_successful_poll() {
+    let (mock_server, tm, shutdown_tx) = setup().await;
+    let almost_max = u64::from(super::MAX_CONSECUTIVE_ERRORS) - 1;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(almost_max)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(202))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(almost_max)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messageId": 9,
+            "messageType": "RunnerJobRequest",
+            "body": "{\"runner_request_id\": \"abc\"}"
+        })))
+        .mount(&mock_server)
+        .await;
+    let broker = BrokerClient::new(
+        reqwest::Client::new(),
+        mock_server.uri(),
+        "session-123".into(),
+        tm,
+    );
+    let runner = make_runner();
+    let mut rx = shutdown_tx.subscribe();
+
+    let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
+
+    assert_eq!(result.expect("should return job message").message_id, 9);
+}
+
+#[tokio::test]
 async fn poll_loop_refreshes_token_on_401() {
     let (mock_server, tm, shutdown_tx) = setup().await;
 

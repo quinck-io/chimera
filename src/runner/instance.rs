@@ -25,9 +25,15 @@ use crate::job::workspace::Workspace;
 
 use super::cancel::spawn_cancel_poller;
 use super::env::{build_base_env, build_container_env};
+use super::poll_backoff::{MAX_CONSECUTIVE_ERRORS, random_retry_delay};
 use super::report::{outputs_to_variable_values, report_setup_failure};
 
 const CONTROL_MSG_DELAY: Duration = Duration::from_millis(2000);
+/// Bounds DNS, TCP and TLS setup only, so an unreachable GitHub fails in
+/// seconds instead of eating the 100s long-poll timeout; a healthy handshake
+/// takes well under a second even on slow links.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const IDLE_NOTE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 pub struct Runner {
     pub(super) name: String,
@@ -86,6 +92,7 @@ impl Runner {
 
         let client = reqwest::Client::builder()
             .user_agent(format!("chimera/{RUNNER_VERSION}"))
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .context("building HTTP client")?;
 
@@ -501,9 +508,9 @@ impl Runner {
         broker: &BrokerClient,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> Result<Option<BrokerMessage>> {
-        let mut backoff = Duration::from_secs(1);
-        let max_backoff = Duration::from_secs(30);
         let mut token_refreshed = false;
+        let mut consecutive_errors: u32 = 0;
+        let mut idle_since = tokio::time::Instant::now();
 
         loop {
             if *shutdown_rx.borrow() {
@@ -521,6 +528,13 @@ impl Runner {
 
             if poll_result.is_ok() {
                 token_refreshed = false;
+                if consecutive_errors > 0 {
+                    info!(
+                        failed_polls = consecutive_errors,
+                        "reconnected to the broker"
+                    );
+                    consecutive_errors = 0;
+                }
             }
 
             match poll_result {
@@ -540,6 +554,7 @@ impl Runner {
                             CONTROL_MSG_DELAY
                         };
                         tokio::time::sleep(delay).await;
+                        idle_since = tokio::time::Instant::now();
                         continue;
                     }
 
@@ -553,7 +568,10 @@ impl Runner {
                     return Ok(Some(msg));
                 }
                 Ok(None) => {
-                    backoff = Duration::from_secs(1);
+                    if idle_since.elapsed() >= IDLE_NOTE_INTERVAL {
+                        debug!("no message retrieved within the last 30 minutes");
+                        idle_since = tokio::time::Instant::now();
+                    }
                     continue;
                 }
                 Err(e) => {
@@ -570,20 +588,35 @@ impl Runner {
                         continue;
                     }
 
-                    warn!(
-                        error = %format!("{e:#}"),
-                        backoff_secs = backoff.as_secs(),
-                        "poll error, backing off"
-                    );
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        return Err(e.context(format!(
+                            "polling failed {consecutive_errors} times in a row"
+                        )));
+                    }
+
+                    let delay = random_retry_delay(consecutive_errors);
+                    if consecutive_errors == 1 {
+                        warn!(
+                            error = %format!("{e:#}"),
+                            retry_in_secs = delay.as_secs(),
+                            "broker poll failed, retrying until reconnected"
+                        );
+                    } else {
+                        debug!(
+                            error = %format!("{e:#}"),
+                            failed_polls = consecutive_errors,
+                            retry_in_secs = delay.as_secs(),
+                            "broker poll still failing"
+                        );
+                    }
 
                     tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
+                        _ = tokio::time::sleep(delay) => {}
                         _ = shutdown_rx.changed() => {
                             return Ok(None);
                         }
                     }
-
-                    backoff = (backoff * 2).min(max_backoff);
                 }
             }
         }
