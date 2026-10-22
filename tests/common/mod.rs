@@ -112,6 +112,17 @@ impl TestEnv {
         manifest: &JobManifest,
         docker_resources: &JobDockerResources,
     ) -> anyhow::Result<(chimera::job::client::JobConclusion, HashMap<String, String>)> {
+        self.run_with_docker_and_cancel(manifest, docker_resources, JobCancel::new())
+            .await
+    }
+
+    /// Run a manifest in container mode with a cancel the test controls.
+    pub async fn run_with_docker_and_cancel(
+        &self,
+        manifest: &JobManifest,
+        docker_resources: &JobDockerResources,
+        cancel: JobCancel,
+    ) -> anyhow::Result<(chimera::job::client::JobConclusion, HashMap<String, String>)> {
         let base_env = build_container_env(manifest, &self.workspace, "test-runner");
         let action_cache = ActionCache::new(self.actions_dir.clone(), reqwest::Client::new());
 
@@ -126,7 +137,7 @@ impl TestEnv {
             "test-runner",
             &action_cache,
             "fake-token",
-            JobCancel::new(),
+            cancel,
             Some(docker_resources),
             &node_runtimes,
             None,
