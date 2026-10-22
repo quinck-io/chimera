@@ -714,7 +714,15 @@ fn path_additions_put_the_latest_first() {
     assert_eq!(newest_first(&paths), ["/c", "/a", "/b"]);
 }
 
-fn step_env_github_action(step: &Step) -> Option<String> {
+fn empty_job_state() -> JobState {
+    JobState::new(
+        SecretMasker::default(),
+        HashMap::new(),
+        serde_json::json!({}),
+    )
+}
+
+fn step_env_with_state(step: &Step, state: &JobState) -> HashMap<String, String> {
     let tmp = tempfile::tempdir().unwrap();
     let ws = Workspace::create(
         &tmp.path().join("work"),
@@ -724,13 +732,12 @@ fn step_env_github_action(step: &Step) -> Option<String> {
         "owner/repo",
     )
     .unwrap();
-    let state = JobState::new(
-        SecretMasker::default(),
-        HashMap::new(),
-        serde_json::json!({}),
-    );
 
-    build_step_env(step, &state, &ws, &HashMap::new())
+    build_step_env(step, state, &ws, &HashMap::new())
+}
+
+fn step_env_github_action(step: &Step) -> Option<String> {
+    step_env_with_state(step, &empty_job_state())
         .get("GITHUB_ACTION")
         .cloned()
 }
@@ -759,14 +766,98 @@ fn github_action_falls_back_to_step_id() {
 
 #[test]
 fn github_action_of_pre_and_post_steps_matches_main_step() {
-    let mut pre = make_step("pre", "true");
-    pre.context_name = Some("__actions_checkout_pre".into());
-    let mut post = make_step("post", "true");
-    post.context_name = Some("__actions_checkout_post".into());
+    let mut main = make_step("main", "true");
+    main.context_name = Some("__actions_checkout".into());
 
-    let pre_action = step_env_github_action(&pre);
-    let post_action = step_env_github_action(&post);
+    let pre = action_stage_step(main.clone(), ActionStage::Pre, 0, None);
+    let post = action_stage_step(main, ActionStage::Post, 9, None);
 
-    assert_eq!(pre_action.as_deref(), Some("__actions_checkout"));
-    assert_eq!(post_action.as_deref(), Some("__actions_checkout"));
+    assert_eq!(
+        step_env_github_action(&pre).as_deref(),
+        Some("__actions_checkout")
+    );
+    assert_eq!(
+        step_env_github_action(&post).as_deref(),
+        Some("__actions_checkout")
+    );
+}
+
+#[test]
+fn github_action_keeps_a_step_id_that_looks_like_a_stage() {
+    let mut step = make_step("abc-123", "true");
+    step.context_name = Some("cache_post".into());
+
+    let action = step_env_github_action(&step);
+
+    assert_eq!(action.as_deref(), Some("cache_post"));
+}
+
+#[test]
+fn stage_step_falls_back_to_the_main_step_id_as_context_name() {
+    let main = make_step("main-id", "true");
+
+    let post = action_stage_step(main, ActionStage::Post, 5, None);
+
+    assert_eq!(post.context_name.as_deref(), Some("main-id"));
+    assert_ne!(post.id, "main-id");
+}
+
+#[test]
+fn stage_step_is_named_and_ordered_for_its_stage() {
+    let main = make_step("main", "true");
+
+    let pre = action_stage_step(main, ActionStage::Pre, 3, None);
+
+    assert_eq!(pre.display_name, "Pre Run true");
+    assert_eq!(pre.order, 3);
+}
+
+#[test]
+fn stage_step_defaults_its_condition_to_always() {
+    let mut main = make_step("main", "true");
+    main.condition = Some("success()".into());
+
+    let post = action_stage_step(main, ActionStage::Post, 5, None);
+
+    assert_eq!(post.condition.as_deref(), Some("always()"));
+}
+
+#[test]
+fn stage_step_uses_the_action_condition_when_given() {
+    let main = make_step("main", "true");
+
+    let post = action_stage_step(main, ActionStage::Post, 5, Some("failure()".into()));
+
+    assert_eq!(post.condition.as_deref(), Some("failure()"));
+}
+
+#[test]
+fn every_stage_of_an_action_sees_its_saved_state() {
+    let mut main = make_step("main", "true");
+    main.context_name = Some("cache".into());
+    let mut state = empty_job_state();
+    state.action_states.insert(
+        "cache".into(),
+        HashMap::from([("key".into(), "value".into())]),
+    );
+
+    let post = action_stage_step(main.clone(), ActionStage::Post, 5, None);
+
+    assert_eq!(step_env_with_state(&main, &state)["STATE_key"], "value");
+    assert_eq!(step_env_with_state(&post, &state)["STATE_key"], "value");
+}
+
+#[test]
+fn state_is_not_shared_with_a_step_whose_id_extends_the_action_name() {
+    let mut cache_post = make_step("other", "true");
+    cache_post.context_name = Some("cache_post".into());
+    let mut state = empty_job_state();
+    state.action_states.insert(
+        "cache".into(),
+        HashMap::from([("key".into(), "value".into())]),
+    );
+
+    let env = step_env_with_state(&cache_post, &state);
+
+    assert!(!env.contains_key("STATE_key"));
 }

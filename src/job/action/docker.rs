@@ -98,7 +98,6 @@ pub async fn run_docker_metadata_action(
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
     env.extend(build_action_inputs(metadata, step, &expr_ctx));
     merge_action_env(&mut env, metadata, job_state);
-    inject_post_state(&mut env, entry_point, step, job_state);
 
     let resolved_args = resolve_args(&args, &env, job_state);
 
@@ -180,27 +179,6 @@ fn merge_action_env(
             let ctx = ExprContext::new(env, job_state, false, false);
             let resolved = crate::job::expression::resolve_expression(v, &ctx);
             env.insert(k.clone(), resolved);
-        }
-    }
-}
-
-fn inject_post_state(
-    env: &mut HashMap<String, String>,
-    entry_point: &str,
-    step: &Step,
-    job_state: &JobState,
-) {
-    if entry_point != "post" {
-        return;
-    }
-    let action_ctx = step
-        .context_name
-        .as_deref()
-        .unwrap_or("")
-        .replace("_post", "");
-    if let Some(states) = job_state.action_states.get(&action_ctx) {
-        for (k, v) in states {
-            env.insert(format!("STATE_{k}"), v.clone());
         }
     }
 }

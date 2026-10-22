@@ -16,6 +16,34 @@ pub use download::ActionCache;
 pub use metadata::load_action_metadata;
 pub use resolve::{ActionSource, resolve_action};
 
+/// Which of an action's entry points a step runs, mirroring the official runner's
+/// `ActionRunStage`. The stage is fixed when the step is created and never inferred
+/// from the step's name, since a user may well name a step `cache_post`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionStage {
+    Pre,
+    Main,
+    Post,
+}
+
+impl ActionStage {
+    pub fn entry_point(self) -> &'static str {
+        match self {
+            Self::Pre => "pre",
+            Self::Main => "main",
+            Self::Post => "post",
+        }
+    }
+
+    pub fn display_name(self, main_display_name: &str) -> String {
+        match self {
+            Self::Pre => format!("Pre {main_display_name}"),
+            Self::Main => main_display_name.to_string(),
+            Self::Post => format!("Post {main_display_name}"),
+        }
+    }
+}
+
 /// Build INPUT_<NAME> env vars for an action step.
 /// Both step inputs and action.yml defaults are expression-resolved, matching
 /// the official runner behavior (expressions like `${{ hashFiles(...) }}` in
@@ -58,3 +86,7 @@ pub fn parse_uses(uses: &str) -> anyhow::Result<ActionSource> {
         anyhow::bail!("cannot parse uses '{uses}'")
     }
 }
+
+#[cfg(test)]
+#[path = "action_test.rs"]
+mod action_test;

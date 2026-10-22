@@ -60,20 +60,6 @@ pub async fn run_node_action(
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
     env.extend(build_action_inputs(metadata, step, &expr_ctx));
 
-    // For post steps: inject STATE_<name> env vars from saved state
-    if entry_point == "post" {
-        let action_ctx = step
-            .context_name
-            .as_deref()
-            .unwrap_or("")
-            .replace("_post", "");
-        if let Some(states) = job_state.action_states.get(&action_ctx) {
-            for (k, v) in states {
-                env.insert(format!("STATE_{}", k), v.clone());
-            }
-        }
-    }
-
     let timeout = step.timeout();
 
     // Container mode: run via docker exec with remapped paths

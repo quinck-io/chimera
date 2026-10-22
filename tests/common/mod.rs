@@ -100,6 +100,12 @@ impl TestEnv {
         .await
     }
 
+    /// Where the action cache keeps `owner/repo` at `commit`. Files written here are
+    /// served as that remote action without any download.
+    pub fn cached_action_dir(&self, owner: &str, repo: &str, commit: &str) -> std::path::PathBuf {
+        self.actions_dir.join(owner).join(repo).join(commit)
+    }
+
     /// Run a manifest in container mode with Docker resources.
     pub async fn run_with_docker(
         &self,
@@ -280,6 +286,23 @@ pub fn script_step(id: &str, script: &str) -> serde_json::Value {
         "displayName": format!("Run: {id}"),
         "reference": { "name": "script", "type": "script" },
         "inputs": { "script": script },
+        "condition": null,
+        "timeoutInMinutes": null,
+        "continueOnError": false,
+        "order": 1,
+        "environment": null,
+        "contextName": id
+    })
+}
+
+/// A `uses: owner/repo@commit` step. Pinning a full commit SHA skips ref resolution,
+/// so the action is served straight from `TestEnv::cached_action_dir`.
+pub fn remote_action_step(id: &str, name: &str, commit: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "displayName": format!("Run {name}"),
+        "reference": { "name": name, "type": "repository", "ref": commit },
+        "inputs": {},
         "condition": null,
         "timeoutInMinutes": null,
         "continueOnError": false,

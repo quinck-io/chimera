@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::JobClient;
-use super::action::{ActionCache, load_action_metadata, resolve_action};
+use super::action::{ActionCache, ActionStage, load_action_metadata, resolve_action};
 use super::cancel::JobCancel;
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
 use super::commands::CommandPolicy;
@@ -555,15 +555,10 @@ pub fn build_step_env(
         }
     }
 
-    // Inject STATE_* env vars for pre/post steps so @actions/core.getState() works.
-    // The main step writes state to GITHUB_STATE file, we read it into action_states,
-    // and the post step reads it via STATE_<name> env vars.
-    if let Some(ctx_name) = &step.context_name
-        && let Some(base_ctx) = ctx_name
-            .strip_suffix("_post")
-            .or_else(|| ctx_name.strip_suffix("_pre"))
-        && let Some(states) = job_state.action_states.get(base_ctx)
-    {
+    // Pre, main and post steps of an action share one state bucket, like the official
+    // runner's per-action `IntraActionState`, so `@actions/core.getState()` sees what
+    // an earlier stage saved through GITHUB_STATE.
+    if let Some(states) = job_state.action_states.get(action_context_name(step)) {
         for (k, v) in states {
             env.insert(format!("STATE_{k}"), v.clone());
         }
@@ -590,16 +585,11 @@ pub fn build_step_env(
 }
 
 /// The step's identity as the official runner exposes it in `GITHUB_ACTION`: the step
-/// `id` or the generated `__owner_repo`/`__run` name. Pre and post steps report their
-/// main step's name, since actions use it to recognise their own steps.
+/// `id` or the generated `__owner_repo`/`__run` name. Pre and post steps carry their
+/// main step's name (see `action_stage_step`), since actions use it to recognise
+/// their own steps.
 fn action_context_name(step: &Step) -> &str {
-    let Some(ctx_name) = step.context_name.as_deref() else {
-        return &step.id;
-    };
-    ctx_name
-        .strip_suffix("_post")
-        .or_else(|| ctx_name.strip_suffix("_pre"))
-        .unwrap_or(ctx_name)
+    step.context_name.as_deref().unwrap_or(&step.id)
 }
 
 /// Returns the PATH additions latest first, each at its latest position only.
@@ -749,18 +739,12 @@ pub async fn run_all_steps(
         if let Some((orig_step, pre_if)) =
             collect_pre_step(step, action_cache, workspace.workspace_dir(), access_token).await
         {
-            let ctx_name = orig_step
-                .context_name
-                .clone()
-                .unwrap_or_else(|| orig_step.id.clone());
-            pre_steps.push(Step {
-                id: uuid::Uuid::new_v4().to_string(),
-                display_name: format!("Pre {}", orig_step.display_name),
-                context_name: Some(format!("{ctx_name}_pre")),
-                order: idx as u32,
-                condition: Some(pre_if.unwrap_or_else(|| "always()".to_string())),
-                ..orig_step
-            });
+            pre_steps.push(action_stage_step(
+                orig_step,
+                ActionStage::Pre,
+                idx as u32,
+                pre_if,
+            ));
         }
     }
 
@@ -841,6 +825,7 @@ pub async fn run_all_steps(
 
             let (conclusion, result_conclusion) = execute_step(
                 pre_step,
+                ActionStage::Pre,
                 &mut job_state,
                 workspace,
                 base_env,
@@ -988,6 +973,7 @@ pub async fn run_all_steps(
 
         let (conclusion, result_conclusion) = execute_step(
             step,
+            ActionStage::Main,
             &mut job_state,
             workspace,
             base_env,
@@ -1098,20 +1084,12 @@ pub async fn run_all_steps(
         let max_order = manifest.steps.iter().map(|s| s.order).max().unwrap_or(0);
         let mut post_steps = Vec::new();
         for (rev_idx, (orig_step, post_if)) in pending_post_steps.into_iter().rev().enumerate() {
-            let ctx_name = orig_step
-                .context_name
-                .clone()
-                .unwrap_or_else(|| orig_step.id.clone());
-            post_steps.push(Step {
-                id: uuid::Uuid::new_v4().to_string(),
-                display_name: format!("Post {}", orig_step.display_name),
-                context_name: Some(format!("{ctx_name}_post")),
-                order: max_order + 1 + rev_idx as u32,
-                // Default post-if is always() (not success()), so post steps
-                // run even when the job failed (e.g. to save partial caches).
-                condition: Some(post_if.unwrap_or_else(|| "always()".to_string())),
-                ..orig_step
-            });
+            post_steps.push(action_stage_step(
+                orig_step,
+                ActionStage::Post,
+                max_order + 1 + rev_idx as u32,
+                post_if,
+            ));
         }
 
         for ps in &post_steps {
@@ -1189,6 +1167,7 @@ pub async fn run_all_steps(
 
             let (conclusion, result_conclusion) = execute_step(
                 post_step,
+                ActionStage::Post,
                 &mut job_state,
                 workspace,
                 base_env,
@@ -1342,6 +1321,7 @@ async fn create_step_logger(
 #[allow(clippy::too_many_arguments)]
 async fn execute_step(
     step: &Step,
+    stage: ActionStage,
     job_state: &mut JobState,
     workspace: &Workspace,
     base_env: &HashMap<String, String>,
@@ -1393,6 +1373,7 @@ async fn execute_step(
     } else {
         run_action_step(
             step,
+            stage,
             job_state,
             workspace,
             base_env,
@@ -1421,6 +1402,7 @@ async fn execute_step(
 #[allow(clippy::too_many_arguments)]
 async fn run_action_step(
     step: &Step,
+    stage: ActionStage,
     job_state: &mut JobState,
     workspace: &Workspace,
     base_env: &HashMap<String, String>,
@@ -1456,11 +1438,10 @@ async fn run_action_step(
     let metadata = load_action_metadata(&action_dir)?;
 
     if metadata.runs.is_node() {
-        let entry_point = detect_entry_point(step);
         super::action::node::run_node_action(
             &action_dir,
             &metadata,
-            entry_point,
+            stage.entry_point(),
             step,
             job_state,
             workspace,
@@ -1489,11 +1470,10 @@ async fn run_action_step(
         )
         .await
     } else if metadata.runs.is_docker() {
-        let entry_point = detect_entry_point(step);
         super::action::docker::run_docker_metadata_action(
             &action_dir,
             &metadata,
-            entry_point,
+            stage.entry_point(),
             step,
             job_state,
             workspace,
@@ -1508,17 +1488,24 @@ async fn run_action_step(
     }
 }
 
-/// Detect whether this is a pre, main, or post step based on context_name.
-fn detect_entry_point(step: &Step) -> &str {
-    if let Some(ctx) = &step.context_name {
-        if ctx.ends_with("_pre") || ctx.contains("_pre_") {
-            return "pre";
-        }
-        if ctx.ends_with("_post") || ctx.contains("_post_") {
-            return "post";
-        }
+/// The pre or post step of `main_step`. It keeps the main step's context name so all
+/// stages share `GITHUB_ACTION` and the action's saved state, and it defaults to
+/// `always()` (not `success()`) so a post step can still clean up after a failure.
+fn action_stage_step(
+    main_step: Step,
+    stage: ActionStage,
+    order: u32,
+    condition: Option<String>,
+) -> Step {
+    let context_name = action_context_name(&main_step).to_string();
+    Step {
+        id: uuid::Uuid::new_v4().to_string(),
+        display_name: stage.display_name(&main_step.display_name),
+        context_name: Some(context_name),
+        order,
+        condition: Some(condition.unwrap_or_else(|| "always()".to_string())),
+        ..main_step
     }
-    "main"
 }
 
 /// Check if an action step has a `post` entry point, returning the cloned
