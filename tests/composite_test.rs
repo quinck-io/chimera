@@ -22,10 +22,11 @@ runs:
   using: 'composite'
   steps:
     - run: |
-        if [ "$INPUT_LOUD" = "true" ]; then
-          echo "HELLO $INPUT_NAME!!!" | tr '[:lower:]' '[:upper:]'
+        test -n "${{ inputs.name }}" || exit 1
+        if [ "${{ inputs.loud }}" = "true" ]; then
+          echo "HELLO ${{ inputs.name }}!!!" | tr '[:lower:]' '[:upper:]'
         else
-          echo "Hello, $INPUT_NAME!"
+          echo "Hello, ${{ inputs.name }}!"
         fi
       shell: bash
     - run: echo "Greeting delivered"
@@ -750,6 +751,83 @@ runs:
             "after",
             "post two state-of-two",
             "post one state-of-one",
+        ]
+    );
+}
+
+/// As on the official runner, a composite action's inputs reach its steps only as
+/// `inputs.<name>`: neither its own `run:` steps nor the actions it uses get its
+/// INPUT_* variables, and each action it uses gets only its own inputs.
+#[tokio::test]
+async fn composite_inputs_do_not_leak_into_step_env() {
+    let env = TestEnv::setup().await;
+    let workspace_dir = env.workspace.workspace_dir();
+    let node_dir = workspace_dir.join(".github/actions/input-dump");
+    std::fs::create_dir_all(&node_dir).unwrap();
+    std::fs::write(
+        node_dir.join("action.yml"),
+        "name: input-dump\ninputs:\n  own: {}\nruns:\n  using: node20\n  main: main.js\n",
+    )
+    .unwrap();
+    std::fs::write(
+        node_dir.join("main.js"),
+        "const keys = Object.keys(process.env).filter(k => k.startsWith('INPUT_')).sort();\n\
+         require('fs').appendFileSync(process.env.GITHUB_WORKSPACE + '/inputs.log', 'node ' + keys + ' ' + process.env.INPUT_OWN + '\\n');\n",
+    )
+    .unwrap();
+    write_action(
+        workspace_dir,
+        "inner",
+        r#"
+name: inner
+inputs:
+  inner: {}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "inner ${INPUT_OUTER-unset} ${INPUT_INNER-unset} ${{ inputs.inner }}" >> "$GITHUB_WORKSPACE/inputs.log"
+"#,
+    );
+    write_action(
+        workspace_dir,
+        "outer",
+        r#"
+name: outer
+inputs:
+  outer:
+    default: leak
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "outer ${INPUT_OUTER-unset} ${{ inputs.outer }}" >> "$GITHUB_WORKSPACE/inputs.log"
+    - uses: ./.github/actions/inner
+      with:
+        inner: ${{ inputs.outer }}-in
+    - uses: ./.github/actions/input-dump
+      with:
+        own: ${{ inputs.outer }}-own
+"#,
+    );
+
+    let manifest = manifest_with_steps(
+        vec![composite_step(
+            "outer",
+            ".github/actions/outer",
+            serde_json::json!({}),
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(
+        read_log(&workspace_dir.join("inputs.log")),
+        [
+            "outer unset leak",
+            "inner unset unset leak-in",
+            "node INPUT_OWN leak-own",
         ]
     );
 }

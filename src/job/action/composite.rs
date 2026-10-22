@@ -56,24 +56,17 @@ pub struct EmbeddedPost {
 }
 
 impl EmbeddedPost {
-    /// Captured while the main step runs, so the post step gets the same inputs
-    /// even though the composite action's `steps` context is gone by then.
+    /// Captured while the main step runs. Its inputs are already resolved, so the
+    /// post step gets the same ones even though the composite action's `steps`
+    /// context is gone by then.
     fn new(
         main_step: &Step,
         action_dir: &Path,
         condition: String,
         env: &HashMap<String, String>,
-        job_state: &JobState,
     ) -> Self {
-        let ctx = ExprContext::new(env, job_state, false, false);
-        let mut step = main_step.clone();
-        step.inputs = main_step
-            .inputs
-            .iter()
-            .map(|(name, value)| (name.clone(), resolve_template(value, &ctx)))
-            .collect();
         Self {
-            step,
+            step: main_step.clone(),
             action_dir: action_dir.to_path_buf(),
             condition,
             env: env.clone(),
@@ -146,7 +139,7 @@ async fn run_composite_action_inner(
 
     let conclusion = run_sub_steps(ctx, &scope, &sub_steps, job_state, depth).await;
 
-    let output_env = scope.env(job_state, ctx.workspace);
+    let output_env = scope.expression_env(&scope.env(job_state, ctx.workspace));
     job_state.outputs = evaluate_action_outputs(metadata, &output_env, job_state);
     job_state.step_outputs = caller_step_outputs;
     job_state.step_outcomes = caller_step_outcomes;
@@ -169,9 +162,10 @@ async fn run_sub_steps(
     for sub_step in sub_steps {
         // Rebuilt for every sub-step, so env and PATH changes from earlier ones apply.
         let env = scope.env(job_state, ctx.workspace);
+        let expression_env = scope.expression_env(&env);
         let job_cancelled = ctx.job.is_cancelled();
 
-        if !sub_step.condition_holds(&env, job_state, job_cancelled, status) {
+        if !sub_step.condition_holds(&expression_env, job_state, job_cancelled, status) {
             debug!(step = %sub_step.key, condition = %sub_step.condition, "skipping composite sub-step");
             if let Some(id) = &sub_step.id {
                 job_state
@@ -182,7 +176,7 @@ async fn run_sub_steps(
         }
 
         let cancel_token = sub_step_token(ctx.job, job_cancelled, || {
-            sub_step.condition_holds(&env, job_state, true, StepConclusion::Cancelled)
+            sub_step.condition_holds(&expression_env, job_state, true, StepConclusion::Cancelled)
         });
         let conclusion =
             run_sub_step(ctx, scope, sub_step, job_state, &env, &cancel_token, depth).await;
@@ -227,11 +221,13 @@ async fn run_sub_step(
     depth: u32,
 ) -> StepConclusion {
     debug!(step = %sub_step.key, "running composite sub-step");
-    let own_env = sub_step.own_env(env, job_state);
+    let expression_env = scope.expression_env(env);
+    let own_env = sub_step.own_env(&expression_env, job_state);
     let timeout = scope.step.timeout();
     let result = match &sub_step.kind {
         SubStepKind::Uses(uses) => {
-            let nested_step = nested_action_step(sub_step, uses, own_env, timeout);
+            let inputs = sub_step.inputs(&expression_env, job_state);
+            let nested_step = nested_action_step(sub_step, uses, inputs, own_env, timeout);
             run_nested_action(
                 ctx,
                 scope,
@@ -248,6 +244,7 @@ async fn run_sub_step(
             step_env.extend(own_env);
             run_nested_script(
                 ctx,
+                scope,
                 sub_step,
                 script,
                 job_state,
@@ -317,11 +314,21 @@ impl<'a> ActionScope<'a> {
         Ok(scope)
     }
 
+    /// The environment the action's steps run with. As on the official runner,
+    /// the action's inputs are not in it: its steps read them as `inputs.<name>`,
+    /// and an action it uses gets only its own inputs as INPUT_* variables.
     fn env(&self, job_state: &JobState, workspace: &Workspace) -> HashMap<String, String> {
         let mut env = build_step_env(self.step, job_state, workspace, self.base_env);
-        env.extend(self.inputs.clone());
         env.insert("GITHUB_ACTION_PATH".into(), self.action_path.clone());
         env
+    }
+
+    /// `env` plus the action's INPUT_* variables, where expressions look up
+    /// `inputs.<name>`.
+    fn expression_env(&self, env: &HashMap<String, String>) -> HashMap<String, String> {
+        let mut expression_env = env.clone();
+        expression_env.extend(self.inputs.clone());
+        expression_env
     }
 
     fn key(&self) -> &str {
@@ -426,13 +433,23 @@ impl SubStep {
             .collect()
     }
 
-    fn inputs(&self) -> HashMap<String, String> {
+    /// The step's `with:`, resolved here because only this action's scope knows
+    /// its `inputs` and `steps` contexts.
+    fn inputs(
+        &self,
+        env: &HashMap<String, String>,
+        job_state: &JobState,
+    ) -> HashMap<String, String> {
         let Some(serde_yaml::Value::Mapping(with_map)) = self.map.get(ykey("with")) else {
             return HashMap::new();
         };
+        let ctx = ExprContext::new(env, job_state, false, false);
         with_map
             .iter()
-            .filter_map(|(key, value)| Some((key.as_str()?.to_string(), scalar_to_string(value)?)))
+            .filter_map(|(key, value)| {
+                let value = scalar_to_string(value)?;
+                Some((key.as_str()?.to_string(), resolve_template(&value, &ctx)))
+            })
             .collect()
     }
 }
@@ -521,8 +538,10 @@ fn evaluate_action_outputs(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_nested_script(
     ctx: &CompositeContext<'_>,
+    scope: &ActionScope<'_>,
     sub_step: &SubStep,
     script: &str,
     job_state: &mut JobState,
@@ -530,7 +549,8 @@ async fn run_nested_script(
     timeout: Duration,
     cancel_token: &CancellationToken,
 ) -> Result<StepResult> {
-    let script_ctx = ExprContext::new(env, job_state, false, false);
+    let expression_env = scope.expression_env(env);
+    let script_ctx = ExprContext::new(&expression_env, job_state, false, false);
     let resolved_script = resolve_template(script, &script_ctx);
     // working-directory may carry expressions like ${{ inputs.dir || '.' }}
     let raw_workdir = sub_step
@@ -630,6 +650,7 @@ async fn run_script_in_container(
 fn nested_action_step(
     sub_step: &SubStep,
     uses: &str,
+    inputs: HashMap<String, String>,
     own_env: HashMap<String, String>,
     timeout: Duration,
 ) -> Step {
@@ -641,7 +662,7 @@ fn nested_action_step(
             kind: StepReferenceKind::Repository,
             ..Default::default()
         },
-        inputs: sub_step.inputs(),
+        inputs,
         condition: None,
         timeout_in_minutes: Some(Evaluable::Literal(timeout.as_secs() / 60)),
         continue_on_error: None,
@@ -686,7 +707,7 @@ async fn run_nested_action(
     }
 
     if let Some(condition) = post_condition(&metadata) {
-        let post = EmbeddedPost::new(nested_step, &action_dir, condition, env, job_state);
+        let post = EmbeddedPost::new(nested_step, &action_dir, condition, env);
         register_post(job_state, scope.key(), post);
     }
 
@@ -709,7 +730,7 @@ async fn run_nested_action(
             .embedded_posts
             .contains_key(state_key(nested_step))
     {
-        let post = EmbeddedPost::new(nested_step, &action_dir, "always()".into(), env, job_state);
+        let post = EmbeddedPost::new(nested_step, &action_dir, "always()".into(), env);
         register_post(job_state, scope.key(), post);
     }
 

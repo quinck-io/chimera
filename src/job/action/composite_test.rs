@@ -309,11 +309,11 @@ async fn cancelled_job_runs_cancelled_steps_of_a_surviving_action() {
 }
 
 #[tokio::test]
-async fn inputs_available_as_env() {
+async fn inputs_resolve_in_run_steps_but_are_not_in_their_env() {
     let mut rig = Rig::new();
     let mut metadata = make_composite_metadata(
         r#"
-- run: test "$INPUT_NAME" = "world"
+- run: test "${{ inputs.name }}" = "world" && test -z "${INPUT_NAME+set}"
   shell: bash
 "#,
     );
@@ -389,7 +389,6 @@ fn embedded_post(rig: &Rig, condition: &str) -> EmbeddedPost {
         &rig.tmp.path().join("missing-action"),
         condition.into(),
         &HashMap::new(),
-        &rig.state,
     )
 }
 
@@ -421,26 +420,23 @@ async fn composite_post_fails_when_a_post_it_runs_fails() {
 }
 
 #[test]
-fn embedded_post_keeps_the_inputs_the_main_step_saw() {
+fn sub_step_inputs_resolve_against_the_action_scope() {
     let state = new_job_state();
-    let mut main_step = make_step();
-    main_step.context_name = Some("build.__1".into());
-    main_step
-        .inputs
-        .insert("path".into(), "${{ env.TARGET }}/out".into());
-    let env = HashMap::from([("TARGET".to_string(), "dist".to_string())]);
+    let sub_step = parse_one(
+        r#"
+uses: actions/cache@v4
+with:
+  path: ${{ inputs.target }}/out
+  retries: 3
+"#,
+    )
+    .unwrap();
+    let env = HashMap::from([("INPUT_TARGET".to_string(), "dist".to_string())]);
 
-    let post = EmbeddedPost::new(
-        &main_step,
-        Path::new("/actions/cache"),
-        "success()".into(),
-        &env,
-        &state,
-    );
+    let inputs = sub_step.inputs(&env, &state);
 
-    assert_eq!(post.step.inputs["path"], "dist/out");
-    assert_eq!(post.step.context_name.as_deref(), Some("build.__1"));
-    assert_eq!(post.condition, "success()");
+    assert_eq!(inputs["path"], "dist/out");
+    assert_eq!(inputs["retries"], "3");
 }
 
 #[test]
@@ -566,9 +562,12 @@ with:
     .unwrap();
     let own_env = HashMap::from([("MODE".to_string(), "fast".to_string())]);
 
+    let inputs = sub_step.inputs(&HashMap::new(), &new_job_state());
+
     let step = nested_action_step(
         &sub_step,
         "./.github/actions/inner",
+        inputs,
         own_env,
         Duration::from_secs(600),
     );
