@@ -10,39 +10,20 @@ use chimera::job::client::JobConclusion;
 use common::*;
 
 const GRACE: Duration = Duration::from_secs(60);
-
-fn local_action_step(id: &str, action_path: &str) -> serde_json::Value {
-    serde_json::json!({
-        "id": id,
-        "displayName": format!("Run: {id}"),
-        "reference": {
-            "name": action_path,
-            "type": "repository",
-            "repositoryType": "self",
-            "path": action_path
-        },
-        "inputs": {},
-        "condition": null,
-        "timeoutInMinutes": null,
-        "continueOnError": false,
-        "order": 1,
-        "environment": null,
-        "contextName": id
-    })
-}
+// Pre steps only run for remote actions, so the pre-step tests serve one from the action cache.
+const PRE_ACTION_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 /// A node action whose pre step creates `started`, waits `seconds`, then
 /// leaves `marker` behind.
 fn write_action_with_pre(
-    workspace_dir: &Path,
+    action_dir: &Path,
     name: &str,
     pre_if: &str,
     started: &Path,
     seconds: u32,
     marker: &Path,
 ) {
-    let action_dir = workspace_dir.join(".github/actions").join(name);
-    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::create_dir_all(action_dir).unwrap();
     let pre_if = if pre_if.is_empty() {
         String::new()
     } else {
@@ -253,7 +234,7 @@ async fn cancel_lets_a_running_pre_step_with_the_default_pre_if_finish() {
     let pre_done = env.tmp.path().join("pre-done");
     let main_ran = env.tmp.path().join("main-ran");
     write_action_with_pre(
-        env.workspace.workspace_dir(),
+        &env.cached_action_dir("acme", "slow-pre", PRE_ACTION_COMMIT),
         "slow-pre",
         "",
         &started,
@@ -262,7 +243,7 @@ async fn cancel_lets_a_running_pre_step_with_the_default_pre_if_finish() {
     );
     let manifest = manifest_with_steps(
         vec![
-            local_action_step("setup", ".github/actions/slow-pre"),
+            remote_action_step("setup", "acme/slow-pre", PRE_ACTION_COMMIT),
             script_step("main", &touch(&main_ran)),
         ],
         &env.mock_server.uri(),
@@ -287,7 +268,7 @@ async fn cancel_stops_a_running_pre_step_whose_pre_if_no_longer_holds() {
     let started = env.tmp.path().join("started");
     let pre_done = env.tmp.path().join("pre-done");
     write_action_with_pre(
-        env.workspace.workspace_dir(),
+        &env.cached_action_dir("acme", "slow-pre", PRE_ACTION_COMMIT),
         "slow-pre",
         "success()",
         &started,
@@ -295,7 +276,11 @@ async fn cancel_stops_a_running_pre_step_whose_pre_if_no_longer_holds() {
         &pre_done,
     );
     let manifest = manifest_with_steps(
-        vec![local_action_step("setup", ".github/actions/slow-pre")],
+        vec![remote_action_step(
+            "setup",
+            "acme/slow-pre",
+            PRE_ACTION_COMMIT,
+        )],
         &env.mock_server.uri(),
     );
 
