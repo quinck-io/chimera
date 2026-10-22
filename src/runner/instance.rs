@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::job::cancel::JobCancel;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::sync::watch;
@@ -17,7 +16,8 @@ use crate::github::auth::TokenManager;
 use crate::github::broker::{BrokerClient, BrokerError, BrokerMessage, MessageType};
 use crate::job::JobClient;
 use crate::job::action::ActionCache;
-use crate::job::client::{CompleteJobError, JobConclusion, UnreadableJob};
+use crate::job::cancel::JobCancel;
+use crate::job::client::{CompleteJobError, UnreadableJob};
 use crate::job::execute::{resolve_container_specs, run_all_steps};
 use crate::job::live_feed::LiveFeed;
 use crate::job::schema::JobManifest;
@@ -473,11 +473,7 @@ impl Runner {
             feed.close().await;
         }
 
-        let (mut conclusion, job_outputs) = job_result.context("running job steps")?;
-
-        if cancel.is_requested() && conclusion != JobConclusion::Cancelled {
-            conclusion = JobConclusion::Cancelled;
-        }
+        let (conclusion, job_outputs) = job_result.context("running job steps")?;
 
         info!(conclusion = %conclusion, "job steps completed");
 

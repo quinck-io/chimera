@@ -791,13 +791,8 @@ pub async fn run_all_steps(
                 continue;
             }
 
-            let step_token = cancel.step_token(survives_cancel(
-                pre_step,
-                base_env,
-                &mut job_state,
-                job_failed,
-                job_cancelled,
-            ));
+            let step_token =
+                cancel.step_token(survives_cancel(pre_step, base_env, &job_state, job_failed));
             let start_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_started();
             report_step_started(
@@ -938,13 +933,7 @@ pub async fn run_all_steps(
             continue;
         }
 
-        let step_token = cancel.step_token(survives_cancel(
-            step,
-            base_env,
-            &mut job_state,
-            job_failed,
-            job_cancelled,
-        ));
+        let step_token = cancel.step_token(survives_cancel(step, base_env, &job_state, job_failed));
         let start_time = format_timeline_timestamp(Utc::now());
         trackers[idx].mark_started();
 
@@ -1133,13 +1122,8 @@ pub async fn run_all_steps(
                 continue;
             }
 
-            let step_token = cancel.step_token(survives_cancel(
-                post_step,
-                base_env,
-                &mut job_state,
-                job_failed,
-                job_cancelled,
-            ));
+            let step_token =
+                cancel.step_token(survives_cancel(post_step, base_env, &job_state, job_failed));
             let start_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_started();
             report_step_started(
@@ -1269,17 +1253,16 @@ pub async fn run_all_steps(
 fn survives_cancel(
     step: &Step,
     base_env: &HashMap<String, String>,
-    job_state: &mut JobState,
+    job_state: &JobState,
     job_failed: bool,
-    job_cancelled: bool,
 ) -> bool {
-    update_job_status(&mut job_state.context_data, job_failed, true);
-    let survives = {
-        let ctx = ExprContext::new(base_env, job_state, job_failed, true);
-        super::expression::evaluate_condition(step.condition.as_deref(), &ctx)
+    let mut cancelled_context = job_state.context_data.clone();
+    update_job_status(&mut cancelled_context, job_failed, true);
+    let ctx = ExprContext {
+        context_data: &cancelled_context,
+        ..ExprContext::new(base_env, job_state, job_failed, true)
     };
-    update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
-    survives
+    super::expression::evaluate_condition(step.condition.as_deref(), &ctx)
 }
 
 /// Masks the job's secrets and its access token, which every step receives as
