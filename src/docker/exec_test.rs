@@ -8,6 +8,200 @@ use crate::job::execute::{JobState, StepConclusion};
 use crate::job::logs::LogSender;
 use crate::job::masker::SecretMasker;
 
+#[test]
+fn exec_markers_are_unique_env_entries() {
+    let first = exec_marker();
+    let second = exec_marker();
+
+    assert!(first.starts_with("CHIMERA_EXEC_ID="));
+    assert_ne!(first, second);
+}
+
+/// The kill command scans `/proc`, so it can be checked against host processes.
+#[test]
+fn kill_command_kills_only_marked_processes() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+
+    let marker = exec_marker();
+    let (name, value) = marker.split_once('=').unwrap();
+    let mut marked = Command::new("sleep")
+        .arg("30")
+        .env(name, value)
+        .spawn()
+        .unwrap();
+    let mut unmarked = Command::new("sleep").arg("30").spawn().unwrap();
+
+    let command = kill_marked_processes_command(&marker);
+    let status = Command::new(&command[0])
+        .args(&command[1..])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(marked.wait().unwrap().signal(), Some(libc::SIGKILL));
+    assert!(unmarked.try_wait().unwrap().is_none());
+    unmarked.kill().unwrap();
+    unmarked.wait().unwrap();
+}
+
+async fn start_alpine(docker: &Docker, purpose: &str) -> String {
+    use bollard::container::{Config, CreateContainerOptions};
+
+    crate::docker::client::ensure_image(docker, "alpine:latest", None)
+        .await
+        .unwrap();
+    let name = format!("chimera-exec-{purpose}-{}", uuid::Uuid::new_v4());
+    let config = Config {
+        image: Some("alpine:latest"),
+        cmd: Some(vec!["tail", "-f", "/dev/null"]),
+        ..Default::default()
+    };
+    let container = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: name.as_str(),
+                ..Default::default()
+            }),
+            config,
+        )
+        .await
+        .unwrap();
+    docker
+        .start_container::<String>(&container.id, None)
+        .await
+        .unwrap();
+    container.id
+}
+
+async fn remove_container(docker: &Docker, container_id: &str) {
+    use bollard::container::RemoveContainerOptions;
+
+    let _ = docker
+        .remove_container(
+            container_id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+}
+
+/// Runs a short command in the container and returns its stdout.
+async fn exec_output(docker: &Docker, container_id: &str, cmd: &[&str]) -> String {
+    let exec = docker
+        .create_exec(
+            container_id,
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                cmd: Some(cmd.to_vec()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let StartExecResults::Attached { mut output, .. } =
+        docker.start_exec(&exec.id, None).await.unwrap()
+    else {
+        panic!("exec was not attached");
+    };
+    let mut stdout = String::new();
+    while let Some(frame) = output.next().await {
+        stdout.push_str(&frame.unwrap().to_string());
+    }
+    stdout
+}
+
+/// Runs `cmd` in the container and cancels it after `cancel_after`.
+async fn exec_and_cancel(
+    docker: &Docker,
+    container_id: &str,
+    cmd: &[&str],
+    cancel_after: Duration,
+) -> StepResult {
+    let masks = SecretMasker::default();
+    let (tx, _rx) = tokio::sync::mpsc::channel(256);
+    let sender = LogSender::new_for_test(tx, masks.clone());
+    let mut job_state = JobState::new(masks, HashMap::new(), serde_json::json!({}));
+    let cancel_token = CancellationToken::new();
+    let canceller = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(cancel_after).await;
+        canceller.cancel();
+    });
+
+    docker_exec(
+        docker,
+        container_id,
+        cmd.iter().map(|arg| arg.to_string()).collect(),
+        &HashMap::new(),
+        "/",
+        &mut job_state,
+        &sender,
+        Duration::from_secs(60),
+        &cancel_token,
+        false,
+    )
+    .await
+    .unwrap()
+}
+
+/// Integration test: a cancel kills the step and what it started inside the container.
+#[tokio::test]
+#[ignore]
+async fn cancelled_exec_kills_its_processes_in_the_container() {
+    let docker = crate::docker::client::connect(None).unwrap();
+    let container_id = start_alpine(&docker, "cancel").await;
+    let heartbeat = "sleep 60 & i=0; while :; do i=$((i+1)); echo $i > /tmp/beat; sleep 0.1; done";
+
+    let result = exec_and_cancel(
+        &docker,
+        &container_id,
+        &["sh", "-c", heartbeat],
+        Duration::from_secs(1),
+    )
+    .await;
+    let beat = exec_output(&docker, &container_id, &["cat", "/tmp/beat"]).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let beat_later = exec_output(&docker, &container_id, &["cat", "/tmp/beat"]).await;
+    let sleeping = exec_output(&docker, &container_id, &["ps", "-o", "stat,args"]).await;
+    remove_container(&docker, &container_id).await;
+
+    assert_eq!(result.conclusion, StepConclusion::Cancelled);
+    assert!(!beat.trim().is_empty(), "step never ran");
+    assert_eq!(beat, beat_later, "step kept running after the cancel");
+    let live_sleeps = sleeping
+        .lines()
+        .filter(|line| line.contains("sleep 60") && !line.trim_start().starts_with('Z'))
+        .count();
+    assert_eq!(live_sleeps, 0, "background process survived: {sleeping}");
+}
+
+/// Integration test: without a shell to run the kill, a cancel still ends the step.
+#[tokio::test]
+#[ignore]
+async fn cancelled_exec_without_a_shell_still_ends_the_step() {
+    let docker = crate::docker::client::connect(None).unwrap();
+    let container_id = start_alpine(&docker, "no-shell").await;
+    exec_output(&docker, &container_id, &["rm", "/bin/sh"]).await;
+
+    let begin = std::time::Instant::now();
+    let result = exec_and_cancel(
+        &docker,
+        &container_id,
+        &["sleep", "60"],
+        Duration::from_secs(1),
+    )
+    .await;
+    let elapsed = begin.elapsed();
+    remove_container(&docker, &container_id).await;
+
+    assert_eq!(result.conclusion, StepConclusion::Cancelled);
+    assert!(elapsed < Duration::from_secs(10), "cancel took {elapsed:?}");
+}
+
 /// Integration test: requires Docker daemon running.
 #[tokio::test]
 #[ignore]

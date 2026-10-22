@@ -484,3 +484,50 @@ runs:
         "failure() step ran after cancel"
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn cancelled_container_step_is_dead_before_always_steps_run() {
+    let env = TestEnv::setup().await;
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+    let host_workspace = env.workspace.workspace_dir();
+    let heartbeat = "cd /github/workspace && touch started && \
+        i=0; while :; do i=$((i+1)); echo $i > beat; sleep 0.1; done";
+    let check_heartbeat =
+        "cd /github/workspace && cp beat beat_at_cleanup && sleep 1 && cp beat beat_after_cleanup";
+    let manifest = manifest_with_steps(
+        vec![
+            script_step("long", heartbeat),
+            script_step_if("cleanup", check_heartbeat, "always()"),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let result = env
+        .run_with_docker_and_cancel(
+            &manifest,
+            &resources,
+            cancel_once_exists(&host_workspace.join("started"), GRACE),
+        )
+        .await;
+    // Cleanup empties the workspace, so read the markers first.
+    let beat_at_cleanup = std::fs::read_to_string(host_workspace.join("beat_at_cleanup"));
+    let beat_after_cleanup = std::fs::read_to_string(host_workspace.join("beat_after_cleanup"));
+    resources.cleanup().await;
+    let (conclusion, _) = result.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Cancelled);
+    assert_eq!(
+        beat_at_cleanup.unwrap(),
+        beat_after_cleanup.unwrap(),
+        "cancelled step kept running alongside the always() step"
+    );
+}

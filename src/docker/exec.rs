@@ -5,8 +5,10 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::ExecInspectResponse;
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use super::output::process_docker_output;
 use crate::job::commands::CommandPolicy;
@@ -15,6 +17,12 @@ use crate::job::logs::LogSender;
 use crate::job::output::OutputProcessor;
 
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Tags every process a step starts, so a cancel can find them inside the container.
+const EXEC_MARKER_ENV: &str = "CHIMERA_EXEC_ID";
+
+/// How long stopping a step's processes may take before the step is left behind.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run a command inside a running container via `docker exec`.
 ///
@@ -33,7 +41,12 @@ pub async fn docker_exec(
     cancel_token: &CancellationToken,
     debug_enabled: bool,
 ) -> Result<StepResult> {
-    let env_list: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let marker = exec_marker();
+    let env_list: Vec<String> = env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain(std::iter::once(marker.clone()))
+        .collect();
 
     let exec = docker
         .create_exec(
@@ -116,6 +129,7 @@ pub async fn docker_exec(
     };
 
     if let Err(conclusion) = result {
+        stop_exec(docker, container_id, &exec.id, &marker).await;
         return Ok(StepResult { conclusion });
     }
 
@@ -135,6 +149,105 @@ pub async fn docker_exec(
     };
 
     Ok(StepResult { conclusion })
+}
+
+/// Kills what a cancelled or timed out step left running inside the container.
+///
+/// Docker has no API to signal an exec, and dropping the attached stream leaves its
+/// process running until the job container is removed, alongside `always()` and post
+/// steps. A second exec finds the step's processes by their marker and kills them,
+/// with SIGKILL like a host step's process group.
+async fn stop_exec(docker: &Docker, container_id: &str, exec_id: &str, marker: &str) {
+    let killed = tokio::time::timeout(
+        STOP_TIMEOUT,
+        kill_marked_processes(docker, container_id, marker),
+    )
+    .await;
+    match killed {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            warn!(error = %e, "could not kill the step's processes, they keep running until the job container is removed");
+            return;
+        }
+        Err(_) => {
+            warn!(
+                "killing the step's processes timed out, they keep running until the job container is removed"
+            );
+            return;
+        }
+    }
+
+    if tokio::time::timeout(STOP_TIMEOUT, wait_for_exit(docker, exec_id))
+        .await
+        .is_err()
+    {
+        warn!("step's process did not exit after being killed");
+    }
+}
+
+async fn kill_marked_processes(docker: &Docker, container_id: &str, marker: &str) -> Result<()> {
+    let exec = docker
+        .create_exec(
+            container_id,
+            CreateExecOptions::<String> {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(kill_marked_processes_command(marker)),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("creating the kill exec")?;
+
+    let started = docker
+        .start_exec(&exec.id, None)
+        .await
+        .context("starting the kill exec")?;
+    let StartExecResults::Attached { mut output, .. } = started else {
+        anyhow::bail!("kill exec did not return attached output");
+    };
+    while let Some(frame) = output.next().await {
+        match frame {
+            Ok(line) => debug!(output = %line, "kill exec output"),
+            Err(e) => {
+                debug!(error = %e, "reading kill exec output failed");
+                break;
+            }
+        }
+    }
+
+    let exit_code = docker
+        .inspect_exec(&exec.id)
+        .await
+        .context("inspecting the kill exec")?
+        .exit_code;
+    if exit_code != Some(0) {
+        anyhow::bail!("kill exec exited with {exit_code:?}, the container may lack sh or grep");
+    }
+    Ok(())
+}
+
+/// A unique `NAME=value` entry for one exec's environment.
+fn exec_marker() -> String {
+    format!("{EXEC_MARKER_ENV}={}", Uuid::new_v4())
+}
+
+/// A shell command that SIGKILLs every process whose environment carries `marker`.
+///
+/// It runs inside the container, where the step's PIDs live in another namespace than
+/// the one Docker reports, so it scans the container's own `/proc`. Children inherit
+/// the marker, which reaches everything the step started, like a process group.
+fn kill_marked_processes_command(marker: &str) -> Vec<String> {
+    let script = format!(
+        "command -v grep >/dev/null || exit 127\n\
+         for environ in /proc/[0-9]*/environ; do\n\
+         grep -qF '{marker}' \"$environ\" 2>/dev/null || continue\n\
+         pid=${{environ#/proc/}}\n\
+         kill -9 \"${{pid%/environ}}\" 2>/dev/null\n\
+         done\n\
+         exit 0"
+    );
+    vec!["sh".into(), "-c".into(), script]
 }
 
 /// Resolves once the exec's main process has exited.
