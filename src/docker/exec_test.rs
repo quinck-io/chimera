@@ -114,15 +114,16 @@ async fn exec_output(docker: &Docker, container_id: &str, cmd: &[&str]) -> Strin
     stdout
 }
 
-/// Runs `cmd` in the container and cancels it after `cancel_after`.
+/// Runs `cmd` in the container, cancels it after `cancel_after` and returns the
+/// result with the lines the step logged.
 async fn exec_and_cancel(
     docker: &Docker,
     container_id: &str,
     cmd: &[&str],
     cancel_after: Duration,
-) -> StepResult {
+) -> (StepResult, Vec<String>) {
     let masks = SecretMasker::default();
-    let (tx, _rx) = tokio::sync::mpsc::channel(256);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let sender = LogSender::new_for_test(tx, masks.clone());
     let mut job_state = JobState::new(masks, HashMap::new(), serde_json::json!({}));
     let cancel_token = CancellationToken::new();
@@ -132,7 +133,7 @@ async fn exec_and_cancel(
         canceller.cancel();
     });
 
-    docker_exec(
+    let result = docker_exec(
         docker,
         container_id,
         cmd.iter().map(|arg| arg.to_string()).collect(),
@@ -145,7 +146,13 @@ async fn exec_and_cancel(
         false,
     )
     .await
-    .unwrap()
+    .unwrap();
+
+    let mut lines = Vec::new();
+    while let Ok(line) = rx.try_recv() {
+        lines.push(line.content);
+    }
+    (result, lines)
 }
 
 /// Integration test: a cancel kills the step and what it started inside the container.
@@ -156,7 +163,7 @@ async fn cancelled_exec_kills_its_processes_in_the_container() {
     let container_id = start_alpine(&docker, "cancel").await;
     let heartbeat = "sleep 60 & i=0; while :; do i=$((i+1)); echo $i > /tmp/beat; sleep 0.1; done";
 
-    let result = exec_and_cancel(
+    let (result, log) = exec_and_cancel(
         &docker,
         &container_id,
         &["sh", "-c", heartbeat],
@@ -177,9 +184,14 @@ async fn cancelled_exec_kills_its_processes_in_the_container() {
         .filter(|line| line.contains("sleep 60") && !line.trim_start().starts_with('Z'))
         .count();
     assert_eq!(live_sleeps, 0, "background process survived: {sleeping}");
+    assert!(
+        !log.iter().any(|line| line.starts_with("##[warning]")),
+        "{log:?}"
+    );
 }
 
-/// Integration test: without a shell to run the kill, a cancel still ends the step.
+/// Integration test: without a shell to run the kill, a cancel still ends the step,
+/// and the step's log warns that its processes may outlive it.
 #[tokio::test]
 #[ignore]
 async fn cancelled_exec_without_a_shell_still_ends_the_step() {
@@ -188,7 +200,7 @@ async fn cancelled_exec_without_a_shell_still_ends_the_step() {
     exec_output(&docker, &container_id, &["rm", "/bin/sh"]).await;
 
     let begin = std::time::Instant::now();
-    let result = exec_and_cancel(
+    let (result, log) = exec_and_cancel(
         &docker,
         &container_id,
         &["sleep", "60"],
@@ -200,6 +212,26 @@ async fn cancelled_exec_without_a_shell_still_ends_the_step() {
 
     assert_eq!(result.conclusion, StepConclusion::Cancelled);
     assert!(elapsed < Duration::from_secs(10), "cancel took {elapsed:?}");
+    let warning = log.iter().find(|line| line.starts_with("##[warning]"));
+    assert!(
+        warning
+            .is_some_and(|line| line.contains("may keep running until the container is removed")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn leftover_processes_warning_names_the_cause() {
+    let error = anyhow!("kill exec exited with Some(127), the container may lack sh or grep");
+
+    let warning = processes_left_running_warning(&error);
+
+    assert_eq!(
+        warning,
+        "##[warning]Could not stop the step's processes in the job container \
+         (kill exec exited with Some(127), the container may lack sh or grep), \
+         they may keep running until the container is removed"
+    );
 }
 
 /// Integration test: requires Docker daemon running.

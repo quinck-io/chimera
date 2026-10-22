@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::ExecInspectResponse;
@@ -129,7 +129,7 @@ pub async fn docker_exec(
     };
 
     if let Err(conclusion) = result {
-        stop_exec(docker, container_id, &exec.id, &marker).await;
+        stop_exec(docker, container_id, &exec.id, &marker, log_sender).await;
         return Ok(StepResult { conclusion });
     }
 
@@ -156,25 +156,25 @@ pub async fn docker_exec(
 /// Docker has no API to signal an exec, and dropping the attached stream leaves its
 /// process running until the job container is removed, alongside `always()` and post
 /// steps. A second exec finds the step's processes by their marker and kills them,
-/// with SIGKILL like a host step's process group.
-async fn stop_exec(docker: &Docker, container_id: &str, exec_id: &str, marker: &str) {
+/// with SIGKILL like a host step's process group. If that fails, the step's log says
+/// so too, as whoever reads the job never sees the daemon's log.
+async fn stop_exec(
+    docker: &Docker,
+    container_id: &str,
+    exec_id: &str,
+    marker: &str,
+    log_sender: &LogSender,
+) {
     let killed = tokio::time::timeout(
         STOP_TIMEOUT,
         kill_marked_processes(docker, container_id, marker),
     )
-    .await;
-    match killed {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            warn!(error = %e, "could not kill the step's processes, they keep running until the job container is removed");
-            return;
-        }
-        Err(_) => {
-            warn!(
-                "killing the step's processes timed out, they keep running until the job container is removed"
-            );
-            return;
-        }
+    .await
+    .unwrap_or_else(|_| Err(anyhow!("killing them timed out")));
+    if let Err(e) = killed {
+        warn!(error = %e, "could not kill the step's processes, they keep running until the job container is removed");
+        log_sender.send(processes_left_running_warning(&e)).await;
+        return;
     }
 
     if tokio::time::timeout(STOP_TIMEOUT, wait_for_exit(docker, exec_id))
@@ -183,6 +183,12 @@ async fn stop_exec(docker: &Docker, container_id: &str, exec_id: &str, marker: &
     {
         warn!("step's process did not exit after being killed");
     }
+}
+
+fn processes_left_running_warning(error: &anyhow::Error) -> String {
+    format!(
+        "##[warning]Could not stop the step's processes in the job container ({error:#}), they may keep running until the container is removed"
+    )
 }
 
 async fn kill_marked_processes(docker: &Docker, container_id: &str, marker: &str) -> Result<()> {
