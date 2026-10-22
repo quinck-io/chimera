@@ -49,7 +49,6 @@ async fn cancel_poller_triggers_token_on_cancellation() {
             "messageType": "JobCancellation",
             "body": "{\"jobId\": \"job-123\"}"
         })))
-        .expect(1)
         .mount(&mock_server)
         .await;
 
@@ -63,16 +62,65 @@ async fn cancel_poller_triggers_token_on_cancellation() {
     let cancel = JobCancel::new();
     let handle = spawn_cancel_poller(&broker, cancel.clone());
 
-    tokio::time::timeout(Duration::from_secs(5), cancel.requested())
-        .await
-        .expect("cancel should be requested within 5s");
+    wait_until(|| async { cancel.is_requested() }).await;
 
     assert!(cancel.is_requested());
+    cancel.finish();
     let _ = handle.await;
 }
 
 #[tokio::test]
-async fn cancel_poller_stops_when_token_cancelled_externally() {
+async fn cancel_poller_keeps_watching_after_the_first_cancellation() {
+    let (mock_server, tm, _shutdown_tx) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messageId": 42,
+            "messageType": "JobCancellation",
+            "body": "{\"jobId\": \"job-123\"}"
+        })))
+        .mount(&mock_server)
+        .await;
+    let broker = BrokerClient::new(
+        reqwest::Client::new(),
+        mock_server.uri(),
+        "session-123".into(),
+        tm,
+    );
+    let cancel = JobCancel::new();
+
+    let handle = spawn_cancel_poller(&broker, cancel.clone());
+    wait_until(|| async { cancel.is_requested() }).await;
+    let polls_at_cancel = message_polls(&mock_server).await;
+    wait_until(|| async { message_polls(&mock_server).await > polls_at_cancel + 1 }).await;
+
+    assert!(!handle.is_finished());
+    cancel.finish();
+    let _ = handle.await;
+}
+
+async fn message_polls(mock_server: &MockServer) -> usize {
+    mock_server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| request.url.path() == "/message")
+        .count()
+}
+
+async fn wait_until<F: std::future::Future<Output = bool>>(condition: impl Fn() -> F) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("condition not met within 5s");
+}
+
+#[tokio::test]
+async fn cancel_poller_stops_when_the_job_finishes() {
     let (mock_server, tm, _shutdown_tx) = setup().await;
 
     Mock::given(method("GET"))
@@ -91,7 +139,7 @@ async fn cancel_poller_stops_when_token_cancelled_externally() {
     let cancel = JobCancel::new();
     let handle = spawn_cancel_poller(&broker, cancel.clone());
 
-    cancel.force();
+    cancel.finish();
 
     tokio::time::timeout(Duration::from_secs(5), handle)
         .await

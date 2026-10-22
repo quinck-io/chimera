@@ -57,3 +57,42 @@ async fn force_stops_every_step() {
     assert!(surviving.is_cancelled());
     assert!(regular.is_cancelled());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_new_request_pushes_the_forced_deadline_back() {
+    let cancel = JobCancel::new();
+    let step_token = cancel.step_token(true);
+
+    cancel.request(Duration::from_secs(45));
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    cancel.request(Duration::from_secs(45));
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!step_token.is_cancelled());
+
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    assert!(step_token.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_request_can_bring_the_forced_deadline_forward() {
+    let cancel = JobCancel::new();
+    let step_token = cancel.step_token(true);
+
+    cancel.request(Duration::from_secs(300));
+    cancel.request(Duration::from_secs(45));
+    tokio::time::sleep(Duration::from_secs(46)).await;
+
+    assert!(step_token.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn finish_drops_the_forced_deadline() {
+    let cancel = JobCancel::new();
+    let step_token = cancel.step_token(true);
+    cancel.request(Duration::from_secs(45));
+
+    cancel.finish();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    assert!(!step_token.is_cancelled());
+}

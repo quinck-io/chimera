@@ -196,8 +196,7 @@ impl Runner {
             )
             .await;
 
-        // Stop the cancel poller and its grace timer regardless of how the job ended
-        cancel.force();
+        cancel.finish();
         let _ = poller_handle.await;
 
         if let Err(e) = result {
