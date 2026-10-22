@@ -97,7 +97,7 @@ fn empty_files_return_empty_results() {
 }
 
 #[test]
-fn clear_sub_step_files_keeps_state_and_summary() {
+fn clear_sub_step_files_keeps_only_the_summary() {
     let (_tmp, ws) = make_workspace();
     std::fs::write(ws.output_file(), "name=hello\n").unwrap();
     std::fs::write(ws.env_file(), "FOO=bar\n").unwrap();
@@ -110,7 +110,7 @@ fn clear_sub_step_files_keeps_state_and_summary() {
     assert!(ws.read_output_file().unwrap().is_empty());
     assert!(ws.read_env_file().unwrap().is_empty());
     assert!(ws.read_path_file().unwrap().is_empty());
-    assert_eq!(ws.read_state_file().unwrap()["pid"], "42");
+    assert!(ws.read_state_file().unwrap().is_empty());
     assert_eq!(
         std::fs::read_to_string(ws.step_summary_file()).unwrap(),
         "# Summary\n"

@@ -408,3 +408,79 @@ async fn cancelled_container_job_stops_the_running_step_and_runs_always_steps() 
     assert!(!next_ran, "success() step ran after cancel");
     assert!(cleanup_ran, "always() step did not run");
 }
+
+/// A composite action that survives a cancel tests each of its steps again: the
+/// step running when the cancel lands is stopped, later steps that need success
+/// are skipped, and its `cancelled()` and `always()` steps run.
+#[tokio::test]
+async fn composite_surviving_a_cancel_runs_only_its_cancel_steps() {
+    let env = TestEnv::setup().await;
+    let markers = env.tmp.path().join("markers");
+    std::fs::create_dir_all(&markers).unwrap();
+    let action_dir = env
+        .workspace
+        .workspace_dir()
+        .join(".github/actions/cleanup");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        format!(
+            r#"
+name: cleanup
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: {long}
+    - shell: bash
+      run: {next}
+    - if: cancelled()
+      shell: bash
+      run: {on_cancel}
+    - if: always()
+      shell: bash
+      run: {cleanup}
+    - if: failure()
+      shell: bash
+      run: {on_failure}
+"#,
+            long = touch_then_sleep(&markers.join("long"), 30),
+            next = touch(&markers.join("next")),
+            on_cancel = touch(&markers.join("on_cancel")),
+            cleanup = touch(&markers.join("cleanup")),
+            on_failure = touch(&markers.join("on_failure")),
+        ),
+    )
+    .unwrap();
+    let mut composite = local_action_step("cleanup", ".github/actions/cleanup");
+    composite["condition"] = serde_json::json!("always()");
+    let manifest = manifest_with_steps(vec![composite], &env.mock_server.uri());
+
+    let begin = std::time::Instant::now();
+    let (conclusion, _) = env
+        .run_with_cancel(&manifest, cancel_once_exists(&markers.join("long"), GRACE))
+        .await
+        .unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Cancelled);
+    assert!(
+        begin.elapsed() < Duration::from_secs(20),
+        "the running success() step was not stopped"
+    );
+    assert!(
+        !markers.join("next").exists(),
+        "success() step ran after cancel"
+    );
+    assert!(
+        markers.join("on_cancel").exists(),
+        "cancelled() step did not run"
+    );
+    assert!(
+        markers.join("cleanup").exists(),
+        "always() step did not run"
+    );
+    assert!(
+        !markers.join("on_failure").exists(),
+        "failure() step ran after cancel"
+    );
+}

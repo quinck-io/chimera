@@ -165,16 +165,16 @@ impl Workspace {
     /// Clear per-step files between steps so each step starts with empty files.
     pub fn clear_step_files(&self) {
         self.clear_sub_step_files();
-        let _ = std::fs::write(&self.state_file, "");
         let _ = std::fs::write(&self.step_summary_file, "");
     }
 
-    /// Clear the files one composite sub-step hands to the next. GITHUB_STATE and the
-    /// step summary belong to the whole action, so they stay for the outer step.
+    /// Clear the files one composite sub-step hands to the next. The step summary
+    /// belongs to the whole action, so it stays for the outer step.
     pub fn clear_sub_step_files(&self) {
         let _ = std::fs::write(&self.output_file, "");
         let _ = std::fs::write(&self.env_file, "");
         let _ = std::fs::write(&self.path_file, "");
+        let _ = std::fs::write(&self.state_file, "");
     }
 
     pub fn cleanup(&self) -> Result<()> {

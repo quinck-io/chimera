@@ -20,6 +20,7 @@ fn empty_ctx() -> ExprContext<'static> {
         context_data: &NULL_JSON,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     }
 }
@@ -42,6 +43,7 @@ fn ctx_with_env(env: &HashMap<String, String>) -> ExprContext<'_> {
         context_data: &NULL_JSON,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     }
 }
@@ -122,6 +124,76 @@ fn condition_cancelled_true_when_cancelled() {
 fn condition_not_cancelled() {
     let ctx = empty_ctx();
     assert!(evaluate_condition(Some("!cancelled()"), &ctx));
+}
+
+#[test]
+fn action_status_decides_success_and_failure_over_the_job() {
+    let mut ctx = empty_ctx();
+    ctx.job_failed = true;
+    ctx.action_status = Some(StepConclusion::Succeeded);
+    assert!(evaluate_condition(Some("success()"), &ctx));
+    assert!(evaluate_condition(None, &ctx));
+    assert!(!evaluate_condition(Some("failure()"), &ctx));
+
+    ctx.job_failed = false;
+    ctx.action_status = Some(StepConclusion::Failed);
+    assert!(!evaluate_condition(Some("success()"), &ctx));
+    assert!(evaluate_condition(Some("failure()"), &ctx));
+}
+
+#[test]
+fn cancelled_action_is_neither_successful_nor_failed() {
+    let mut ctx = empty_ctx();
+    ctx.job_cancelled = true;
+    ctx.action_status = Some(StepConclusion::Cancelled);
+
+    assert!(!evaluate_condition(Some("success()"), &ctx));
+    assert!(!evaluate_condition(Some("failure()"), &ctx));
+    assert!(evaluate_condition(Some("cancelled()"), &ctx));
+}
+
+// The official runner keeps a composite action's status apart from the job's, so
+// a step that starts after a cancel the action survived still sees success().
+#[test]
+fn successful_action_in_a_cancelled_job_sees_both_success_and_cancelled() {
+    let mut ctx = empty_ctx();
+    ctx.job_cancelled = true;
+    ctx.action_status = Some(StepConclusion::Succeeded);
+
+    assert!(evaluate_condition(Some("success()"), &ctx));
+    assert!(evaluate_condition(Some("cancelled()"), &ctx));
+}
+
+#[test]
+fn action_step_condition_defaults_to_success() {
+    assert_eq!(action_step_condition(None), "success()");
+    assert_eq!(action_step_condition(Some("  ")), "success()");
+}
+
+#[test]
+fn action_step_condition_requires_success_without_a_status_function() {
+    assert_eq!(
+        action_step_condition(Some("env.DEPLOY == 'true'")),
+        "success() && (env.DEPLOY == 'true')"
+    );
+    assert_eq!(
+        action_step_condition(Some("${{ inputs.verbose }}")),
+        "success() && (inputs.verbose)"
+    );
+    assert_eq!(
+        action_step_condition(Some("'failure()' == env.X")),
+        "success() && ('failure()' == env.X)"
+    );
+}
+
+#[test]
+fn action_step_condition_keeps_a_status_function() {
+    assert_eq!(action_step_condition(Some("always()")), "always()");
+    assert_eq!(
+        action_step_condition(Some("${{ failure() && env.X }}")),
+        "failure() && env.X"
+    );
+    assert_eq!(action_step_condition(Some("!cancelled()")), "!cancelled()");
 }
 
 #[test]
@@ -446,6 +518,7 @@ fn secrets_lookup() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 
@@ -484,6 +557,7 @@ fn steps_output_lookup() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 
@@ -525,6 +599,7 @@ fn steps_outcome_success() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 
@@ -563,6 +638,7 @@ fn steps_outcome_with_continue_on_error() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 
@@ -611,6 +687,7 @@ fn needs_output_lookup() {
         context_data: &context_data,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 
@@ -644,6 +721,7 @@ fn needs_condition_check() {
         context_data: &context_data,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 
@@ -1074,6 +1152,7 @@ fn ctx_with_json(data: &serde_json::Value) -> ExprContext<'_> {
         context_data: data,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     }
 }
@@ -1212,6 +1291,7 @@ fn bracket_notation_steps() {
         context_data: &null_json,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 
@@ -1548,6 +1628,7 @@ fn workflow_pattern_condition_with_wildcard() {
         context_data: &data,
         job_failed: false,
         job_cancelled: false,
+        action_status: None,
         workspace_path: None,
     };
 

@@ -291,10 +291,8 @@ fn json_to_value(v: &JsonValue) -> Value {
 fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, String> {
     // Status functions are not case-insensitive (always lowercase in practice)
     match name {
-        "success" => return Ok(Value::Bool(!ctx.job_failed && !ctx.job_cancelled)),
-        // A cancel takes over the job status, as in the official runner, so a failed
-        // job that is then cancelled no longer counts as failed.
-        "failure" => return Ok(Value::Bool(ctx.job_failed && !ctx.job_cancelled)),
+        "success" => return Ok(Value::Bool(ctx.success())),
+        "failure" => return Ok(Value::Bool(ctx.failure())),
         "always" => return Ok(Value::Bool(true)),
         "cancelled" => return Ok(Value::Bool(ctx.job_cancelled)),
         _ => {}

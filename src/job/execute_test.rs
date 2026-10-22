@@ -861,3 +861,97 @@ fn state_is_not_shared_with_a_step_whose_id_extends_the_action_name() {
 
     assert!(!env.contains_key("STATE_key"));
 }
+
+#[test]
+fn github_action_of_a_step_inside_a_composite_is_the_workflow_step() {
+    let mut nested = make_step("nested", "true");
+    nested.context_name = Some("build.__0.setup".into());
+
+    let action = step_env_github_action(&nested);
+
+    assert_eq!(action.as_deref(), Some("build"));
+}
+
+#[test]
+fn state_key_keeps_the_composite_path() {
+    let mut nested = make_step("nested", "true");
+    nested.context_name = Some("build.setup".into());
+    let unnamed = make_step("abc-123", "true");
+
+    assert_eq!(state_key(&nested), "build.setup");
+    assert_eq!(state_key(&unnamed), "abc-123");
+}
+
+#[test]
+fn step_inside_a_composite_reads_its_own_saved_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(
+        &tmp.path().join("work"),
+        &tmp.path().join("tmp"),
+        &tmp.path().join("tool-cache"),
+        "test-runner",
+        "owner/repo",
+    )
+    .unwrap();
+    let mut state = JobState::new(
+        SecretMasker::default(),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
+    state.action_states.insert(
+        "build".into(),
+        HashMap::from([("key".to_string(), "outer".to_string())]),
+    );
+    state.action_states.insert(
+        "build.setup".into(),
+        HashMap::from([("key".to_string(), "inner".to_string())]),
+    );
+    let mut nested = make_step("nested", "true");
+    nested.context_name = Some("build.setup".into());
+
+    let env = build_step_env(&nested, &state, &ws, &HashMap::new());
+
+    assert_eq!(env["STATE_key"], "inner");
+}
+
+#[test]
+fn continue_on_error_only_turns_a_failure_into_success() {
+    assert_eq!(
+        StepConclusion::Failed.after_continue_on_error(true),
+        StepConclusion::Succeeded
+    );
+    assert_eq!(
+        StepConclusion::Failed.after_continue_on_error(false),
+        StepConclusion::Failed
+    );
+    assert_eq!(
+        StepConclusion::Cancelled.after_continue_on_error(true),
+        StepConclusion::Cancelled
+    );
+}
+
+#[test]
+fn merging_results_keeps_the_worst() {
+    use StepConclusion::{Cancelled, Failed, Succeeded};
+
+    assert_eq!(Succeeded.merge(Succeeded), Succeeded);
+    assert_eq!(Succeeded.merge(Failed), Failed);
+    assert_eq!(Failed.merge(Succeeded), Failed);
+    assert_eq!(Failed.merge(Cancelled), Cancelled);
+    assert_eq!(Cancelled.merge(Failed), Cancelled);
+}
+
+#[test]
+fn job_status_counts_a_requested_cancel_as_cancelled() {
+    let cancel = JobCancel::new();
+    let status = JobStatus {
+        failed: false,
+        cancelled: false,
+        cancel: cancel.clone(),
+    };
+    assert!(!status.is_cancelled());
+
+    cancel.force();
+
+    assert!(status.is_cancelled());
+}

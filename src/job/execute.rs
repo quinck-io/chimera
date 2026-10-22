@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::JobClient;
+use super::action::composite::{CompositeContext, EmbeddedPost};
 use super::action::{ActionCache, ActionStage, load_action_metadata, resolve_action};
 use super::cancel::JobCancel;
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
@@ -53,6 +54,9 @@ pub struct JobState {
     /// Per-action state for pre→post transfer via SaveState workflow command.
     /// Key: action context_name, Value: map of state name→value.
     pub action_states: HashMap<String, HashMap<String, String>>,
+    /// Post steps of actions used inside composite actions, keyed like
+    /// `action_states` by the composite action whose post step runs them.
+    pub embedded_posts: HashMap<String, Vec<EmbeddedPost>>,
     /// Per-step outputs for `steps.<id>.outputs.<name>` expression resolution.
     pub step_outputs: HashMap<String, HashMap<String, String>>,
     /// Per-step outcome/conclusion for `steps.<id>.outcome` / `steps.<id>.conclusion`.
@@ -89,6 +93,7 @@ impl JobState {
             outputs: HashMap::new(),
             masks,
             action_states: HashMap::new(),
+            embedded_posts: HashMap::new(),
             step_outputs: HashMap::new(),
             step_outcomes: HashMap::new(),
             secrets,
@@ -215,11 +220,47 @@ impl StepConclusion {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// The conclusion once `continue-on-error` has turned a failure into a success.
+    pub fn after_continue_on_error(self, continue_on_error: bool) -> Self {
+        if continue_on_error && self == Self::Failed {
+            Self::Succeeded
+        } else {
+            self
+        }
+    }
+
+    /// Fold another result into this one, as the official runner's
+    /// `TaskResultUtil.MergeTaskResults` does: a failure outranks a success, and a
+    /// cancel outranks both.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Cancelled, _) | (_, Self::Cancelled) => Self::Cancelled,
+            (Self::Failed, _) | (_, Self::Failed) => Self::Failed,
+            _ => Self::Succeeded,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct StepResult {
     pub conclusion: StepConclusion,
+}
+
+/// Where the job stands as a step starts. A composite action decides from it
+/// which of its own steps run, and gives each of them its own cancel token.
+#[derive(Debug, Clone)]
+pub struct JobStatus {
+    pub failed: bool,
+    pub cancelled: bool,
+    pub cancel: JobCancel,
+}
+
+impl JobStatus {
+    /// Whether `cancelled()` holds, which a cancel can make true mid-step.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled || self.cancel.is_requested()
+    }
 }
 
 impl From<StepConclusion> for ResultsConclusion {
@@ -558,7 +599,7 @@ pub fn build_step_env(
     // Pre, main and post steps of an action share one state bucket, like the official
     // runner's per-action `IntraActionState`, so `@actions/core.getState()` sees what
     // an earlier stage saved through GITHUB_STATE.
-    if let Some(states) = job_state.action_states.get(action_context_name(step)) {
+    if let Some(states) = job_state.action_states.get(state_key(step)) {
         for (k, v) in states {
             env.insert(format!("STATE_{k}"), v.clone());
         }
@@ -587,8 +628,18 @@ pub fn build_step_env(
 /// The step's identity as the official runner exposes it in `GITHUB_ACTION`: the step
 /// `id` or the generated `__owner_repo`/`__run` name. Pre and post steps carry their
 /// main step's name (see `action_stage_step`), since actions use it to recognise
-/// their own steps.
+/// their own steps. Steps inside a composite action inherit the workflow step's
+/// name, as they inherit its `github` context on the official runner.
 fn action_context_name(step: &Step) -> &str {
+    let key = state_key(step);
+    key.split_once('.')
+        .map_or(key, |(workflow_step, _)| workflow_step)
+}
+
+/// The key an action's pre, main and post steps share their saved state under. A
+/// step inside a composite action is keyed `<composite key>.<step name>`, like the
+/// official runner's qualified context name, so each embedded action has its own.
+pub fn state_key(step: &Step) -> &str {
     step.context_name.as_deref().unwrap_or(&step.id)
 }
 
@@ -829,6 +880,11 @@ pub async fn run_all_steps(
                 action_cache,
                 access_token,
                 &step_token,
+                &JobStatus {
+                    failed: job_failed,
+                    cancelled: job_cancelled,
+                    cancel: cancel.clone(),
+                },
                 docker_resources,
                 node_runtimes,
             )
@@ -971,6 +1027,11 @@ pub async fn run_all_steps(
             action_cache,
             access_token,
             &step_token,
+            &JobStatus {
+                failed: job_failed,
+                cancelled: job_cancelled,
+                cancel: cancel.clone(),
+            },
             docker_resources,
             node_runtimes,
         )
@@ -1020,8 +1081,14 @@ pub async fn run_all_steps(
         workspace.clear_step_files();
 
         // If this action has a `post` entry point, schedule it for later
-        if let Some(post_info) =
-            collect_post_step(step, action_cache, workspace.workspace_dir(), access_token).await
+        if let Some(post_info) = collect_post_step(
+            step,
+            &job_state,
+            action_cache,
+            workspace.workspace_dir(),
+            access_token,
+        )
+        .await
         {
             pending_post_steps.push(post_info);
         }
@@ -1039,11 +1106,7 @@ pub async fn run_all_steps(
         // Save outcome/conclusion for `steps.<id>.outcome` / `steps.<id>.conclusion`
         if let Some(ctx_name) = step.context_name.as_deref() {
             let effective_conclusion =
-                if step.continues_on_error() && conclusion == StepConclusion::Failed {
-                    StepConclusion::Succeeded
-                } else {
-                    conclusion
-                };
+                conclusion.after_continue_on_error(step.continues_on_error());
             job_state.step_outcomes.insert(
                 ctx_name.to_string(),
                 StepOutcome {
@@ -1160,6 +1223,11 @@ pub async fn run_all_steps(
                 action_cache,
                 access_token,
                 &step_token,
+                &JobStatus {
+                    failed: job_failed,
+                    cancelled: job_cancelled,
+                    cancel: cancel.clone(),
+                },
                 docker_resources,
                 node_runtimes,
             )
@@ -1313,6 +1381,7 @@ async fn execute_step(
     action_cache: &ActionCache,
     access_token: &str,
     cancel_token: &CancellationToken,
+    job: &JobStatus,
     docker_resources: Option<&JobDockerResources>,
     node_runtimes: &NodeRuntimes,
 ) -> (StepConclusion, ResultsConclusion) {
@@ -1364,6 +1433,7 @@ async fn execute_step(
             action_cache,
             access_token,
             cancel_token,
+            job,
             docker_resources,
             node_runtimes,
         )
@@ -1393,6 +1463,7 @@ async fn run_action_step(
     action_cache: &ActionCache,
     access_token: &str,
     cancel_token: &CancellationToken,
+    job: &JobStatus,
     docker_resources: Option<&JobDockerResources>,
     node_runtimes: &NodeRuntimes,
 ) -> Result<StepResult> {
@@ -1436,22 +1507,29 @@ async fn run_action_step(
         )
         .await
     } else if metadata.runs.is_composite() {
-        super::action::composite::run_composite_action(
-            &action_dir,
-            &metadata,
-            step,
-            job_state,
+        let ctx = CompositeContext {
             workspace,
-            base_env,
             log_sender,
             action_cache,
             access_token,
-            0,
-            cancel_token,
             docker_resources,
             node_runtimes,
-        )
-        .await
+            job,
+        };
+        if stage == ActionStage::Post {
+            super::action::composite::run_composite_post(&ctx, step, job_state).await
+        } else {
+            super::action::composite::run_composite_action(
+                &ctx,
+                &action_dir,
+                &metadata,
+                step,
+                job_state,
+                base_env,
+                0,
+            )
+            .await
+        }
     } else if metadata.runs.is_docker() {
         super::action::docker::run_docker_metadata_action(
             &action_dir,
@@ -1480,7 +1558,7 @@ fn action_stage_step(
     order: u32,
     condition: Option<String>,
 ) -> Step {
-    let context_name = action_context_name(&main_step).to_string();
+    let context_name = state_key(&main_step).to_string();
     Step {
         id: uuid::Uuid::new_v4().to_string(),
         display_name: stage.display_name(&main_step.display_name),
@@ -1492,9 +1570,11 @@ fn action_stage_step(
 }
 
 /// Check if an action step has a `post` entry point, returning the cloned
-/// step and its `post-if` condition for deferred execution.
+/// step and its `post-if` condition for deferred execution. A composite action
+/// has one once an action it uses has registered its own post step.
 async fn collect_post_step(
     step: &Step,
+    job_state: &JobState,
     action_cache: &ActionCache,
     workspace_dir: &Path,
     access_token: &str,
@@ -1517,7 +1597,9 @@ async fn collect_post_step(
         .ok()?;
     let metadata = load_action_metadata(&action_dir).ok()?;
 
-    let has_post = metadata.runs.post.is_some() || metadata.runs.post_entrypoint.is_some();
+    let has_post = metadata.runs.post.is_some()
+        || metadata.runs.post_entrypoint.is_some()
+        || (metadata.runs.is_composite() && job_state.embedded_posts.contains_key(state_key(step)));
     if has_post {
         Some((step.clone(), metadata.runs.post_if.clone()))
     } else {

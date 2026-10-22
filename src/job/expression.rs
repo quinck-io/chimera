@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
+use super::execute::{JobState, StepConclusion, StepOutcome};
 use eval::eval;
 use parser::Parser;
-use token::tokenize;
+use token::{Token, tokenize};
 use value::Value;
 
 /// All data available for evaluating GitHub Actions expressions.
@@ -18,10 +19,14 @@ pub struct ExprContext<'a> {
     pub env: &'a HashMap<String, String>,
     pub secrets: &'a HashMap<String, String>,
     pub step_outputs: &'a HashMap<String, HashMap<String, String>>,
-    pub step_outcomes: &'a HashMap<String, super::execute::StepOutcome>,
+    pub step_outcomes: &'a HashMap<String, StepOutcome>,
     pub context_data: &'a JsonValue,
     pub job_failed: bool,
     pub job_cancelled: bool,
+    /// The status of the composite action a step runs in. Inside a composite,
+    /// `success()` and `failure()` follow the action rather than the job, while
+    /// `cancelled()` still follows the job.
+    pub action_status: Option<StepConclusion>,
     /// Host filesystem workspace path for hashFiles(). In container mode,
     /// GITHUB_WORKSPACE points to the container path (/github/workspace), but
     /// hashFiles runs on the host and needs the real path.
@@ -31,7 +36,7 @@ pub struct ExprContext<'a> {
 impl<'a> ExprContext<'a> {
     pub fn new(
         env: &'a HashMap<String, String>,
-        job_state: &'a super::execute::JobState,
+        job_state: &'a JobState,
         job_failed: bool,
         job_cancelled: bool,
     ) -> Self {
@@ -43,7 +48,29 @@ impl<'a> ExprContext<'a> {
             context_data: &job_state.context_data,
             job_failed,
             job_cancelled,
+            action_status: None,
             workspace_path: job_state.host_workspace.clone(),
+        }
+    }
+
+    pub fn with_action_status(mut self, status: StepConclusion) -> Self {
+        self.action_status = Some(status);
+        self
+    }
+
+    fn success(&self) -> bool {
+        match self.action_status {
+            Some(status) => status == StepConclusion::Succeeded,
+            None => !self.job_failed && !self.job_cancelled,
+        }
+    }
+
+    // A cancel takes over the job status, as in the official runner, so a failed
+    // job that is then cancelled no longer counts as failed.
+    fn failure(&self) -> bool {
+        match self.action_status {
+            Some(status) => status == StepConclusion::Failed,
+            None => self.job_failed && !self.job_cancelled,
         }
     }
 }
@@ -53,16 +80,48 @@ impl<'a> ExprContext<'a> {
 pub fn evaluate_condition(condition: Option<&str>, ctx: &ExprContext) -> bool {
     let expr_str = match condition {
         Some(c) => c.trim(),
-        None => return !ctx.job_failed && !ctx.job_cancelled,
+        None => return ctx.success(),
     };
 
     match parse_and_eval(expr_str, ctx) {
         Ok(val) => val.is_truthy(),
         Err(e) => {
             debug!(condition = expr_str, error = %e, "condition parse error, defaulting to success()");
-            !ctx.job_failed && !ctx.job_cancelled
+            ctx.success()
         }
     }
+}
+
+const STATUS_FUNCTIONS: [&str; 4] = ["success", "failure", "cancelled", "always"];
+
+/// The `if:` of a step in an `action.yml`, read as the official runner reads it.
+/// Unlike a workflow step's, it reaches the runner as written, so no condition
+/// means `success()` and one that calls no status function only holds on success.
+pub fn action_step_condition(condition: Option<&str>) -> String {
+    let Some(condition) = condition.map(str::trim).filter(|c| !c.is_empty()) else {
+        return "success()".into();
+    };
+    let condition = condition
+        .strip_prefix("${{")
+        .and_then(|c| c.strip_suffix("}}"))
+        .map_or(condition, str::trim);
+    if calls_status_function(condition) {
+        condition.to_string()
+    } else {
+        format!("success() && ({condition})")
+    }
+}
+
+fn calls_status_function(expr: &str) -> bool {
+    let Ok(tokens) = tokenize(expr) else {
+        return false;
+    };
+    tokens.windows(2).any(|pair| match pair {
+        [Token::Ident(name), Token::LParen] => STATUS_FUNCTIONS
+            .iter()
+            .any(|status| name.eq_ignore_ascii_case(status)),
+        _ => false,
+    })
 }
 
 /// Resolve a single `${{ ... }}` expression to a string.

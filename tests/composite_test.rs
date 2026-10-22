@@ -476,3 +476,280 @@ runs:
 
     assert_eq!(conclusion, JobConclusion::Succeeded);
 }
+
+/// A failed step does not end the action: `always()` and `failure()` steps after it
+/// still run, while steps that need success are skipped.
+#[tokio::test]
+async fn composite_runs_cleanup_steps_after_a_failed_step() {
+    let env = TestEnv::setup().await;
+    let markers = env.tmp.path().join("markers");
+    std::fs::create_dir_all(&markers).unwrap();
+    let touch = |name: &str| format!("touch '{}'", markers.join(name).display());
+    write_action(
+        env.workspace.workspace_dir(),
+        "cleanup",
+        &format!(
+            r#"
+name: cleanup
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: exit 1
+    - shell: bash
+      run: {next}
+    - if: always()
+      shell: bash
+      run: {always}
+    - if: failure()
+      shell: bash
+      run: {failure}
+    - if: env.ANYTHING != 'x'
+      shell: bash
+      run: {implicit}
+"#,
+            next = touch("next"),
+            always = touch("always"),
+            failure = touch("failure"),
+            implicit = touch("implicit"),
+        ),
+    );
+
+    let manifest = manifest_with_steps(
+        vec![
+            composite_step("cleanup", ".github/actions/cleanup", serde_json::json!({})),
+            script_step_if(
+                "check",
+                &format!(
+                    r#"test "${{{{ steps.cleanup.outcome }}}}" = "failure" && {}"#,
+                    touch("checked")
+                ),
+                "always()",
+            ),
+        ],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Failed);
+    assert!(markers.join("always").exists(), "always() step did not run");
+    assert!(
+        markers.join("failure").exists(),
+        "failure() step did not run"
+    );
+    assert!(
+        !markers.join("next").exists(),
+        "a default step ran after a failure"
+    );
+    assert!(
+        !markers.join("implicit").exists(),
+        "a step without a status function ran after a failure"
+    );
+    assert!(
+        markers.join("checked").exists(),
+        "the composite step did not conclude as failed"
+    );
+}
+
+/// A node action that logs the environment it runs in, and on its post step logs
+/// its `marker` input and the state its main step saved.
+fn write_node_action_with_post(workspace_dir: &std::path::Path, log: &std::path::Path) {
+    let action_dir = workspace_dir.join(".github/actions/with-post");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        r#"
+name: with-post
+inputs:
+  marker:
+    required: true
+runs:
+  using: node20
+  main: main.js
+  post: post.js
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        action_dir.join("main.js"),
+        format!(
+            r#"
+const fs = require('fs');
+const marker = process.env.INPUT_MARKER;
+fs.appendFileSync(process.env.GITHUB_STATE, `saved=state-of-${{marker}}\n`);
+fs.appendFileSync({log:?}, `main ${{marker}} action=${{process.env.GITHUB_ACTION}} mode=${{process.env.MODE}}\n`);
+"#,
+            log = log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        action_dir.join("post.js"),
+        format!(
+            r#"
+const fs = require('fs');
+fs.appendFileSync({log:?}, `post ${{process.env.INPUT_MARKER}} ${{process.env.STATE_saved}}\n`);
+"#,
+            log = log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+}
+
+fn read_log(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every step inside a composite action reports the workflow step in
+/// `GITHUB_ACTION`, as it inherits that step's `github` context on the official
+/// runner.
+#[tokio::test]
+async fn composite_steps_report_the_workflow_step_as_github_action() {
+    let env = TestEnv::setup().await;
+    let workspace_dir = env.workspace.workspace_dir();
+    let log = env.tmp.path().join("log");
+    write_node_action_with_post(workspace_dir, &log);
+    write_action(
+        workspace_dir,
+        "outer",
+        r#"
+name: outer
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: test "$GITHUB_ACTION" = "deploy" || exit 1
+    - uses: ./.github/actions/with-post
+      with:
+        marker: one
+"#,
+    );
+
+    let manifest = manifest_with_steps(
+        vec![composite_step(
+            "deploy",
+            ".github/actions/outer",
+            serde_json::json!({}),
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(read_log(&log)[0], "main one action=deploy mode=undefined");
+}
+
+/// A `uses:` step inside a composite action gets its own `env:`, and it wins over
+/// the job's env like any step's.
+#[tokio::test]
+async fn composite_nested_action_gets_its_own_env() {
+    let env = TestEnv::setup().await;
+    let workspace_dir = env.workspace.workspace_dir();
+    let log = env.tmp.path().join("log");
+    write_node_action_with_post(workspace_dir, &log);
+    write_action(
+        workspace_dir,
+        "outer",
+        r#"
+name: outer
+inputs:
+  mode:
+    default: fast
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "MODE=slow" >> "$GITHUB_ENV"
+    - uses: ./.github/actions/with-post
+      env:
+        MODE: ${{ inputs.mode }}
+      with:
+        marker: one
+"#,
+    );
+
+    let manifest = manifest_with_steps(
+        vec![composite_step(
+            "outer",
+            ".github/actions/outer",
+            serde_json::json!({}),
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(read_log(&log)[0], "main one action=outer mode=fast");
+}
+
+/// Post steps of actions used inside composite actions run at the end of the job,
+/// last one first, with the inputs and state their main step had, including
+/// through a composite action nested in another. One whose main step was skipped
+/// has no post step.
+#[tokio::test]
+async fn composite_nested_actions_run_their_post_steps() {
+    let env = TestEnv::setup().await;
+    let workspace_dir = env.workspace.workspace_dir();
+    let log = env.tmp.path().join("log");
+    write_node_action_with_post(workspace_dir, &log);
+    write_action(
+        workspace_dir,
+        "inner",
+        r#"
+name: inner
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/with-post
+      with:
+        marker: two
+"#,
+    );
+    write_action(
+        workspace_dir,
+        "outer",
+        r#"
+name: outer
+runs:
+  using: composite
+  steps:
+    - id: first
+      uses: ./.github/actions/with-post
+      with:
+        marker: one
+    - uses: ./.github/actions/inner
+    - if: failure()
+      uses: ./.github/actions/with-post
+      with:
+        marker: never
+"#,
+    );
+
+    let manifest = manifest_with_steps(
+        vec![
+            composite_step("outer", ".github/actions/outer", serde_json::json!({})),
+            script_step(
+                "after",
+                &format!("echo after >> '{}'", log.to_string_lossy()),
+            ),
+        ],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(
+        read_log(&log),
+        [
+            "main one action=outer mode=undefined",
+            "main two action=outer mode=undefined",
+            "after",
+            "post two state-of-two",
+            "post one state-of-one",
+        ]
+    );
+}
