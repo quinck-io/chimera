@@ -292,7 +292,9 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
     // Status functions are not case-insensitive (always lowercase in practice)
     match name {
         "success" => return Ok(Value::Bool(!ctx.job_failed && !ctx.job_cancelled)),
-        "failure" => return Ok(Value::Bool(ctx.job_failed)),
+        // A cancel takes over the job status, as in the official runner, so a failed
+        // job that is then cancelled no longer counts as failed.
+        "failure" => return Ok(Value::Bool(ctx.job_failed && !ctx.job_cancelled)),
         "always" => return Ok(Value::Bool(true)),
         "cancelled" => return Ok(Value::Bool(ctx.job_cancelled)),
         _ => {}

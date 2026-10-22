@@ -330,3 +330,10 @@ fn timespan_parses_days_and_fractions() {
     assert_eq!(parse_timespan("05:00"), None);
     assert_eq!(parse_timespan("-00:05:00"), None);
 }
+
+#[test]
+fn timespan_rejects_values_too_large_for_a_duration() {
+    assert_eq!(parse_timespan("00:00:1e300"), None);
+    assert_eq!(parse_timespan("00:00:NaN"), None);
+    assert_eq!(parse_timespan(&format!("{}.00:00:00", u64::MAX)), None);
+}

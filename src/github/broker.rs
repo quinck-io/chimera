@@ -116,12 +116,14 @@ fn parse_timespan(text: &str) -> Option<Duration> {
         None => (0, day_hours.parse::<u64>().ok()?),
     };
     let minutes = minutes.parse::<u64>().ok()?;
-    let seconds = seconds
-        .parse::<f64>()
-        .ok()
-        .filter(|s| s.is_finite() && *s >= 0.0)?;
-    let whole = ((days * 24 + hours) * 60 + minutes) * 60;
-    Some(Duration::from_secs(whole) + Duration::from_secs_f64(seconds))
+    let seconds = Duration::try_from_secs_f64(seconds.parse().ok()?).ok()?;
+    let whole = days
+        .checked_mul(24)?
+        .checked_add(hours)?
+        .checked_mul(60)?
+        .checked_add(minutes)?
+        .checked_mul(60)?;
+    Duration::from_secs(whole).checked_add(seconds)
 }
 
 #[derive(Debug, thiserror::Error)]

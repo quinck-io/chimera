@@ -88,6 +88,14 @@ fn condition_failure_true_when_failed() {
 }
 
 #[test]
+fn condition_failure_false_when_failed_then_cancelled() {
+    let mut ctx = empty_ctx();
+    ctx.job_failed = true;
+    ctx.job_cancelled = true;
+    assert!(!evaluate_condition(Some("failure()"), &ctx));
+}
+
+#[test]
 fn condition_always() {
     let mut ctx = empty_ctx();
     assert!(evaluate_condition(Some("always()"), &ctx));
