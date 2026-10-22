@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::JobClient;
-use super::action::composite::{CompositeContext, EmbeddedPost};
+use super::action::composite::{self, CompositeContext, EmbeddedPost};
 use super::action::{
     ActionCache, ActionStage, load_action_metadata, local_pre_warning, resolve_action,
 };
@@ -1551,19 +1551,32 @@ async fn run_action_step(
             node_runtimes,
             job,
         };
-        if stage == ActionStage::Post {
-            super::action::composite::run_composite_post(&ctx, step, job_state).await
-        } else {
-            super::action::composite::run_composite_action(
-                &ctx,
-                &action_dir,
-                &metadata,
-                step,
-                job_state,
-                base_env,
-                0,
-            )
-            .await
+        match stage {
+            ActionStage::Pre => {
+                composite::run_composite_pre(
+                    &ctx,
+                    &action_dir,
+                    &metadata,
+                    step,
+                    job_state,
+                    base_env,
+                    0,
+                )
+                .await
+            }
+            ActionStage::Main => {
+                composite::run_composite_action(
+                    &ctx,
+                    &action_dir,
+                    &metadata,
+                    step,
+                    job_state,
+                    base_env,
+                    0,
+                )
+                .await
+            }
+            ActionStage::Post => composite::run_composite_post(&ctx, step, job_state).await,
         }
     } else if metadata.runs.is_docker() {
         super::action::docker::run_docker_metadata_action(
@@ -1644,7 +1657,8 @@ async fn collect_post_step(
 
 /// Check if an action step has a `pre` entry point, returning the cloned
 /// step and its `pre-if` condition for execution before the main steps. Only
-/// JavaScript and Docker actions declare one.
+/// JavaScript and Docker actions declare one. A composite action has one once a
+/// remote action it uses has one, and like on the official runner it always runs.
 async fn collect_pre_step(
     step: &Step,
     action_cache: &ActionCache,
@@ -1673,10 +1687,12 @@ async fn collect_pre_step(
         .ok()?;
     let metadata = load_action_metadata(&action_dir).ok()?;
 
-    metadata
-        .runs
-        .has_pre()
-        .then(|| (step.clone(), metadata.runs.pre_if.clone()))
+    if metadata.runs.has_pre() {
+        return Some((step.clone(), metadata.runs.pre_if.clone()));
+    }
+    let has_nested_pre = metadata.runs.is_composite()
+        && composite::has_nested_pre(action_cache, workspace_dir, access_token, &metadata, 0).await;
+    has_nested_pre.then(|| (step.clone(), None))
 }
 
 async fn report_step_started(

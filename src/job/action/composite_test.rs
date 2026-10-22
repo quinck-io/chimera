@@ -715,3 +715,79 @@ with:
     assert_eq!(inputs["title"], "${{ secrets.MY_SECRET }}");
     assert_eq!(own_env["COPY"], "${{ secrets.MY_SECRET }}");
 }
+
+#[test]
+fn pre_condition_defaults_to_always_and_composites_always_run() {
+    let mut metadata = make_composite_metadata("[]");
+    assert_eq!(pre_condition(&metadata).as_deref(), Some("always()"));
+
+    metadata.runs.using = crate::job::action::metadata::ActionRuntime::Node("20".into());
+    assert_eq!(pre_condition(&metadata), None);
+
+    metadata.runs.pre = Some("pre.js".into());
+    assert_eq!(pre_condition(&metadata).as_deref(), Some("always()"));
+
+    metadata.runs.pre_if = Some("runner.os == 'Linux'".into());
+    assert_eq!(
+        pre_condition(&metadata).as_deref(),
+        Some("runner.os == 'Linux'")
+    );
+}
+
+const PRE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn write_cached_action(cache_dir: &Path, repo: &str, action_yml: &str) {
+    let dir = cache_dir.join("acme").join(repo).join(PRE_COMMIT);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("action.yml"), action_yml).unwrap();
+}
+
+fn composite_using(repo: &str) -> ActionMetadata {
+    make_composite_metadata(&format!("- uses: acme/{repo}@{PRE_COMMIT}"))
+}
+
+async fn has_pre(cache_dir: &Path, metadata: &ActionMetadata) -> bool {
+    let action_cache = ActionCache::new(cache_dir.to_path_buf(), reqwest::Client::new());
+    has_nested_pre(&action_cache, cache_dir, "token", metadata, 0).await
+}
+
+#[tokio::test]
+async fn composite_has_a_pre_once_a_remote_action_it_uses_has_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_cached_action(
+        tmp.path(),
+        "with-pre",
+        "runs:\n  using: node20\n  pre: pre.js\n  main: main.js\n",
+    );
+    write_cached_action(
+        tmp.path(),
+        "without-pre",
+        "runs:\n  using: node20\n  main: main.js\n",
+    );
+    write_cached_action(
+        tmp.path(),
+        "middle",
+        &format!("runs:\n  using: composite\n  steps:\n    - uses: acme/with-pre@{PRE_COMMIT}\n"),
+    );
+
+    assert!(has_pre(tmp.path(), &composite_using("with-pre")).await);
+    assert!(has_pre(tmp.path(), &composite_using("middle")).await);
+    assert!(!has_pre(tmp.path(), &composite_using("without-pre")).await);
+    assert!(!has_pre(tmp.path(), &make_composite_metadata("- run: echo hi")).await);
+}
+
+#[tokio::test]
+async fn local_and_docker_actions_give_a_composite_no_pre() {
+    let tmp = tempfile::tempdir().unwrap();
+    let local_dir = tmp.path().join(".github/actions/local");
+    std::fs::create_dir_all(&local_dir).unwrap();
+    std::fs::write(
+        local_dir.join("action.yml"),
+        "runs:\n  using: node20\n  pre: pre.js\n  main: main.js\n",
+    )
+    .unwrap();
+    let metadata =
+        make_composite_metadata("- uses: ./.github/actions/local\n- uses: docker://alpine:3.19");
+
+    assert!(!has_pre(tmp.path(), &metadata).await);
+}

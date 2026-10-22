@@ -785,10 +785,14 @@ async fn run_action(
         )
         .await
     } else if metadata.runs.is_composite() {
-        if stage == ActionStage::Post {
-            run_composite_post(ctx, step, job_state).await
-        } else {
-            run_composite_action(ctx, action_dir, metadata, step, job_state, env, depth).await
+        match stage {
+            ActionStage::Pre => {
+                run_composite_pre(ctx, action_dir, metadata, step, job_state, env, depth).await
+            }
+            ActionStage::Main => {
+                run_composite_action(ctx, action_dir, metadata, step, job_state, env, depth).await
+            }
+            ActionStage::Post => run_composite_post(ctx, step, job_state).await,
         }
     } else if metadata.runs.is_docker() {
         super::docker::run_docker_metadata_action(
@@ -810,6 +814,194 @@ async fn run_action(
             metadata.runs.using
         )
     }
+}
+
+/// Whether a composite action has a pre step. As on the official runner, it has one
+/// once a remote action it uses, however deeply nested, has one.
+pub fn has_nested_pre<'a>(
+    action_cache: &'a ActionCache,
+    workspace_dir: &'a Path,
+    access_token: &'a str,
+    metadata: &'a ActionMetadata,
+    depth: u32,
+) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+    Box::pin(async move {
+        if depth >= MAX_COMPOSITE_DEPTH {
+            return false;
+        }
+        for uses in metadata.runs.steps.iter().flatten().filter_map(step_uses) {
+            let nested = load_remote_action(action_cache, workspace_dir, access_token, &uses).await;
+            let Ok(Some((_, nested))) = nested else {
+                continue;
+            };
+            if nested.runs.has_pre()
+                || (nested.runs.is_composite()
+                    && has_nested_pre(
+                        action_cache,
+                        workspace_dir,
+                        access_token,
+                        &nested,
+                        depth + 1,
+                    )
+                    .await)
+            {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn step_uses(step: &serde_yaml::Value) -> Option<String> {
+    step.get("uses").and_then(scalar_to_string)
+}
+
+/// The directory and metadata of the remote action `uses` names. Local and
+/// `docker://` actions have no pre step, so they are `None`: a local action is only
+/// on disk once a step checks it out.
+async fn load_remote_action(
+    action_cache: &ActionCache,
+    workspace_dir: &Path,
+    access_token: &str,
+    uses: &str,
+) -> Result<Option<(PathBuf, ActionMetadata)>> {
+    let source = super::parse_uses(uses)?;
+    if !matches!(source, ActionSource::Remote { .. }) {
+        return Ok(None);
+    }
+    let action_dir = action_cache
+        .get_action(&source, workspace_dir, access_token)
+        .await?;
+    let metadata = load_action_metadata(&action_dir)?;
+    Ok(Some((action_dir, metadata)))
+}
+
+/// The `pre-if` a nested action's pre step runs under, `always()` unless it says
+/// otherwise. A composite action gets `always()` and runs its own nested pre steps.
+fn pre_condition(metadata: &ActionMetadata) -> Option<String> {
+    if metadata.runs.is_composite() {
+        return Some("always()".into());
+    }
+    metadata.runs.has_pre().then(|| {
+        metadata
+            .runs
+            .pre_if
+            .clone()
+            .unwrap_or_else(|| "always()".into())
+    })
+}
+
+pub fn run_composite_pre<'a>(
+    ctx: &'a CompositeContext<'a>,
+    action_dir: &'a Path,
+    metadata: &'a ActionMetadata,
+    step: &'a Step,
+    job_state: &'a mut JobState,
+    base_env: &'a HashMap<String, String>,
+    depth: u32,
+) -> StepFuture<'a> {
+    Box::pin(run_composite_pre_inner(
+        ctx, action_dir, metadata, step, job_state, base_env, depth,
+    ))
+}
+
+/// A composite action's pre step runs the pre steps of the remote actions it uses,
+/// in order. Like on the official runner, each is tested against the action's
+/// `pre-if` rather than the step's `if:`, and its inputs are evaluated in the
+/// composite action's scope before any of its steps ran.
+async fn run_composite_pre_inner(
+    ctx: &CompositeContext<'_>,
+    action_dir: &Path,
+    metadata: &ActionMetadata,
+    step: &Step,
+    job_state: &mut JobState,
+    base_env: &HashMap<String, String>,
+    depth: u32,
+) -> Result<StepResult> {
+    if depth >= MAX_COMPOSITE_DEPTH {
+        bail!("composite action recursion depth limit ({MAX_COMPOSITE_DEPTH}) exceeded");
+    }
+
+    let steps = metadata
+        .runs
+        .steps
+        .as_ref()
+        .context("composite action has no steps")?;
+    let sub_steps = parse_sub_steps(steps, state_key(step))?;
+    let scope = ActionScope::new(ctx, action_dir, metadata, step, job_state, base_env)?;
+
+    let caller_step_outputs = std::mem::take(&mut job_state.step_outputs);
+    let caller_step_outcomes = std::mem::take(&mut job_state.step_outcomes);
+
+    let mut status = StepConclusion::Succeeded;
+    for sub_step in &sub_steps {
+        let SubStepKind::Uses(uses) = &sub_step.kind else {
+            continue;
+        };
+        let result = run_nested_pre(ctx, &scope, sub_step, uses, job_state, depth).await;
+        let conclusion = conclusion_of(result, ctx.log_sender).await;
+        take_sub_step_file_commands(job_state, ctx.workspace, &sub_step.key);
+        status = status.merge(conclusion);
+    }
+
+    job_state.step_outputs = caller_step_outputs;
+    job_state.step_outcomes = caller_step_outcomes;
+    Ok(StepResult { conclusion: status })
+}
+
+/// Runs the pre step of the action `sub_step` uses, if it has one whose `pre-if`
+/// holds. It runs under the sub-step's key, so its main and post steps see the
+/// state it saves.
+async fn run_nested_pre(
+    ctx: &CompositeContext<'_>,
+    scope: &ActionScope<'_>,
+    sub_step: &SubStep,
+    uses: &str,
+    job_state: &mut JobState,
+    depth: u32,
+) -> Result<StepResult> {
+    let skipped = Ok(StepResult {
+        conclusion: StepConclusion::Succeeded,
+    });
+    let workspace_dir = ctx.workspace.workspace_dir();
+    let Some((action_dir, metadata)) =
+        load_remote_action(ctx.action_cache, workspace_dir, ctx.access_token, uses).await?
+    else {
+        return skipped;
+    };
+    let Some(condition) = pre_condition(&metadata) else {
+        return skipped;
+    };
+
+    let env = scope.env(job_state, ctx.workspace);
+    let expression_env = scope.expression_env(&env);
+    let job_cancelled = ctx.job.is_cancelled();
+    let holds = |job_state: &JobState, job_cancelled: bool| {
+        let condition_ctx =
+            ExprContext::new(&expression_env, job_state, ctx.job.failed, job_cancelled);
+        evaluate_condition(Some(&condition), &condition_ctx)
+    };
+    if !holds(job_state, job_cancelled) {
+        debug!(step = %sub_step.key, %condition, "skipping nested pre step");
+        return skipped;
+    }
+
+    let cancel_token = sub_step_token(ctx.job, job_cancelled, || holds(job_state, true));
+    let inputs = sub_step.inputs(&expression_env, job_state);
+    let own_env = sub_step.own_env(&expression_env, job_state);
+    let nested_step = nested_action_step(sub_step, uses, inputs, own_env, scope.step.timeout());
+    run_action(
+        ctx,
+        &action_dir,
+        &metadata,
+        ActionStage::Pre,
+        &nested_step,
+        job_state,
+        &env,
+        &cancel_token,
+        depth + 1,
+    )
+    .await
 }
 
 pub fn run_composite_post<'a>(

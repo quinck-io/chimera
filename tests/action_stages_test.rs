@@ -134,3 +134,149 @@ runs:
     assert_eq!(conclusion, JobConclusion::Succeeded);
     assert_eq!(log_lines(&log), ["ran composite"]);
 }
+
+/// A node action named `label` whose pre step saves state that its main and post
+/// steps log. `pre_if` is written as the action's `pre-if:`.
+fn write_stateful_action(action_dir: &Path, log: &Path, label: &str, pre_if: Option<&str>) {
+    std::fs::create_dir_all(action_dir).unwrap();
+    let pre_if = pre_if.map_or(String::new(), |condition| {
+        format!("  pre-if: {condition}\n")
+    });
+    std::fs::write(
+        action_dir.join("action.yml"),
+        format!(
+            "name: {label}\nruns:\n  using: node20\n  pre: pre.js\n{pre_if}  main: main.js\n  post: post.js\n"
+        ),
+    )
+    .unwrap();
+
+    let append = |line: String| {
+        format!(
+            "require('fs').appendFileSync({:?}, {line} + '\\n');\n",
+            log.to_string_lossy()
+        )
+    };
+    std::fs::write(
+        action_dir.join("pre.js"),
+        append(format!("'pre {label}'"))
+            + &format!(
+                "require('fs').appendFileSync(process.env.GITHUB_STATE, 'from=pre-{label}\\n');\n"
+            ),
+    )
+    .unwrap();
+    std::fs::write(
+        action_dir.join("main.js"),
+        append(format!("'main {label} ' + process.env.STATE_from")),
+    )
+    .unwrap();
+    std::fs::write(
+        action_dir.join("post.js"),
+        append(format!("'post {label} ' + process.env.STATE_from")),
+    )
+    .unwrap();
+}
+
+fn write_composite(action_dir: &Path, steps: &str) {
+    std::fs::create_dir_all(action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        format!("name: composite\nruns:\n  using: composite\n  steps:\n{steps}"),
+    )
+    .unwrap();
+}
+
+/// Like the official runner, a composite action gets a pre step that runs the pre
+/// steps of the remote actions it uses before the job's steps, each under its own
+/// `pre-if`, and what they save reaches their main and post steps.
+#[tokio::test]
+async fn composite_action_runs_the_pre_steps_of_the_actions_it_uses() {
+    let env = TestEnv::setup().await;
+    let log = env.tmp.path().join("stages.log");
+    let alpha_dir = env.cached_action_dir("acme", "alpha", COMMIT);
+    write_stateful_action(&alpha_dir, &log, "alpha", None);
+    let beta_dir = env.cached_action_dir("acme", "beta", COMMIT);
+    write_stateful_action(&beta_dir, &log, "beta", Some("false"));
+    write_composite(
+        &env.cached_action_dir("acme", "wrapper", COMMIT),
+        &format!(
+            "    - shell: bash\n      run: echo 'wrapper main' >> {log:?}\n\
+             \x20   - if: false\n      uses: acme/alpha@{COMMIT}\n\
+             \x20   - uses: acme/alpha@{COMMIT}\n\
+             \x20   - uses: acme/beta@{COMMIT}\n",
+            log = log.to_string_lossy()
+        ),
+    );
+    let manifest = manifest_with_steps(
+        vec![
+            script_step(
+                "first",
+                &format!("echo first >> '{}'", log.to_string_lossy()),
+            ),
+            remote_action_step("wrap", "acme/wrapper", COMMIT),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(
+        log_lines(&log),
+        [
+            "pre alpha",
+            "pre alpha",
+            "first",
+            "wrapper main",
+            "main alpha pre-alpha",
+            "main beta undefined",
+            "post beta undefined",
+            "post alpha pre-alpha",
+        ]
+    );
+}
+
+/// The pre steps of actions inside a nested remote composite action run too, while
+/// a local action, only on disk once a step checks it out, has none.
+#[tokio::test]
+async fn composite_action_runs_nested_pre_steps_through_nested_composites() {
+    let env = TestEnv::setup().await;
+    let log = env.tmp.path().join("stages.log");
+    write_stateful_action(
+        &env.cached_action_dir("acme", "alpha", COMMIT),
+        &log,
+        "alpha",
+        None,
+    );
+    write_stateful_action(
+        &env.workspace.workspace_dir().join(".github/actions/local"),
+        &log,
+        "local",
+        None,
+    );
+    write_composite(
+        &env.cached_action_dir("acme", "middle", COMMIT),
+        &format!("    - uses: acme/alpha@{COMMIT}\n"),
+    );
+    write_composite(
+        &env.cached_action_dir("acme", "wrapper", COMMIT),
+        &format!("    - uses: acme/middle@{COMMIT}\n    - uses: ./.github/actions/local\n"),
+    );
+    let manifest = manifest_with_steps(
+        vec![remote_action_step("wrap", "acme/wrapper", COMMIT)],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(
+        log_lines(&log),
+        [
+            "pre alpha",
+            "main alpha pre-alpha",
+            "main local undefined",
+            "post local undefined",
+            "post alpha pre-alpha",
+        ]
+    );
+}
