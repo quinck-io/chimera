@@ -77,3 +77,60 @@ async fn step_ids_that_look_like_stages_run_their_action_main() {
         ]
     );
 }
+
+/// Like the official runner, a local action's `pre` never runs, since the action is
+/// only on disk once a step checks it out. Its main and post steps still run.
+#[tokio::test]
+async fn local_action_pre_is_skipped() {
+    let env = TestEnv::setup().await;
+    let log = env.tmp.path().join("stages.log");
+    let action_dir = env.workspace.workspace_dir().join(".github/actions/staged");
+    write_staged_action(&action_dir, &log);
+    let manifest = manifest_with_steps(
+        vec![local_action_step("staged", ".github/actions/staged")],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(log_lines(&log), ["main staged", "post staged by-staged"]);
+}
+
+/// The official runner only reads `pre` and `post` for JavaScript and Docker
+/// actions, so a composite action that declares them runs once, as its main step.
+#[tokio::test]
+async fn composite_action_declared_pre_and_post_are_ignored() {
+    let env = TestEnv::setup().await;
+    let log = env.tmp.path().join("stages.log");
+    let action_dir = env.cached_action_dir("acme", "composite", COMMIT);
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(action_dir.join("pre.js"), "").unwrap();
+    std::fs::write(action_dir.join("post.js"), "").unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        format!(
+            r#"
+name: composite
+runs:
+  using: composite
+  pre: pre.js
+  post: post.js
+  steps:
+    - shell: bash
+      run: echo "ran $GITHUB_ACTION" >> {log:?}
+"#,
+            log = log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let manifest = manifest_with_steps(
+        vec![remote_action_step("composite", "acme/composite", COMMIT)],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+    assert_eq!(log_lines(&log), ["ran composite"]);
+}

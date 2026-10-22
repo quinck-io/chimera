@@ -446,6 +446,7 @@ fn embedded_post_keeps_the_inputs_the_main_step_saw() {
 #[test]
 fn post_condition_defaults_to_always() {
     let mut metadata = make_composite_metadata("[]");
+    metadata.runs.using = crate::job::action::metadata::ActionRuntime::Node("20".into());
     assert_eq!(post_condition(&metadata), None);
 
     metadata.runs.post = Some("post.js".into());

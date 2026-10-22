@@ -91,3 +91,41 @@ async fn results_run_uploads_job_level_log() {
 
     assert!(step.content.lock().await.contains("first-step-output"));
 }
+
+/// The official runner skips a local action's `pre` and says so in the main step's
+/// log.
+#[tokio::test]
+async fn local_action_with_pre_logs_a_warning() {
+    let mut env = TestEnv::setup().await;
+    let step = spy_on_blob(&env.mock_server, "Step").await;
+    let action_dir = env
+        .workspace
+        .workspace_dir()
+        .join(".github/actions/with-pre");
+    std::fs::create_dir_all(&action_dir).unwrap();
+    std::fs::write(
+        action_dir.join("action.yml"),
+        "name: with-pre\nruns:\n  using: node20\n  pre: pre.js\n  main: main.js\n",
+    )
+    .unwrap();
+    std::fs::write(action_dir.join("pre.js"), "").unwrap();
+    std::fs::write(action_dir.join("main.js"), "").unwrap();
+
+    let manifest = manifest_with_results_endpoint(
+        vec![local_action_step("with-pre", ".github/actions/with-pre")],
+        &env.mock_server.uri(),
+    );
+    env.configure_from_manifest(&manifest);
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, chimera::job::client::JobConclusion::Succeeded);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let step_log = step.content.lock().await;
+    assert!(
+        step_log.contains(
+            "##[warning]`pre` execution is not supported for local action from '.github/actions/with-pre'"
+        ),
+        "step log should warn about the skipped pre, got: {step_log}"
+    );
+}

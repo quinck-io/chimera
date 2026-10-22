@@ -323,6 +323,27 @@ pub fn remote_action_step(id: &str, name: &str, commit: &str) -> serde_json::Val
     })
 }
 
+/// A `uses: ./path` step, which reaches the runner as a `self` repository reference.
+pub fn local_action_step(id: &str, path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "displayName": format!("Run {path}"),
+        "reference": {
+            "name": path,
+            "type": "repository",
+            "repositoryType": "self",
+            "path": path
+        },
+        "inputs": {},
+        "condition": null,
+        "timeoutInMinutes": null,
+        "continueOnError": false,
+        "order": 1,
+        "environment": null,
+        "contextName": id
+    })
+}
+
 /// A `run:` step with a `working-directory:`, which reaches the runner as the
 /// step input `workingDirectory`.
 pub fn script_step_in_dir(id: &str, script: &str, dir: &str) -> serde_json::Value {

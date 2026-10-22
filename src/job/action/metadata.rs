@@ -172,6 +172,20 @@ impl ActionRuns {
     pub fn is_docker(&self) -> bool {
         self.using.is_docker()
     }
+
+    /// Only JavaScript actions (`pre`) and Docker actions (`pre-entrypoint`) have a
+    /// pre entry point. Like the official runner, any other key is ignored.
+    pub fn has_pre(&self) -> bool {
+        (self.is_node() && self.pre.is_some())
+            || (self.is_docker() && self.pre_entrypoint.is_some())
+    }
+
+    /// Only JavaScript actions (`post`) and Docker actions (`post-entrypoint`) have a
+    /// post entry point. Like the official runner, any other key is ignored.
+    pub fn has_post(&self) -> bool {
+        (self.is_node() && self.post.is_some())
+            || (self.is_docker() && self.post_entrypoint.is_some())
+    }
 }
 
 pub fn load_action_metadata(action_dir: &Path) -> Result<ActionMetadata> {

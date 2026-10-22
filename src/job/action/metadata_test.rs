@@ -295,3 +295,47 @@ runs:
     let metadata = load_action_metadata(tmp.path()).unwrap();
     assert!(metadata.runs.is_node());
 }
+
+fn runs_from(yaml: &str) -> ActionRuns {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("action.yml"), yaml).unwrap();
+    load_action_metadata(tmp.path()).unwrap().runs
+}
+
+#[test]
+fn node_action_has_pre_and_post_from_pre_and_post() {
+    let runs =
+        runs_from("runs:\n  using: node20\n  main: index.js\n  pre: pre.js\n  post: post.js\n");
+
+    assert!(runs.has_pre());
+    assert!(runs.has_post());
+}
+
+#[test]
+fn docker_action_has_pre_and_post_from_entrypoints() {
+    let runs = runs_from(
+        "runs:\n  using: docker\n  image: Dockerfile\n  pre-entrypoint: /pre.sh\n  post-entrypoint: /post.sh\n",
+    );
+
+    assert!(runs.has_pre());
+    assert!(runs.has_post());
+}
+
+#[test]
+fn docker_action_ignores_node_style_pre_and_post() {
+    let runs =
+        runs_from("runs:\n  using: docker\n  image: Dockerfile\n  pre: pre.sh\n  post: post.sh\n");
+
+    assert!(!runs.has_pre());
+    assert!(!runs.has_post());
+}
+
+#[test]
+fn composite_action_ignores_declared_pre_and_post() {
+    let runs = runs_from(
+        "runs:\n  using: composite\n  pre: pre.js\n  post: post.js\n  pre-entrypoint: /pre.sh\n  post-entrypoint: /post.sh\n  steps:\n    - run: echo hi\n      shell: bash\n",
+    );
+
+    assert!(!runs.has_pre());
+    assert!(!runs.has_post());
+}

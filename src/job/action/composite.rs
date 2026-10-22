@@ -681,6 +681,9 @@ async fn run_nested_action(
         .get_action(&source, ctx.workspace.workspace_dir(), ctx.access_token)
         .await?;
     let metadata = load_action_metadata(&action_dir)?;
+    if let Some(warning) = super::local_pre_warning(&source, &metadata) {
+        ctx.log_sender.send(warning).await;
+    }
 
     if let Some(condition) = post_condition(&metadata) {
         let post = EmbeddedPost::new(nested_step, &action_dir, condition, env, job_state);
@@ -716,8 +719,7 @@ async fn run_nested_action(
 /// The `post-if` of an action that has a post step, `always()` unless it says
 /// otherwise.
 fn post_condition(metadata: &ActionMetadata) -> Option<String> {
-    let has_post = metadata.runs.post.is_some() || metadata.runs.post_entrypoint.is_some();
-    has_post.then(|| {
+    metadata.runs.has_post().then(|| {
         metadata
             .runs
             .post_if

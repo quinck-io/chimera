@@ -67,6 +67,21 @@ pub fn build_action_inputs(
     inputs
 }
 
+/// The warning the official runner logs when a local action declares a `pre`: a
+/// local action is only on disk once a step checks it out, too late for its `pre`
+/// step, so that is never run.
+pub fn local_pre_warning(source: &ActionSource, metadata: &ActionMetadata) -> Option<String> {
+    let ActionSource::Local { path } = source else {
+        return None;
+    };
+    metadata.runs.has_pre().then(|| {
+        format!(
+            "##[warning]`pre` execution is not supported for local action from '{}'",
+            path.display()
+        )
+    })
+}
+
 /// Parse a `uses:` string from a composite action step or workflow.
 /// Handles `owner/repo@ref`, `owner/repo/path@ref`, `./local`, `docker://image`.
 pub fn parse_uses(uses: &str) -> anyhow::Result<ActionSource> {

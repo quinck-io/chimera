@@ -14,7 +14,9 @@ use tracing::{debug, info, warn};
 
 use super::JobClient;
 use super::action::composite::{CompositeContext, EmbeddedPost};
-use super::action::{ActionCache, ActionStage, load_action_metadata, resolve_action};
+use super::action::{
+    ActionCache, ActionStage, load_action_metadata, local_pre_warning, resolve_action,
+};
 use super::cancel::JobCancel;
 use super::client::{JobConclusion, ResultsConclusion, ResultsStatus, ResultsStep};
 use super::commands::CommandPolicy;
@@ -1490,6 +1492,11 @@ async fn run_action_step(
         .get_action(&source, workspace.workspace_dir(), access_token)
         .await?;
     let metadata = load_action_metadata(&action_dir)?;
+    if stage == ActionStage::Main
+        && let Some(warning) = local_pre_warning(&source, &metadata)
+    {
+        log_sender.send(warning).await;
+    }
 
     if metadata.runs.is_node() {
         super::action::node::run_node_action(
@@ -1570,8 +1577,10 @@ fn action_stage_step(
 }
 
 /// Check if an action step has a `post` entry point, returning the cloned
-/// step and its `post-if` condition for deferred execution. A composite action
-/// has one once an action it uses has registered its own post step.
+/// step and its `post-if` condition for deferred execution. Only JavaScript and
+/// Docker actions declare one. A composite action has one once an action it uses
+/// has registered its own post step, and like on the official runner it always
+/// runs, whatever the action's `post-if` says.
 async fn collect_post_step(
     step: &Step,
     job_state: &JobState,
@@ -1597,18 +1606,17 @@ async fn collect_post_step(
         .ok()?;
     let metadata = load_action_metadata(&action_dir).ok()?;
 
-    let has_post = metadata.runs.post.is_some()
-        || metadata.runs.post_entrypoint.is_some()
-        || (metadata.runs.is_composite() && job_state.embedded_posts.contains_key(state_key(step)));
-    if has_post {
-        Some((step.clone(), metadata.runs.post_if.clone()))
-    } else {
-        None
+    if metadata.runs.has_post() {
+        return Some((step.clone(), metadata.runs.post_if.clone()));
     }
+    let has_embedded_posts =
+        metadata.runs.is_composite() && job_state.embedded_posts.contains_key(state_key(step));
+    has_embedded_posts.then(|| (step.clone(), None))
 }
 
 /// Check if an action step has a `pre` entry point, returning the cloned
-/// step and its `pre-if` condition for execution before the main steps.
+/// step and its `pre-if` condition for execution before the main steps. Only
+/// JavaScript and Docker actions declare one.
 async fn collect_pre_step(
     step: &Step,
     action_cache: &ActionCache,
@@ -1622,7 +1630,12 @@ async fn collect_pre_step(
     use super::action::resolve::ActionSource;
     let source = resolve_action(step).ok()?;
 
-    if matches!(source, ActionSource::Docker { .. }) {
+    // A local action is only on disk once a step checks it out, so the official
+    // runner never runs its `pre`: it warns when the main step runs instead.
+    if matches!(
+        source,
+        ActionSource::Docker { .. } | ActionSource::Local { .. }
+    ) {
         return None;
     }
 
@@ -1632,12 +1645,10 @@ async fn collect_pre_step(
         .ok()?;
     let metadata = load_action_metadata(&action_dir).ok()?;
 
-    let has_pre = metadata.runs.pre.is_some() || metadata.runs.pre_entrypoint.is_some();
-    if has_pre {
-        Some((step.clone(), metadata.runs.pre_if.clone()))
-    } else {
-        None
-    }
+    metadata
+        .runs
+        .has_pre()
+        .then(|| (step.clone(), metadata.runs.pre_if.clone()))
 }
 
 async fn report_step_started(
