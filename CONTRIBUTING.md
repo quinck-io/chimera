@@ -27,6 +27,23 @@ All three checks must pass before submitting a PR.
 3. Write tests for any new logic or behavior changes
 4. Open a pull request against `main`
 
+### Commit messages
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with a [gitmoji](https://gitmoji.dev/) after the type:
+
+```
+type(scope): <gitmoji> short imperative description
+```
+
+For example:
+
+```
+fix(docker): 🐛 kill a cancelled step's processes inside the job container
+feat(composite): ✨ run the pre steps of nested actions
+```
+
+The scope is usually the module the change touches (`docker`, `composite`, `job`, `runner`, ...).
+
 ### PR guidelines
 
 - Keep PRs focused on a single change
