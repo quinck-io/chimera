@@ -3,6 +3,9 @@ name: Chimera Test
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   # ── Job 1: Core features ──────────────────────────────────────────
   basics:
