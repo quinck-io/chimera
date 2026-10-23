@@ -426,20 +426,16 @@ impl Daemon {
             bail!("no runners could be started");
         }
 
-        // Spawn state file writer
+        // Runs until the runners are drained, which can take hours on a restart,
+        // so `chimera status` keeps showing which jobs are still being waited on.
         let state_writer = Arc::clone(&state);
         let state_path = self.paths.state_file();
-        let mut writer_shutdown_rx = shutdown_rx.clone();
         let writer_handle = tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                        let snapshot = state_writer.snapshot().await;
-                        if let Err(e) = write_state_file(&state_path, &snapshot) {
-                            warn!(error = %e, "failed to write state file");
-                        }
-                    }
-                    _ = writer_shutdown_rx.changed() => break,
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let snapshot = state_writer.snapshot().await;
+                if let Err(e) = write_state_file(&state_path, &snapshot) {
+                    warn!(error = %e, "failed to write state file");
                 }
             }
         });
