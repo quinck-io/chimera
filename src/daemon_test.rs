@@ -441,3 +441,64 @@ async fn supervise_stops_retrying_on_shutdown() {
 
     assert!(result.is_err());
 }
+
+// --- Shutdown drain tests ---
+
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[tokio::test(start_paused = true)]
+async fn drain_waits_for_jobs_that_finish_in_time() {
+    let stop_jobs = CancellationToken::new();
+    let mut join_set = JoinSet::new();
+    join_set.spawn(async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        ("r".to_string(), Ok(()))
+    });
+
+    drain_runners(&mut join_set, SHUTDOWN_TIMEOUT, &stop_jobs).await;
+
+    assert!(join_set.is_empty());
+    assert!(!stop_jobs.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_cancels_jobs_past_the_timeout_and_lets_them_wrap_up() {
+    let stop_jobs = CancellationToken::new();
+    let wrapped_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut join_set = JoinSet::new();
+    let token = stop_jobs.clone();
+    let flag = Arc::clone(&wrapped_up);
+    join_set.spawn(async move {
+        token.cancelled().await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        ("r".to_string(), Ok(()))
+    });
+    let origin = tokio::time::Instant::now();
+
+    drain_runners(&mut join_set, SHUTDOWN_TIMEOUT, &stop_jobs).await;
+
+    assert!(stop_jobs.is_cancelled());
+    assert!(wrapped_up.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(origin.elapsed().as_secs(), 310);
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_aborts_runners_that_ignore_the_cancel() {
+    let stop_jobs = CancellationToken::new();
+    let mut join_set = JoinSet::new();
+    join_set.spawn(async {
+        std::future::pending::<()>().await;
+        ("r".to_string(), Ok(()))
+    });
+    let origin = tokio::time::Instant::now();
+
+    drain_runners(&mut join_set, SHUTDOWN_TIMEOUT, &stop_jobs).await;
+
+    assert_eq!(
+        origin.elapsed(),
+        SHUTDOWN_TIMEOUT + SHUTDOWN_CANCEL_GRACE + JOB_WRAP_UP
+    );
+    let aborted = join_set.join_next().await.unwrap().unwrap_err();
+    assert!(aborted.is_cancelled());
+}

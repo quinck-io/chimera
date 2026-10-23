@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::github::broker::{BrokerClient, BrokerMessage, MessageType};
@@ -11,6 +12,10 @@ const CANCEL_POLL_ERROR_DELAY: Duration = Duration::from_millis(5000);
 
 /// Used when a cancellation message names no timeout.
 const DEFAULT_CANCEL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long steps that outlive a cancel may keep running when the daemon
+/// cancels jobs at shutdown.
+pub const SHUTDOWN_CANCEL_GRACE: Duration = Duration::from_secs(30);
 
 /// Spawn a background task that polls the broker for cancellation messages
 /// until the job finishes. Every `JobCancellation` requests the cancel again,
@@ -46,6 +51,21 @@ pub fn spawn_cancel_poller(broker: &BrokerClient, cancel: JobCancel) -> JoinHand
                 _ = tokio::time::sleep(delay) => {}
                 _ = cancel.finished() => return,
             }
+        }
+    })
+}
+
+/// Spawn a background task that cancels the job once the daemon stops waiting
+/// for jobs at shutdown, so the job is reported and cleaned up instead of being
+/// dropped mid-step.
+pub fn spawn_shutdown_canceller(stop_jobs: CancellationToken, cancel: JobCancel) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = stop_jobs.cancelled() => {
+                warn!(grace = ?SHUTDOWN_CANCEL_GRACE, "daemon is shutting down, cancelling the job");
+                cancel.request(SHUTDOWN_CANCEL_GRACE);
+            }
+            _ = cancel.finished() => {}
         }
     })
 }

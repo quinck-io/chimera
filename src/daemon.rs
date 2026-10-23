@@ -7,14 +7,15 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, watch};
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
 use crate::cache::manager::CacheManager;
 use crate::cache::scope::ScopeRegistry;
 use crate::cache::server as cache_server;
 use crate::config::{ChimeraConfig, ChimeraPaths, load_runner_credentials};
-use crate::runner::Runner;
+use crate::runner::{Runner, SHUTDOWN_CANCEL_GRACE};
 
 // --- PID Lock ---
 
@@ -224,6 +225,60 @@ where
     }
 }
 
+type RunnerExit = (String, Result<()>);
+
+/// How long a job cancelled at shutdown gets, once its steps are stopped, to
+/// report its conclusion to GitHub and clean up its containers.
+const JOB_WRAP_UP: Duration = Duration::from_secs(30);
+
+/// Wait for the runners to finish their jobs. Past `timeout` their jobs are
+/// cancelled, so GitHub sees them end and their containers are removed; only
+/// runners that still hang after that are aborted.
+async fn drain_runners(
+    join_set: &mut JoinSet<RunnerExit>,
+    timeout: Duration,
+    stop_jobs: &CancellationToken,
+) {
+    if tokio::time::timeout(timeout, join_all(join_set))
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    warn!(
+        timeout_secs = timeout.as_secs(),
+        "shutdown timeout exceeded, cancelling running jobs"
+    );
+    stop_jobs.cancel();
+
+    let cancel_timeout = SHUTDOWN_CANCEL_GRACE + JOB_WRAP_UP;
+    if tokio::time::timeout(cancel_timeout, join_all(join_set))
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    warn!(
+        timeout_secs = cancel_timeout.as_secs(),
+        "runners did not stop after cancelling their jobs, forcing exit"
+    );
+    join_set.abort_all();
+}
+
+async fn join_all(join_set: &mut JoinSet<RunnerExit>) {
+    while let Some(result) = join_set.join_next().await {
+        log_runner_exit(result);
+    }
+}
+
+fn log_runner_exit(result: Result<RunnerExit, JoinError>) {
+    match result {
+        Ok((name, Ok(()))) => info!(runner = %name, "runner exited cleanly"),
+        Ok((name, Err(e))) => error!(runner = %name, error = %e, "runner exited with error"),
+        Err(e) => error!(error = %e, "runner task panicked"),
+    }
+}
+
 pub fn write_state_file(path: &Path, snapshot: &StateSnapshot) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(snapshot).context("serializing state")?;
@@ -280,6 +335,7 @@ impl Daemon {
 
         let mut join_set = JoinSet::new();
         let mut started = 0usize;
+        let stop_jobs = CancellationToken::new();
 
         for name in &self.config.runners {
             let creds = match load_runner_credentials(&self.paths.runners_dir(), name) {
@@ -295,6 +351,7 @@ impl Daemon {
             let state_ref = Arc::clone(&state);
             let runner_name = name.clone();
             let cache_scopes = Arc::clone(&cache_scopes);
+            let stop_jobs = stop_jobs.clone();
             let make_runner = move || {
                 Runner::with_state(
                     runner_name.clone(),
@@ -303,6 +360,7 @@ impl Daemon {
                     Arc::clone(&state_ref),
                     cache_port,
                     Arc::clone(&cache_scopes),
+                    stop_jobs.clone(),
                 )
             };
 
@@ -358,21 +416,11 @@ impl Daemon {
         loop {
             tokio::select! {
                 result = join_set.join_next() => {
-                    match result {
-                        Some(Ok((name, Ok(())))) => {
-                            info!(runner = %name, "runner exited cleanly");
-                        }
-                        Some(Ok((name, Err(e)))) => {
-                            error!(runner = %name, error = %e, "runner exited with error");
-                        }
-                        Some(Err(e)) => {
-                            error!(error = %e, "runner task panicked");
-                        }
-                        None => {
-                            info!("all runners exited");
-                            break;
-                        }
-                    }
+                    let Some(result) = result else {
+                        info!("all runners exited");
+                        break;
+                    };
+                    log_runner_exit(result);
                 }
                 _ = shutdown_rx.changed() => {
                     info!("shutdown signal received, waiting for runners to finish");
@@ -381,28 +429,12 @@ impl Daemon {
             }
         }
 
-        // Drain remaining runners with timeout
-        if !join_set.is_empty() {
-            let timeout = Duration::from_secs(shutdown_timeout);
-            let drain = async {
-                while let Some(result) = join_set.join_next().await {
-                    match result {
-                        Ok((name, Ok(()))) => info!(runner = %name, "runner exited cleanly"),
-                        Ok((name, Err(e))) => {
-                            error!(runner = %name, error = %e, "runner exited with error")
-                        }
-                        Err(e) => error!(error = %e, "runner task panicked"),
-                    }
-                }
-            };
-            if tokio::time::timeout(timeout, drain).await.is_err() {
-                warn!(
-                    timeout_secs = shutdown_timeout,
-                    "shutdown timeout exceeded, forcing exit"
-                );
-                join_set.abort_all();
-            }
-        }
+        drain_runners(
+            &mut join_set,
+            Duration::from_secs(shutdown_timeout),
+            &stop_jobs,
+        )
+        .await;
 
         // Stop state writer
         writer_handle.abort();

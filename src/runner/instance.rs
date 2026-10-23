@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::cache::scope::{CacheScope, ScopeRegistry};
@@ -23,7 +24,7 @@ use crate::job::live_feed::LiveFeed;
 use crate::job::schema::JobManifest;
 use crate::job::workspace::Workspace;
 
-use super::cancel::spawn_cancel_poller;
+use super::cancel::{spawn_cancel_poller, spawn_shutdown_canceller};
 use super::env::{build_base_env, build_container_env};
 use super::poll_backoff::{MAX_CONSECUTIVE_ERRORS, random_retry_delay};
 use super::report::{outputs_to_variable_values, report_setup_failure};
@@ -42,6 +43,8 @@ pub struct Runner {
     pub(super) state: Option<Arc<DaemonState>>,
     pub(super) cache_port: u16,
     pub(super) cache_scopes: Arc<ScopeRegistry>,
+    /// Cancelled by the daemon when it stops waiting for jobs to finish at shutdown.
+    pub(super) stop_jobs: CancellationToken,
 }
 
 impl Runner {
@@ -52,6 +55,7 @@ impl Runner {
         state: Arc<DaemonState>,
         cache_port: u16,
         cache_scopes: Arc<ScopeRegistry>,
+        stop_jobs: CancellationToken,
     ) -> Self {
         Self {
             name,
@@ -60,6 +64,7 @@ impl Runner {
             state: Some(state),
             cache_port,
             cache_scopes,
+            stop_jobs,
         }
     }
 
@@ -185,6 +190,7 @@ impl Runner {
 
         let cancel = JobCancel::new();
         let poller_handle = spawn_cancel_poller(broker, cancel.clone());
+        let shutdown_handle = spawn_shutdown_canceller(self.stop_jobs.clone(), cancel.clone());
 
         let result = self
             .execute_job(
@@ -198,6 +204,7 @@ impl Runner {
 
         cancel.finish();
         let _ = poller_handle.await;
+        let _ = shutdown_handle.await;
 
         if let Err(e) = result {
             error!(error = %e, cause = ?e, "job execution failed");

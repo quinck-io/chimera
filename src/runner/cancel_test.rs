@@ -10,7 +10,9 @@ use crate::github::broker::BrokerClient;
 
 use crate::job::cancel::JobCancel;
 
-use super::{cancel_grace, spawn_cancel_poller};
+use tokio_util::sync::CancellationToken;
+
+use super::{SHUTDOWN_CANCEL_GRACE, cancel_grace, spawn_cancel_poller, spawn_shutdown_canceller};
 
 async fn setup() -> (MockServer, Arc<TokenManager>, watch::Sender<bool>) {
     let mock_server = MockServer::start().await;
@@ -163,4 +165,33 @@ fn cancel_grace_gives_at_least_45_seconds() {
 #[test]
 fn cancel_grace_defaults_to_five_minutes_less_15_seconds() {
     assert_eq!(cancel_grace(None), Duration::from_secs(285));
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_canceller_cancels_the_job_with_a_grace() {
+    let stop_jobs = CancellationToken::new();
+    let cancel = JobCancel::new();
+    let handle = spawn_shutdown_canceller(stop_jobs.clone(), cancel.clone());
+
+    stop_jobs.cancel();
+    handle.await.unwrap();
+
+    assert!(cancel.is_requested());
+    assert!(!cancel.step_token(true).is_cancelled());
+    tokio::time::sleep(SHUTDOWN_CANCEL_GRACE + Duration::from_millis(1)).await;
+    assert!(cancel.step_token(true).is_cancelled());
+}
+
+#[tokio::test]
+async fn shutdown_canceller_exits_when_the_job_finishes() {
+    let cancel = JobCancel::new();
+    let handle = spawn_shutdown_canceller(CancellationToken::new(), cancel.clone());
+
+    cancel.finish();
+
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("canceller should exit within 5s")
+        .expect("canceller task should not panic");
+    assert!(!cancel.is_requested());
 }
