@@ -502,3 +502,60 @@ async fn drain_aborts_runners_that_ignore_the_cancel() {
     let aborted = join_set.join_next().await.unwrap().unwrap_err();
     assert!(aborted.is_cancelled());
 }
+
+// --- Restart tests ---
+
+#[test]
+fn shutdown_merge_lets_a_stop_override_a_restart() {
+    assert_eq!(
+        Shutdown::merge(Some(Shutdown::Restart), Shutdown::Stop),
+        Shutdown::Stop
+    );
+}
+
+#[test]
+fn shutdown_merge_keeps_a_stop_over_a_later_restart() {
+    assert_eq!(
+        Shutdown::merge(Some(Shutdown::Stop), Shutdown::Restart),
+        Shutdown::Stop
+    );
+}
+
+#[test]
+fn shutdown_merge_takes_the_first_request() {
+    assert_eq!(Shutdown::merge(None, Shutdown::Restart), Shutdown::Restart);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_waits_for_jobs_past_the_shutdown_timeout() {
+    let (_signals_tx, mut signals) = watch::channel(Some(Shutdown::Restart));
+    let mut join_set = JoinSet::new();
+    join_set.spawn(async {
+        tokio::time::sleep(Duration::from_secs(2 * 60 * 60)).await;
+        ("r".to_string(), Ok(()))
+    });
+    let origin = tokio::time::Instant::now();
+
+    wait_for_restart(&mut join_set, &mut signals).await;
+
+    assert!(join_set.is_empty());
+    assert_eq!(origin.elapsed(), Duration::from_secs(2 * 60 * 60));
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_hands_over_to_the_drain_on_a_stop() {
+    let (signals_tx, mut signals) = watch::channel(Some(Shutdown::Restart));
+    let mut join_set = JoinSet::new();
+    join_set.spawn(async {
+        std::future::pending::<()>().await;
+        ("r".to_string(), Ok(()))
+    });
+    let stop = async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        signals_tx.send(Some(Shutdown::Stop)).unwrap();
+    };
+
+    tokio::join!(wait_for_restart(&mut join_set, &mut signals), stop);
+
+    assert_eq!(join_set.len(), 1);
+}

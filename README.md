@@ -112,8 +112,12 @@ Requires=docker.service
 Type=simple
 User=chimera
 ExecStart=/usr/local/bin/chimera start
-Restart=on-failure
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
 RestartSec=5
+# Must exceed shutdown_timeout_secs + 60s, the time chimera takes to cancel
+# running jobs, or systemd kills it before the jobs are reported to GitHub.
+TimeoutStopSec=420
 Environment=RUST_LOG=info
 
 [Install]
@@ -128,6 +132,20 @@ sudo systemctl daemon-reload
 sudo systemctl enable chimera
 sudo systemctl start chimera
 ```
+
+## Upgrading
+
+Install the new version, then reload the service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/quinck-io/chimera/main/install.sh | sh
+sudo systemctl reload chimera
+```
+
+On reload, runners stop taking new jobs and chimera waits for the running ones to
+finish, however long they take, then exits and systemd starts the new binary.
+Jobs queue on GitHub in the meantime. A `systemctl stop` or `restart` instead
+waits only `shutdown_timeout_secs`, then cancels the jobs still running.
 
 Check status and logs:
 

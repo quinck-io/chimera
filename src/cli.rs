@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::{ChimeraConfig, ChimeraPaths, DaemonConfig, default_root, load_config};
-use crate::daemon::{Daemon, format_status_display, is_process_alive, read_state_file};
+use crate::daemon::{Daemon, Shutdown, format_status_display, is_process_alive, read_state_file};
 
 #[derive(Parser)]
 #[command(
@@ -104,28 +105,31 @@ async fn run_start(paths: ChimeraPaths, config: ChimeraConfig) -> Result<()> {
         bail!("no runners registered. Use 'chimera register' first.");
     }
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let signals = listen_for_signals()?;
+    let daemon = Daemon::new(paths, config);
+    daemon.run(signals).await
+}
+
+/// SIGINT and SIGTERM stop the daemon; SIGHUP restarts it once running jobs finish.
+fn listen_for_signals() -> Result<watch::Receiver<Option<Shutdown>>> {
+    let mut sigint = signal(SignalKind::interrupt()).context("listening for SIGINT")?;
+    let mut sigterm = signal(SignalKind::terminate()).context("listening for SIGTERM")?;
+    let mut sighup = signal(SignalKind::hangup()).context("listening for SIGHUP")?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(None);
 
     tokio::spawn(async move {
-        let ctrl_c = tokio::signal::ctrl_c();
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                tokio::select! {
-                    _ = ctrl_c => info!("received SIGINT"),
-                    _ = sigterm.recv() => info!("received SIGTERM"),
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to register SIGTERM handler, using SIGINT only");
-                let _ = ctrl_c.await;
-                info!("received SIGINT");
-            }
+        loop {
+            let requested = tokio::select! {
+                _ = sigint.recv() => { info!("received SIGINT"); Shutdown::Stop }
+                _ = sigterm.recv() => { info!("received SIGTERM"); Shutdown::Stop }
+                _ = sighup.recv() => { info!("received SIGHUP"); Shutdown::Restart }
+            };
+            shutdown_tx
+                .send_modify(|current| *current = Some(Shutdown::merge(*current, requested)));
         }
-        let _ = shutdown_tx.send(true);
     });
 
-    let daemon = Daemon::new(paths, config);
-    daemon.run(shutdown_rx).await
+    Ok(shutdown_rx)
 }
 
 fn run_status(root: PathBuf) -> Result<()> {

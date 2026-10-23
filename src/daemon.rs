@@ -225,6 +225,26 @@ where
     }
 }
 
+/// How the daemon was asked to shut down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shutdown {
+    /// Wait up to the shutdown timeout for running jobs, then cancel them.
+    Stop,
+    /// Wait for running jobs however long they take, then exit so the service
+    /// manager starts the daemon again, e.g. on an upgraded binary.
+    Restart,
+}
+
+impl Shutdown {
+    /// A stop overrides a pending restart, but a restart never softens a stop.
+    pub fn merge(current: Option<Self>, requested: Self) -> Self {
+        match current {
+            Some(Self::Stop) => Self::Stop,
+            _ => requested,
+        }
+    }
+}
+
 type RunnerExit = (String, Result<()>);
 
 /// How long a job cancelled at shutdown gets, once its steps are stopped, to
@@ -263,6 +283,27 @@ async fn drain_runners(
         "runners did not stop after cancelling their jobs, forcing exit"
     );
     join_set.abort_all();
+}
+
+/// Wait for the runners to finish their jobs with no time limit, unless a stop
+/// arrives meanwhile and the regular drain takes over.
+async fn wait_for_restart(
+    join_set: &mut JoinSet<RunnerExit>,
+    signals: &mut watch::Receiver<Option<Shutdown>>,
+) {
+    loop {
+        tokio::select! {
+            result = join_set.join_next() => {
+                let Some(result) = result else { return };
+                log_runner_exit(result);
+            }
+            changed = signals.changed() => {
+                if changed.is_err() || *signals.borrow() == Some(Shutdown::Stop) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 async fn join_all(join_set: &mut JoinSet<RunnerExit>) {
@@ -305,7 +346,8 @@ impl Daemon {
         Self { paths, config }
     }
 
-    pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
+    pub async fn run(self, mut signals: watch::Receiver<Option<Shutdown>>) -> Result<()> {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let _pid_lock = PidLock::acquire(&self.paths.pid_file()).context("acquiring PID lock")?;
 
         // Start cache server if configured
@@ -422,13 +464,18 @@ impl Daemon {
                     };
                     log_runner_exit(result);
                 }
-                _ = shutdown_rx.changed() => {
-                    info!("shutdown signal received, waiting for runners to finish");
-                    break;
-                }
+                _ = signals.changed() => break,
             }
         }
 
+        let _ = shutdown_tx.send(true);
+        if *signals.borrow() == Some(Shutdown::Restart) {
+            info!("restart requested, waiting for running jobs to finish");
+            wait_for_restart(&mut join_set, &mut signals).await;
+        }
+        if !join_set.is_empty() {
+            info!("shutdown requested, waiting for runners to finish");
+        }
         drain_runners(
             &mut join_set,
             Duration::from_secs(shutdown_timeout),
@@ -443,7 +490,11 @@ impl Daemon {
         // Clean up state file
         let _ = std::fs::remove_file(self.paths.state_file());
 
-        info!("daemon shut down");
+        if *signals.borrow() == Some(Shutdown::Restart) {
+            info!("daemon shut down for a restart, the service manager starts it again");
+        } else {
+            info!("daemon shut down");
+        }
         Ok(())
     }
 }
