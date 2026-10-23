@@ -482,3 +482,80 @@ fn cache_scope_requires_repository() {
 
     assert_eq!(cache_scope(&manifest), None);
 }
+
+#[tokio::test]
+async fn shutdown_during_a_job_lets_it_finish_then_deletes_the_session() {
+    let (mock_server, _tm, shutdown_tx) = setup().await;
+    let uri = mock_server.uri();
+    let acquire_delay = Duration::from_secs(2);
+
+    Mock::given(method("POST"))
+        .and(path("/session"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "sessionId": "session-1" })),
+        )
+        .mount(&mock_server)
+        .await;
+    // Every poll offers a job, so a runner that kept polling would acquire a second one.
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messageId": 1,
+            "messageType": "RunnerJobRequest",
+            "body": serde_json::json!({ "runner_request_id": "req-1", "run_service_url": uri })
+                .to_string()
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/acknowledge"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/acquirejob"))
+        .respond_with(ResponseTemplate::new(404).set_delay(acquire_delay))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/session"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let private_key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    let mut runner = make_runner();
+    runner.credentials.oauth.authorization_url = format!("{uri}/oauth2/token");
+    runner.credentials.info.server_url_v2 = uri.clone();
+    runner.credentials.rsa_params = crate::config::private_key_to_rsa_params(&private_key).unwrap();
+    let runner_task = tokio::spawn(runner.start(shutdown_tx.subscribe()));
+
+    wait_for_request(&mock_server, "/acquirejob").await;
+    let shutdown_at = tokio::time::Instant::now();
+    shutdown_tx.send(true).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), runner_task)
+        .await
+        .expect("runner should exit after its job")
+        .unwrap();
+
+    assert!(result.is_ok(), "runner failed: {result:?}");
+    assert!(
+        shutdown_at.elapsed() >= acquire_delay / 2,
+        "runner exited without waiting for its job"
+    );
+    mock_server.verify().await;
+}
+
+async fn wait_for_request(mock_server: &MockServer, request_path: &str) {
+    for _ in 0..500 {
+        let requests = mock_server.received_requests().await.unwrap_or_default();
+        if requests.iter().any(|r| r.url.path() == request_path) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no request to {request_path} within 5s");
+}
