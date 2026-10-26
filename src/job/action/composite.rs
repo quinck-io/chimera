@@ -75,7 +75,12 @@ impl EmbeddedPost {
 
     /// Post steps run after the action is done, so like the official runner they
     /// test their `post-if` against the job's status rather than the action's.
-    fn condition_holds(&self, job_state: &JobState, job_failed: bool, job_cancelled: bool) -> bool {
+    fn condition_holds(
+        &self,
+        job_state: &JobState,
+        job_failed: bool,
+        job_cancelled: bool,
+    ) -> Result<bool> {
         let ctx = ExprContext::new(&self.env, job_state, job_failed, job_cancelled);
         evaluate_condition(Some(&self.condition), &ctx)
     }
@@ -140,9 +145,10 @@ async fn run_composite_action_inner(
     let conclusion = run_sub_steps(ctx, &scope, &sub_steps, job_state, depth).await;
 
     let output_env = scope.expression_env(&scope.env(job_state, ctx.workspace));
-    job_state.outputs = evaluate_action_outputs(metadata, &output_env, job_state);
+    let outputs = evaluate_action_outputs(metadata, &output_env, job_state);
     job_state.step_outputs = caller_step_outputs;
     job_state.step_outcomes = caller_step_outcomes;
+    job_state.outputs = outputs.context("evaluating the action's outputs")?;
 
     Ok(StepResult { conclusion })
 }
@@ -165,7 +171,9 @@ async fn run_sub_steps(
         let expression_env = scope.expression_env(&env);
         let job_cancelled = ctx.job.is_cancelled();
 
-        if !sub_step.condition_holds(&expression_env, job_state, job_cancelled, status) {
+        let should_run =
+            sub_step.condition_holds(&expression_env, job_state, job_cancelled, status);
+        if matches!(should_run, Ok(false)) {
             debug!(step = %sub_step.key, condition = %sub_step.condition, "skipping composite sub-step");
             if let Some(id) = &sub_step.id {
                 job_state
@@ -175,11 +183,23 @@ async fn run_sub_steps(
             continue;
         }
 
-        let cancel_token = sub_step_token(ctx.job, job_cancelled, || {
-            sub_step.condition_holds(&expression_env, job_state, true, StepConclusion::Cancelled)
-        });
-        let conclusion =
-            run_sub_step(ctx, scope, sub_step, job_state, &env, &cancel_token, depth).await;
+        let result = match should_run {
+            Err(e) => Err(e),
+            Ok(_) => {
+                let cancel_token = sub_step_token(ctx.job, job_cancelled, || {
+                    sub_step
+                        .condition_holds(
+                            &expression_env,
+                            job_state,
+                            true,
+                            StepConclusion::Cancelled,
+                        )
+                        .unwrap_or(false)
+                });
+                run_sub_step(ctx, scope, sub_step, job_state, &env, &cancel_token, depth).await
+            }
+        };
+        let conclusion = conclusion_of(result, ctx.log_sender).await;
 
         let outputs = take_sub_step_file_commands(job_state, ctx.workspace, &sub_step.key);
         if let Some(id) = &sub_step.id {
@@ -199,7 +219,8 @@ async fn run_sub_steps(
 /// The token a sub-step runs under. As on the official runner, a cancel requested
 /// while the step runs tests its `if:` again, as if the action were cancelled, and
 /// stops the step only if that no longer holds. A step that starts after the cancel
-/// is not tested again, so only forcing the job stops it.
+/// is not tested again, so only forcing the job stops it. A condition that cannot
+/// be evaluated once cancelled no longer holds.
 fn sub_step_token(
     job: &JobStatus,
     job_cancelled: bool,
@@ -219,14 +240,14 @@ async fn run_sub_step(
     env: &HashMap<String, String>,
     cancel_token: &CancellationToken,
     depth: u32,
-) -> StepConclusion {
+) -> Result<StepResult> {
     debug!(step = %sub_step.key, "running composite sub-step");
     let expression_env = scope.expression_env(env);
-    let own_env = sub_step.own_env(&expression_env, job_state);
+    let own_env = sub_step.own_env(&expression_env, job_state)?;
     let timeout = scope.step.timeout();
-    let result = match &sub_step.kind {
+    match &sub_step.kind {
         SubStepKind::Uses(uses) => {
-            let inputs = sub_step.inputs(&expression_env, job_state);
+            let inputs = sub_step.inputs(&expression_env, job_state)?;
             let nested_step = nested_action_step(sub_step, uses, inputs, own_env, timeout);
             run_nested_action(
                 ctx,
@@ -254,8 +275,7 @@ async fn run_sub_step(
             )
             .await
         }
-    };
-    conclusion_of(result, ctx.log_sender).await
+    }
 }
 
 /// Like the official runner, an error in one step fails that step rather than the
@@ -264,7 +284,7 @@ async fn conclusion_of(result: Result<StepResult>, log_sender: &LogSender) -> St
     match result {
         Ok(result) => result.conclusion,
         Err(e) => {
-            log_sender.send(format!("Error: {e:#}")).await;
+            log_sender.send(format!("##[error]{e:#}")).await;
             StepConclusion::Failed
         }
     }
@@ -310,7 +330,7 @@ impl<'a> ActionScope<'a> {
             metadata,
             step,
             &ExprContext::new(&env, job_state, false, false),
-        );
+        )?;
         Ok(scope)
     }
 
@@ -403,7 +423,7 @@ impl SubStep {
         job_state: &JobState,
         job_cancelled: bool,
         action_status: StepConclusion,
-    ) -> bool {
+    ) -> Result<bool> {
         let ctx = ExprContext::new(env, job_state, false, job_cancelled)
             .with_action_status(action_status);
         evaluate_condition(Some(&self.condition), &ctx)
@@ -419,18 +439,8 @@ impl SubStep {
         &self,
         env: &HashMap<String, String>,
         job_state: &JobState,
-    ) -> HashMap<String, String> {
-        let Some(serde_yaml::Value::Mapping(env_map)) = self.map.get(ykey("env")) else {
-            return HashMap::new();
-        };
-        let ctx = ExprContext::new(env, job_state, false, false);
-        env_map
-            .iter()
-            .filter_map(|(key, value)| {
-                let value = scalar_to_string(value)?;
-                Some((key.as_str()?.to_string(), resolve_template(&value, &ctx)))
-            })
-            .collect()
+    ) -> Result<HashMap<String, String>> {
+        self.resolve_mapping("env", env, job_state)
     }
 
     /// The step's `with:`, resolved here because only this action's scope knows
@@ -439,16 +449,27 @@ impl SubStep {
         &self,
         env: &HashMap<String, String>,
         job_state: &JobState,
-    ) -> HashMap<String, String> {
-        let Some(serde_yaml::Value::Mapping(with_map)) = self.map.get(ykey("with")) else {
-            return HashMap::new();
+    ) -> Result<HashMap<String, String>> {
+        self.resolve_mapping("with", env, job_state)
+    }
+
+    fn resolve_mapping(
+        &self,
+        field: &str,
+        env: &HashMap<String, String>,
+        job_state: &JobState,
+    ) -> Result<HashMap<String, String>> {
+        let Some(serde_yaml::Value::Mapping(mapping)) = self.map.get(ykey(field)) else {
+            return Ok(HashMap::new());
         };
         let ctx = ExprContext::new(env, job_state, false, false);
-        with_map
+        mapping
             .iter()
-            .filter_map(|(key, value)| {
-                let value = scalar_to_string(value)?;
-                Some((key.as_str()?.to_string(), resolve_template(&value, &ctx)))
+            .filter_map(|(key, value)| Some((key.as_str()?, scalar_to_string(value)?)))
+            .map(|(key, value)| {
+                let resolved = resolve_template(&value, &ctx)
+                    .with_context(|| format!("evaluating the step's {field}"))?;
+                Ok((key.to_string(), resolved))
             })
             .collect()
     }
@@ -526,15 +547,13 @@ fn evaluate_action_outputs(
     metadata: &ActionMetadata,
     env: &HashMap<String, String>,
     job_state: &JobState,
-) -> HashMap<String, String> {
+) -> Result<HashMap<String, String>> {
     let ctx = ExprContext::new(env, job_state, false, false);
     metadata
         .outputs
         .iter()
-        .filter_map(|(name, output)| {
-            let value = output.value.as_deref()?;
-            Some((name.clone(), resolve_template(value, &ctx)))
-        })
+        .filter_map(|(name, output)| Some((name, output.value.as_deref()?)))
+        .map(|(name, value)| Ok((name.clone(), resolve_template(value, &ctx)?)))
         .collect()
 }
 
@@ -551,11 +570,12 @@ async fn run_nested_script(
 ) -> Result<StepResult> {
     let expression_env = scope.expression_env(env);
     let script_ctx = ExprContext::new(&expression_env, job_state, false, false);
-    let resolved_script = resolve_template(script, &script_ctx);
+    let resolved_script = resolve_template(script, &script_ctx)?;
     // working-directory may carry expressions like ${{ inputs.dir || '.' }}
     let raw_workdir = sub_step
         .string("working-directory")
-        .map(|dir| resolve_template(&dir, &script_ctx));
+        .map(|dir| resolve_template(&dir, &script_ctx))
+        .transpose()?;
 
     let job_container = ctx
         .docker_resources
@@ -981,14 +1001,16 @@ async fn run_nested_pre(
             ExprContext::new(&expression_env, job_state, ctx.job.failed, job_cancelled);
         evaluate_condition(Some(&condition), &condition_ctx)
     };
-    if !holds(job_state, job_cancelled) {
+    if !holds(job_state, job_cancelled)? {
         debug!(step = %sub_step.key, %condition, "skipping nested pre step");
         return skipped;
     }
 
-    let cancel_token = sub_step_token(ctx.job, job_cancelled, || holds(job_state, true));
-    let inputs = sub_step.inputs(&expression_env, job_state);
-    let own_env = sub_step.own_env(&expression_env, job_state);
+    let cancel_token = sub_step_token(ctx.job, job_cancelled, || {
+        holds(job_state, true).unwrap_or(false)
+    });
+    let inputs = sub_step.inputs(&expression_env, job_state)?;
+    let own_env = sub_step.own_env(&expression_env, job_state)?;
     let nested_step = nested_action_step(sub_step, uses, inputs, own_env, scope.step.timeout());
     run_action(
         ctx,
@@ -1027,15 +1049,22 @@ async fn run_composite_post_inner(
     let mut status = StepConclusion::Succeeded;
     for post in posts.iter().rev() {
         let job_cancelled = ctx.job.is_cancelled();
-        if !post.condition_holds(job_state, ctx.job.failed, job_cancelled) {
+        let should_run = post.condition_holds(job_state, ctx.job.failed, job_cancelled);
+        if matches!(should_run, Ok(false)) {
             debug!(step = %post.step.display_name, condition = %post.condition, "skipping embedded post step");
             continue;
         }
 
-        let cancel_token = sub_step_token(ctx.job, job_cancelled, || {
-            post.condition_holds(job_state, ctx.job.failed, true)
-        });
-        let result = run_embedded_post(ctx, post, job_state, &cancel_token).await;
+        let result = match should_run {
+            Err(e) => Err(e),
+            Ok(_) => {
+                let cancel_token = sub_step_token(ctx.job, job_cancelled, || {
+                    post.condition_holds(job_state, ctx.job.failed, true)
+                        .unwrap_or(false)
+                });
+                run_embedded_post(ctx, post, job_state, &cancel_token).await
+            }
+        };
         let conclusion = conclusion_of(result, ctx.log_sender).await;
         take_sub_step_file_commands(job_state, ctx.workspace, state_key(&post.step));
         status = status.merge(conclusion);

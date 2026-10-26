@@ -939,3 +939,44 @@ async fn action_inputs_are_evaluated_once() {
         ]
     );
 }
+
+/// Inside a composite action too, a failed expression fails its sub-step, and the
+/// action's later steps see that through `failure()`.
+#[tokio::test]
+async fn composite_sub_step_with_failed_expression_fails_the_action() {
+    let env = TestEnv::setup().await;
+    let marker = env.tmp.path().join("cleanup-ran");
+    write_action(
+        env.workspace.workspace_dir(),
+        "broken",
+        &format!(
+            r#"
+name: broken
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        X: ${{{{ fromJSON('{{}}').a. }}}}
+      run: echo never
+    - if: failure()
+      shell: bash
+      run: touch '{}'
+"#,
+            marker.display()
+        ),
+    );
+
+    let manifest = manifest_with_steps(
+        vec![composite_step(
+            "broken",
+            ".github/actions/broken",
+            serde_json::json!({}),
+        )],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Failed);
+    assert!(marker.exists(), "the failure() sub-step should run");
+}

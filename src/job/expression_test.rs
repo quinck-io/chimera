@@ -53,40 +53,40 @@ fn ctx_with_env(env: &HashMap<String, String>) -> ExprContext<'_> {
 #[test]
 fn condition_none_defaults_to_success() {
     let ctx = empty_ctx();
-    assert!(evaluate_condition(None, &ctx));
+    assert!(evaluate_condition(None, &ctx).unwrap());
 }
 
 #[test]
 fn condition_none_fails_when_job_failed() {
     let mut ctx = empty_ctx();
     ctx.job_failed = true;
-    assert!(!evaluate_condition(None, &ctx));
+    assert!(!evaluate_condition(None, &ctx).unwrap());
 }
 
 #[test]
 fn condition_success() {
     let ctx = empty_ctx();
-    assert!(evaluate_condition(Some("success()"), &ctx));
+    assert!(evaluate_condition(Some("success()"), &ctx).unwrap());
 }
 
 #[test]
 fn condition_success_false_when_failed() {
     let mut ctx = empty_ctx();
     ctx.job_failed = true;
-    assert!(!evaluate_condition(Some("success()"), &ctx));
+    assert!(!evaluate_condition(Some("success()"), &ctx).unwrap());
 }
 
 #[test]
 fn condition_failure() {
     let ctx = empty_ctx();
-    assert!(!evaluate_condition(Some("failure()"), &ctx));
+    assert!(!evaluate_condition(Some("failure()"), &ctx).unwrap());
 }
 
 #[test]
 fn condition_failure_true_when_failed() {
     let mut ctx = empty_ctx();
     ctx.job_failed = true;
-    assert!(evaluate_condition(Some("failure()"), &ctx));
+    assert!(evaluate_condition(Some("failure()"), &ctx).unwrap());
 }
 
 #[test]
@@ -94,36 +94,36 @@ fn condition_failure_false_when_failed_then_cancelled() {
     let mut ctx = empty_ctx();
     ctx.job_failed = true;
     ctx.job_cancelled = true;
-    assert!(!evaluate_condition(Some("failure()"), &ctx));
+    assert!(!evaluate_condition(Some("failure()"), &ctx).unwrap());
 }
 
 #[test]
 fn condition_always() {
     let mut ctx = empty_ctx();
-    assert!(evaluate_condition(Some("always()"), &ctx));
+    assert!(evaluate_condition(Some("always()"), &ctx).unwrap());
     ctx.job_failed = true;
-    assert!(evaluate_condition(Some("always()"), &ctx));
+    assert!(evaluate_condition(Some("always()"), &ctx).unwrap());
     ctx.job_cancelled = true;
-    assert!(evaluate_condition(Some("always()"), &ctx));
+    assert!(evaluate_condition(Some("always()"), &ctx).unwrap());
 }
 
 #[test]
 fn condition_cancelled() {
     let ctx = empty_ctx();
-    assert!(!evaluate_condition(Some("cancelled()"), &ctx));
+    assert!(!evaluate_condition(Some("cancelled()"), &ctx).unwrap());
 }
 
 #[test]
 fn condition_cancelled_true_when_cancelled() {
     let mut ctx = empty_ctx();
     ctx.job_cancelled = true;
-    assert!(evaluate_condition(Some("cancelled()"), &ctx));
+    assert!(evaluate_condition(Some("cancelled()"), &ctx).unwrap());
 }
 
 #[test]
 fn condition_not_cancelled() {
     let ctx = empty_ctx();
-    assert!(evaluate_condition(Some("!cancelled()"), &ctx));
+    assert!(evaluate_condition(Some("!cancelled()"), &ctx).unwrap());
 }
 
 #[test]
@@ -131,14 +131,14 @@ fn action_status_decides_success_and_failure_over_the_job() {
     let mut ctx = empty_ctx();
     ctx.job_failed = true;
     ctx.action_status = Some(StepConclusion::Succeeded);
-    assert!(evaluate_condition(Some("success()"), &ctx));
-    assert!(evaluate_condition(None, &ctx));
-    assert!(!evaluate_condition(Some("failure()"), &ctx));
+    assert!(evaluate_condition(Some("success()"), &ctx).unwrap());
+    assert!(evaluate_condition(None, &ctx).unwrap());
+    assert!(!evaluate_condition(Some("failure()"), &ctx).unwrap());
 
     ctx.job_failed = false;
     ctx.action_status = Some(StepConclusion::Failed);
-    assert!(!evaluate_condition(Some("success()"), &ctx));
-    assert!(evaluate_condition(Some("failure()"), &ctx));
+    assert!(!evaluate_condition(Some("success()"), &ctx).unwrap());
+    assert!(evaluate_condition(Some("failure()"), &ctx).unwrap());
 }
 
 #[test]
@@ -147,9 +147,9 @@ fn cancelled_action_is_neither_successful_nor_failed() {
     ctx.job_cancelled = true;
     ctx.action_status = Some(StepConclusion::Cancelled);
 
-    assert!(!evaluate_condition(Some("success()"), &ctx));
-    assert!(!evaluate_condition(Some("failure()"), &ctx));
-    assert!(evaluate_condition(Some("cancelled()"), &ctx));
+    assert!(!evaluate_condition(Some("success()"), &ctx).unwrap());
+    assert!(!evaluate_condition(Some("failure()"), &ctx).unwrap());
+    assert!(evaluate_condition(Some("cancelled()"), &ctx).unwrap());
 }
 
 // The official runner keeps a composite action's status apart from the job's, so
@@ -160,8 +160,8 @@ fn successful_action_in_a_cancelled_job_sees_both_success_and_cancelled() {
     ctx.job_cancelled = true;
     ctx.action_status = Some(StepConclusion::Succeeded);
 
-    assert!(evaluate_condition(Some("success()"), &ctx));
-    assert!(evaluate_condition(Some("cancelled()"), &ctx));
+    assert!(evaluate_condition(Some("success()"), &ctx).unwrap());
+    assert!(evaluate_condition(Some("cancelled()"), &ctx).unwrap());
 }
 
 #[test]
@@ -201,14 +201,8 @@ fn condition_equality() {
     let mut env = HashMap::new();
     env.insert("GITHUB_EVENT_NAME".into(), "push".into());
     let ctx = ctx_with_env(&env);
-    assert!(evaluate_condition(
-        Some("github.event_name == 'push'"),
-        &ctx
-    ));
-    assert!(!evaluate_condition(
-        Some("github.event_name == 'pull_request'"),
-        &ctx
-    ));
+    assert!(evaluate_condition(Some("github.event_name == 'push'"), &ctx).unwrap());
+    assert!(!evaluate_condition(Some("github.event_name == 'pull_request'"), &ctx).unwrap());
 }
 
 #[test]
@@ -218,18 +212,27 @@ fn condition_and_or() {
     env.insert("GITHUB_EVENT_NAME".into(), "push".into());
     let ctx = ctx_with_env(&env);
 
-    assert!(evaluate_condition(
-        Some("github.ref == 'refs/heads/main' && github.event_name == 'push'"),
-        &ctx,
-    ));
-    assert!(evaluate_condition(
-        Some("github.ref == 'refs/heads/dev' || github.event_name == 'push'"),
-        &ctx,
-    ));
-    assert!(!evaluate_condition(
-        Some("github.ref == 'refs/heads/dev' && github.event_name == 'push'"),
-        &ctx,
-    ));
+    assert!(
+        evaluate_condition(
+            Some("github.ref == 'refs/heads/main' && github.event_name == 'push'"),
+            &ctx,
+        )
+        .unwrap()
+    );
+    assert!(
+        evaluate_condition(
+            Some("github.ref == 'refs/heads/dev' || github.event_name == 'push'"),
+            &ctx,
+        )
+        .unwrap()
+    );
+    assert!(
+        !evaluate_condition(
+            Some("github.ref == 'refs/heads/dev' && github.event_name == 'push'"),
+            &ctx,
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -238,14 +241,8 @@ fn condition_contains() {
     env.insert("GITHUB_REF".into(), "refs/tags/v1.0.0".into());
     let ctx = ctx_with_env(&env);
 
-    assert!(evaluate_condition(
-        Some("contains(github.ref, 'tags')"),
-        &ctx
-    ));
-    assert!(!evaluate_condition(
-        Some("contains(github.ref, 'heads')"),
-        &ctx
-    ));
+    assert!(evaluate_condition(Some("contains(github.ref, 'tags')"), &ctx).unwrap());
+    assert!(!evaluate_condition(Some("contains(github.ref, 'heads')"), &ctx).unwrap());
 }
 
 #[test]
@@ -254,10 +251,7 @@ fn condition_starts_with() {
     env.insert("GITHUB_REF".into(), "refs/heads/main".into());
     let ctx = ctx_with_env(&env);
 
-    assert!(evaluate_condition(
-        Some("startsWith(github.ref, 'refs/heads/')"),
-        &ctx,
-    ));
+    assert!(evaluate_condition(Some("startsWith(github.ref, 'refs/heads/')"), &ctx,).unwrap());
 }
 
 #[test]
@@ -266,17 +260,26 @@ fn condition_ends_with() {
     env.insert("GITHUB_REF".into(), "refs/heads/release-v2".into());
     let ctx = ctx_with_env(&env);
 
-    assert!(evaluate_condition(
-        Some("endsWith(github.ref, '-v2')"),
-        &ctx,
-    ));
+    assert!(evaluate_condition(Some("endsWith(github.ref, '-v2')"), &ctx,).unwrap());
 }
 
 #[test]
-fn condition_parse_error_defaults_to_success() {
+fn condition_parse_error_is_an_error() {
     let ctx = empty_ctx();
-    // Invalid syntax falls back to success() behavior
-    assert!(evaluate_condition(Some("??? invalid"), &ctx));
+
+    let result = evaluate_condition(Some("??? invalid"), &ctx);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn condition_eval_error_is_an_error() {
+    let ctx = empty_ctx();
+
+    let result = evaluate_condition(Some("noSuchFunction()"), &ctx);
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("noSuchFunction()"), "got: {error}");
 }
 
 // ── resolve_expression ──────────────────────────────────────────────
@@ -288,7 +291,7 @@ fn resolve_github_repository() {
     let ctx = ctx_with_env(&env);
 
     assert_eq!(
-        resolve_expression("${{ github.repository }}", &ctx),
+        resolve_expression("${{ github.repository }}", &ctx).unwrap(),
         "owner/repo"
     );
 }
@@ -300,7 +303,7 @@ fn resolve_input_with_default() {
     let ctx = ctx_with_env(&env);
 
     assert_eq!(
-        resolve_expression("${{ inputs.toolchain }}", &ctx),
+        resolve_expression("${{ inputs.toolchain }}", &ctx).unwrap(),
         "stable"
     );
 }
@@ -314,7 +317,7 @@ fn resolve_input_with_hyphen() {
     let ctx = ctx_with_env(&env);
 
     assert_eq!(
-        resolve_expression("${{ inputs.pnpm-dest }}", &ctx),
+        resolve_expression("${{ inputs.pnpm-dest }}", &ctx).unwrap(),
         "/tmp/pnpm"
     );
 }
@@ -326,7 +329,7 @@ fn resolve_input_with_space() {
     let ctx = ctx_with_env(&env);
 
     assert_eq!(
-        resolve_expression("${{ inputs['my input'] }}", &ctx),
+        resolve_expression("${{ inputs['my input'] }}", &ctx).unwrap(),
         "value"
     );
 }
@@ -339,7 +342,7 @@ fn resolve_workflow_call_input_from_context_data() {
     let ctx = ctx_with_json(&data);
 
     assert_eq!(
-        resolve_expression("${{ inputs.app-directory }}", &ctx),
+        resolve_expression("${{ inputs.app-directory }}", &ctx).unwrap(),
         "apps/mobile"
     );
 }
@@ -349,8 +352,11 @@ fn resolve_workflow_call_input_of_other_types() {
     let data = serde_json::json!({ "inputs": { "count": 3, "enabled": true } });
     let ctx = ctx_with_json(&data);
 
-    assert_eq!(resolve_expression("${{ inputs.count }}", &ctx), "3");
-    assert!(evaluate_condition(Some("inputs.enabled"), &ctx));
+    assert_eq!(
+        resolve_expression("${{ inputs.count }}", &ctx).unwrap(),
+        "3"
+    );
+    assert!(evaluate_condition(Some("inputs.enabled"), &ctx).unwrap());
 }
 
 /// An action's INPUT_* env var wins: inside a composite the action's own inputs
@@ -368,7 +374,7 @@ fn action_input_env_beats_context_data() {
     };
 
     assert_eq!(
-        resolve_expression("${{ inputs.name }}", &ctx),
+        resolve_expression("${{ inputs.name }}", &ctx).unwrap(),
         "from-action"
     );
 }
@@ -386,7 +392,7 @@ fn empty_action_input_does_not_fall_back_to_context_data() {
         ..ctx_with_json(&data)
     };
 
-    assert_eq!(resolve_expression("${{ inputs.name }}", &ctx), "");
+    assert_eq!(resolve_expression("${{ inputs.name }}", &ctx).unwrap(), "");
 }
 
 #[test]
@@ -394,20 +400,25 @@ fn unknown_input_renders_empty() {
     let data = serde_json::json!({ "inputs": { "other": "x" } });
     let ctx = ctx_with_json(&data);
 
-    assert_eq!(resolve_expression("${{ inputs.missing }}", &ctx), "");
+    assert_eq!(
+        resolve_expression("${{ inputs.missing }}", &ctx).unwrap(),
+        ""
+    );
 }
 
 #[test]
 fn resolve_plain_string_unchanged() {
     let ctx = empty_ctx();
-    assert_eq!(resolve_expression("hello", &ctx), "hello");
+    assert_eq!(resolve_expression("hello", &ctx).unwrap(), "hello");
 }
 
 #[test]
-fn resolve_unsupported_context_unchanged() {
+fn resolve_unparsable_expression_is_an_error() {
     let ctx = empty_ctx();
-    // Whole-string expression that fails to parse — returned as-is
-    assert_eq!(resolve_expression("${{ ??? }}", &ctx), "${{ ??? }}");
+
+    let result = resolve_expression("${{ ??? }}", &ctx);
+
+    assert!(result.is_err());
 }
 
 // ── resolve_template ────────────────────────────────────────────────
@@ -419,7 +430,7 @@ fn template_simple_input() {
     let ctx = ctx_with_env(&env);
 
     assert_eq!(
-        resolve_template("rustup default ${{ inputs.toolchain }}", &ctx),
+        resolve_template("rustup default ${{ inputs.toolchain }}", &ctx).unwrap(),
         "rustup default stable"
     );
 }
@@ -432,7 +443,7 @@ fn template_multiple_expressions() {
     let ctx = ctx_with_env(&env);
 
     assert_eq!(
-        resolve_template("echo ${{ github.repository }} at ${{ github.sha }}", &ctx),
+        resolve_template("echo ${{ github.repository }} at ${{ github.sha }}", &ctx).unwrap(),
         "echo owner/repo at abc123"
     );
 }
@@ -443,13 +454,19 @@ fn template_env_context() {
     env.insert("FOO".into(), "bar".into());
     let ctx = ctx_with_env(&env);
 
-    assert_eq!(resolve_template("echo ${{ env.FOO }}", &ctx), "echo bar");
+    assert_eq!(
+        resolve_template("echo ${{ env.FOO }}", &ctx).unwrap(),
+        "echo bar"
+    );
 }
 
 #[test]
 fn template_string_literal() {
     let ctx = empty_ctx();
-    assert_eq!(resolve_template("x=${{ 'hello' }}", &ctx), "x=hello");
+    assert_eq!(
+        resolve_template("x=${{ 'hello' }}", &ctx).unwrap(),
+        "x=hello"
+    );
 }
 
 #[test]
@@ -462,7 +479,7 @@ fn template_complex_expression_resolved() {
     let result = resolve_template(
         "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}",
         &ctx,
-    );
+    ).unwrap();
     assert_eq!(result, "downgrade= --allow-downgrade");
 }
 
@@ -476,7 +493,8 @@ fn template_complex_expression_false_branch() {
     let result = resolve_template(
         "downgrade=${{contains(inputs.toolchain, 'nightly') && ' --allow-downgrade' || ''}}",
         &ctx,
-    );
+    )
+    .unwrap();
     assert_eq!(result, "downgrade=");
 }
 
@@ -484,7 +502,7 @@ fn template_complex_expression_false_branch() {
 fn template_no_expressions_unchanged() {
     let ctx = empty_ctx();
     assert_eq!(
-        resolve_template("echo hello world", &ctx),
+        resolve_template("echo hello world", &ctx).unwrap(),
         "echo hello world"
     );
 }
@@ -493,7 +511,7 @@ fn template_no_expressions_unchanged() {
 fn template_unclosed_expression() {
     let ctx = empty_ctx();
     assert_eq!(
-        resolve_template("echo ${{ oops no close", &ctx),
+        resolve_template("echo ${{ oops no close", &ctx).unwrap(),
         "echo ${{ oops no close"
     );
 }
@@ -523,7 +541,7 @@ fn secrets_lookup() {
     };
 
     assert_eq!(
-        resolve_expression("${{ secrets.MY_TOKEN }}", &ctx),
+        resolve_expression("${{ secrets.MY_TOKEN }}", &ctx).unwrap(),
         "s3cret"
     );
 }
@@ -532,7 +550,7 @@ fn secrets_lookup() {
 fn secrets_missing_is_null() {
     let ctx = empty_ctx();
     // Missing secret resolves to empty (Null → "")
-    assert_eq!(resolve_expression("${{ secrets.NOPE }}", &ctx), "");
+    assert_eq!(resolve_expression("${{ secrets.NOPE }}", &ctx).unwrap(), "");
 }
 
 // ── steps ───────────────────────────────────────────────────────────
@@ -562,7 +580,7 @@ fn steps_output_lookup() {
     };
 
     assert_eq!(
-        resolve_expression("${{ steps.build.outputs.version }}", &ctx),
+        resolve_expression("${{ steps.build.outputs.version }}", &ctx).unwrap(),
         "1.2.3"
     );
 }
@@ -571,7 +589,7 @@ fn steps_output_lookup() {
 fn steps_output_missing() {
     let ctx = empty_ctx();
     assert_eq!(
-        resolve_expression("${{ steps.build.outputs.version }}", &ctx),
+        resolve_expression("${{ steps.build.outputs.version }}", &ctx).unwrap(),
         ""
     );
 }
@@ -604,11 +622,11 @@ fn steps_outcome_success() {
     };
 
     assert_eq!(
-        resolve_expression("${{ steps.build.outcome }}", &ctx),
+        resolve_expression("${{ steps.build.outcome }}", &ctx).unwrap(),
         "success"
     );
     assert_eq!(
-        resolve_expression("${{ steps.build.conclusion }}", &ctx),
+        resolve_expression("${{ steps.build.conclusion }}", &ctx).unwrap(),
         "success"
     );
 }
@@ -643,23 +661,23 @@ fn steps_outcome_with_continue_on_error() {
     };
 
     assert_eq!(
-        resolve_expression("${{ steps.flaky.outcome }}", &ctx),
+        resolve_expression("${{ steps.flaky.outcome }}", &ctx).unwrap(),
         "failure"
     );
     assert_eq!(
-        resolve_expression("${{ steps.flaky.conclusion }}", &ctx),
+        resolve_expression("${{ steps.flaky.conclusion }}", &ctx).unwrap(),
         "success"
     );
-    assert!(evaluate_condition(
-        Some("steps.flaky.outcome == 'failure'"),
-        &ctx,
-    ));
+    assert!(evaluate_condition(Some("steps.flaky.outcome == 'failure'"), &ctx,).unwrap());
 }
 
 #[test]
 fn steps_outcome_missing_is_null() {
     let ctx = empty_ctx();
-    assert_eq!(resolve_expression("${{ steps.nope.outcome }}", &ctx), "");
+    assert_eq!(
+        resolve_expression("${{ steps.nope.outcome }}", &ctx).unwrap(),
+        ""
+    );
 }
 
 // ── needs ───────────────────────────────────────────────────────────
@@ -692,11 +710,11 @@ fn needs_output_lookup() {
     };
 
     assert_eq!(
-        resolve_expression("${{ needs.setup.outputs.version }}", &ctx),
+        resolve_expression("${{ needs.setup.outputs.version }}", &ctx).unwrap(),
         "3.0"
     );
     assert_eq!(
-        resolve_expression("${{ needs.setup.result }}", &ctx),
+        resolve_expression("${{ needs.setup.result }}", &ctx).unwrap(),
         "success"
     );
 }
@@ -725,10 +743,7 @@ fn needs_condition_check() {
         workspace_path: None,
     };
 
-    assert!(evaluate_condition(
-        Some("needs.build.result == 'success'"),
-        &ctx,
-    ));
+    assert!(evaluate_condition(Some("needs.build.result == 'success'"), &ctx,).unwrap());
 }
 
 // ── functions ───────────────────────────────────────────────────────
@@ -1050,7 +1065,8 @@ fn hash_files_in_template() {
     env.insert("RUNNER_OS".into(), "Linux".into());
     let ctx = ctx_with_env(&env);
 
-    let result = resolve_template("key=${{ runner.os }}-${{ hashFiles('lock.json') }}", &ctx);
+    let result =
+        resolve_template("key=${{ runner.os }}-${{ hashFiles('lock.json') }}", &ctx).unwrap();
 
     assert!(result.starts_with("key=Linux-"));
     assert_eq!(result.len(), "key=Linux-".len() + 64);
@@ -1099,7 +1115,7 @@ fn resolve_template_with_format_wrapping_hashfiles() {
     //   run: echo "${{ hashFiles('Cargo.toml') }}" | grep -qE '^[0-9a-f]{64}$'
     let template =
         "${{ format('echo \"{0}\" | grep -qE ''^[0-9a-f]{{64}}$''', hashFiles('Cargo.toml')) }}";
-    let result = resolve_template(template, &ctx);
+    let result = resolve_template(template, &ctx).unwrap();
 
     assert!(
         result.contains("| grep -qE"),
@@ -1296,7 +1312,7 @@ fn bracket_notation_steps() {
     };
 
     assert_eq!(
-        resolve_expression("${{ steps['my-step'].outputs.key }}", &ctx),
+        resolve_expression("${{ steps['my-step'].outputs.key }}", &ctx).unwrap(),
         "value123"
     );
 }
@@ -1632,10 +1648,13 @@ fn workflow_pattern_condition_with_wildcard() {
         workspace_path: None,
     };
 
-    assert!(evaluate_condition(
-        Some("always() && contains(needs.*.result, 'failure')"),
-        &ctx,
-    ));
+    assert!(
+        evaluate_condition(
+            Some("always() && contains(needs.*.result, 'failure')"),
+            &ctx,
+        )
+        .unwrap()
+    );
 }
 
 // ── job context ─────────────────────────────────────────────────────
@@ -1664,7 +1683,7 @@ fn job_status_failure() {
     });
     let ctx = ctx_with_json(&data);
 
-    assert!(evaluate_condition(Some("job.status == 'failure'"), &ctx,));
+    assert!(evaluate_condition(Some("job.status == 'failure'"), &ctx,).unwrap());
 }
 
 #[test]
@@ -1743,7 +1762,7 @@ fn job_services_port_numeric_bracket() {
 
     // Numeric bracket access should also work as JSON keys are strings
     assert_eq!(
-        resolve_expression("${{ job.services.postgres.ports['5432'] }}", &ctx),
+        resolve_expression("${{ job.services.postgres.ports['5432'] }}", &ctx).unwrap(),
         "5432"
     );
 }
@@ -1787,8 +1806,252 @@ fn resolve_template_map_resolves_each_value_once() {
         ("raw".to_string(), "${{ env.RAW }}".to_string()),
     ]);
 
-    let resolved = resolve_template_map(&values, &ctx_with_env(&env));
+    let resolved = resolve_template_map(&values, &ctx_with_env(&env)).unwrap();
 
     assert_eq!(resolved["path"], "dist/out");
     assert_eq!(resolved["raw"], "${{ env.BASE }}");
+}
+
+// ── property access on computed values ─────────────────────────────
+
+fn ctx_with_output<'a>(
+    step_outputs: &'a HashMap<String, HashMap<String, String>>,
+) -> ExprContext<'a> {
+    ExprContext {
+        step_outputs,
+        ..empty_ctx()
+    }
+}
+
+fn org_outputs(config: &str) -> HashMap<String, HashMap<String, String>> {
+    HashMap::from([(
+        "org".to_string(),
+        HashMap::from([("config".to_string(), config.to_string())]),
+    )])
+}
+
+const ORG_CONFIG: &str = r#"{
+    "firebase": { "apiKey": "key-123", "projectId": "proj" },
+    "regions": ["eu", "us"],
+    "apps": [
+        { "name": "web", "port": 80 },
+        { "name": "api", "port": 8080 },
+        { "label": "no-name" }
+    ]
+}"#;
+
+#[test]
+fn dot_access_after_fromjson() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let resolved = resolve_template(
+        "${{ fromJSON(steps.org.outputs.config).firebase.apiKey }}",
+        &ctx,
+    );
+
+    assert_eq!(resolved.unwrap(), "key-123");
+}
+
+#[test]
+fn bracket_access_after_fromjson() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let resolved = resolve_template(
+        "${{ fromJSON(steps.org.outputs.config)['firebase'].projectId }}",
+        &ctx,
+    );
+
+    assert_eq!(resolved.unwrap(), "proj");
+}
+
+#[test]
+fn index_access_after_fromjson() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let resolved = resolve_template("${{ fromJSON(steps.org.outputs.config).regions[1] }}", &ctx);
+
+    assert_eq!(resolved.unwrap(), "us");
+}
+
+#[test]
+fn wildcard_after_fromjson_keeps_only_items_with_the_key() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let result = parse_and_eval("fromJSON(steps.org.outputs.config).apps.*.name", &ctx).unwrap();
+
+    assert_eq!(result.to_display(), r#"["web","api"]"#);
+}
+
+#[test]
+fn wildcard_after_wildcard_flattens() {
+    let ctx = empty_ctx();
+
+    let result = parse_and_eval("fromJSON('[[1, 2], [3]]').*.*", &ctx).unwrap();
+
+    assert_eq!(result.to_display(), "[1.0,2.0,3.0]");
+}
+
+#[test]
+fn keys_after_fromjson_are_case_insensitive() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let resolved = resolve_template(
+        "${{ fromJSON(steps.org.outputs.config).FIREBASE.apikey }}",
+        &ctx,
+    );
+
+    assert_eq!(resolved.unwrap(), "key-123");
+}
+
+#[test]
+fn missing_key_after_fromjson_is_null() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let result = parse_and_eval("fromJSON(steps.org.outputs.config).nope.deeper", &ctx).unwrap();
+
+    assert_eq!(result, Value::Null);
+}
+
+#[test]
+fn out_of_range_index_after_fromjson_is_null() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let result = parse_and_eval("fromJSON(steps.org.outputs.config).regions[5]", &ctx).unwrap();
+
+    assert_eq!(result, Value::Null);
+}
+
+#[test]
+fn nested_call_on_member_access() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let resolved = resolve_template(
+        "${{ toJSON(fromJSON(steps.org.outputs.config).firebase) }}",
+        &ctx,
+    )
+    .unwrap();
+
+    let parsed: serde_json::Value = serde_json::from_str(&resolved).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({ "apiKey": "key-123", "projectId": "proj" })
+    );
+}
+
+#[test]
+fn member_access_inside_a_comparison() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let holds = evaluate_condition(
+        Some("fromJSON(steps.org.outputs.config).apps[1].port == 8080"),
+        &ctx,
+    );
+
+    assert!(holds.unwrap());
+}
+
+#[test]
+fn member_access_on_a_parenthesized_expression() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let ctx = ctx_with_output(&outputs);
+
+    let resolved = resolve_template(
+        "${{ (fromJSON(steps.org.outputs.config)).firebase.apiKey }}",
+        &ctx,
+    );
+
+    assert_eq!(resolved.unwrap(), "key-123");
+}
+
+#[test]
+fn member_access_with_an_expression_key() {
+    let outputs = org_outputs(ORG_CONFIG);
+    let mut env = HashMap::new();
+    env.insert("SECTION".into(), "firebase".into());
+    let ctx = ExprContext {
+        env: &env,
+        ..ctx_with_output(&outputs)
+    };
+
+    let resolved = resolve_template(
+        "${{ fromJSON(steps.org.outputs.config)[env.SECTION].apiKey }}",
+        &ctx,
+    );
+
+    assert_eq!(resolved.unwrap(), "key-123");
+}
+
+#[test]
+fn context_keys_are_case_insensitive() {
+    let data = serde_json::json!({ "needs": { "setup": { "outputs": { "Version": "1.0" } } } });
+    let ctx = ctx_with_json(&data);
+
+    let result = parse_and_eval("needs.setup.outputs.version", &ctx).unwrap();
+
+    assert_eq!(result.to_display(), "1.0");
+}
+
+#[test]
+fn trailing_dot_after_call_is_an_error() {
+    let ctx = empty_ctx();
+
+    let result = parse_and_eval("fromJSON('{}').", &ctx);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn fromjson_of_invalid_json_is_an_error() {
+    let ctx = empty_ctx();
+
+    let result = resolve_template("${{ fromJSON('not json') }}", &ctx);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn fromjson_of_missing_output_is_an_error() {
+    let outputs = HashMap::new();
+    let ctx = ctx_with_output(&outputs);
+
+    let result = resolve_template(
+        "${{ fromJSON(steps.org.outputs.config).firebase.apiKey }}",
+        &ctx,
+    );
+
+    assert!(result.is_err());
+}
+
+// ── failed expressions ─────────────────────────────────────────────
+
+#[test]
+fn template_with_a_failed_expression_is_an_error() {
+    let ctx = empty_ctx();
+
+    let result = resolve_template("before ${{ fromJSON(x).a. }} after", &ctx);
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("fromJSON(x).a."), "got: {error}");
+}
+
+#[test]
+fn template_map_with_a_failed_value_is_an_error() {
+    let ctx = empty_ctx();
+    let values = HashMap::from([
+        ("ok".to_string(), "fine".to_string()),
+        ("bad".to_string(), "${{ ??? }}".to_string()),
+    ]);
+
+    let result = resolve_template_map(&values, &ctx);
+
+    assert!(result.is_err());
 }

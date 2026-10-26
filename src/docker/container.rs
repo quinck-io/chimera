@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use anyhow::Result;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,52 +37,63 @@ pub struct ContainerCredentials {
 }
 
 impl JobContainerSpec {
-    pub fn resolved(&self, resolve: &impl Fn(&str) -> String) -> Self {
-        Self {
-            image: resolve(&self.image),
-            environment: resolve_map(&self.environment, resolve),
-            ports: resolve_all(&self.ports, resolve),
-            volumes: resolve_all(&self.volumes, resolve),
-            options: self.options.as_deref().map(resolve),
-            credentials: self.credentials.as_ref().map(|c| c.resolved(resolve)),
-        }
+    pub fn resolved(&self, resolve: &impl Fn(&str) -> Result<String>) -> Result<Self> {
+        Ok(Self {
+            image: resolve(&self.image)?,
+            environment: resolve_map(&self.environment, resolve)?,
+            ports: resolve_all(&self.ports, resolve)?,
+            volumes: resolve_all(&self.volumes, resolve)?,
+            options: self.options.as_deref().map(resolve).transpose()?,
+            credentials: self
+                .credentials
+                .as_ref()
+                .map(|c| c.resolved(resolve))
+                .transpose()?,
+        })
     }
 }
 
 impl ServiceContainerSpec {
-    pub fn resolved(&self, resolve: &impl Fn(&str) -> String) -> Self {
-        Self {
-            image: resolve(&self.image),
-            ports: resolve_all(&self.ports, resolve),
-            environment: resolve_map(&self.environment, resolve),
-            volumes: resolve_all(&self.volumes, resolve),
-            options: self.options.as_deref().map(resolve),
-            credentials: self.credentials.as_ref().map(|c| c.resolved(resolve)),
+    pub fn resolved(&self, resolve: &impl Fn(&str) -> Result<String>) -> Result<Self> {
+        Ok(Self {
+            image: resolve(&self.image)?,
+            ports: resolve_all(&self.ports, resolve)?,
+            environment: resolve_map(&self.environment, resolve)?,
+            volumes: resolve_all(&self.volumes, resolve)?,
+            options: self.options.as_deref().map(resolve).transpose()?,
+            credentials: self
+                .credentials
+                .as_ref()
+                .map(|c| c.resolved(resolve))
+                .transpose()?,
             alias: self.alias.clone(),
-        }
+        })
     }
 }
 
 impl ContainerCredentials {
-    fn resolved(&self, resolve: &impl Fn(&str) -> String) -> Self {
-        Self {
-            username: self.username.as_deref().map(resolve),
-            password: self.password.as_deref().map(resolve),
-        }
+    fn resolved(&self, resolve: &impl Fn(&str) -> Result<String>) -> Result<Self> {
+        Ok(Self {
+            username: self.username.as_deref().map(resolve).transpose()?,
+            password: self.password.as_deref().map(resolve).transpose()?,
+        })
     }
 }
 
-fn resolve_all(values: &[String], resolve: &impl Fn(&str) -> String) -> Vec<String> {
+fn resolve_all(
+    values: &[String],
+    resolve: &impl Fn(&str) -> Result<String>,
+) -> Result<Vec<String>> {
     values.iter().map(|v| resolve(v)).collect()
 }
 
 fn resolve_map(
     values: &HashMap<String, String>,
-    resolve: &impl Fn(&str) -> String,
-) -> HashMap<String, String> {
+    resolve: &impl Fn(&str) -> Result<String>,
+) -> Result<HashMap<String, String>> {
     values
         .iter()
-        .map(|(k, v)| (k.clone(), resolve(v)))
+        .map(|(k, v)| Ok((k.clone(), resolve(v)?)))
         .collect()
 }
 

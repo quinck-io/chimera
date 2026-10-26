@@ -58,7 +58,7 @@ pub async fn run_node_action(
     let mut env = build_step_env(step, job_state, workspace, base_env);
 
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
-    env.extend(build_action_inputs(metadata, step, &expr_ctx));
+    env.extend(build_action_inputs(metadata, step, &expr_ctx)?);
 
     let timeout = step.timeout();
 

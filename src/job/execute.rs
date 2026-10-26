@@ -118,20 +118,20 @@ fn step_working_directory(
     step: &Step,
     job_state: &JobState,
     env: &HashMap<String, String>,
-) -> Option<String> {
-    let raw = step
+) -> Result<Option<String>> {
+    let Some(raw) = step
         .inputs
         .get("workingDirectory")
         .or(job_state.default_working_directory.as_ref())
-        .filter(|dir| !dir.is_empty())?;
+        .filter(|dir| !dir.is_empty())
+    else {
+        return Ok(None);
+    };
 
     let ctx = ExprContext::new(env, job_state, false, false);
-    let resolved = super::expression::resolve_template(raw, &ctx);
+    let resolved = super::expression::resolve_template(raw, &ctx)?;
     let trimmed = resolved.trim();
-    match trimmed.is_empty() {
-        true => None,
-        false => Some(trimmed.to_string()),
-    }
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
 }
 
 /// The step's `shell:`, else the job's `defaults.run.shell`, else `fallback`.
@@ -301,10 +301,15 @@ impl StepTracker {
 
     /// Resolve a templated `name:` (`Build ${{ matrix.os }}`). Deferred to step
     /// start because the manifest carries the raw template — GitHub resolves it in
-    /// the runner, not on the server.
+    /// the runner, not on the server. Like the official runner, a name that cannot
+    /// be evaluated is kept as written rather than failing the step.
     fn resolve_name(&mut self, ctx: &ExprContext) {
-        if self.name.contains("${{") {
-            self.name = super::expression::resolve_template(&self.name, ctx);
+        if !self.name.contains("${{") {
+            return;
+        }
+        match super::expression::resolve_template(&self.name, ctx) {
+            Ok(name) => self.name = name,
+            Err(e) => warn!(step = %self.name, error = %e, "cannot evaluate the step name"),
         }
     }
 
@@ -349,7 +354,7 @@ pub async fn run_host_step(
     let env = build_step_env(step, job_state, workspace, base_env);
 
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
-    let script = super::expression::resolve_template(script_raw, &expr_ctx);
+    let script = super::expression::resolve_template(script_raw, &expr_ctx)?;
 
     let shell = step_shell(step, job_state, "bash")?;
     let script_file = write_script_file(workspace, &shell, &script)?;
@@ -362,7 +367,7 @@ pub async fn run_host_step(
         "running host step"
     );
 
-    let working_dir = match step_working_directory(step, job_state, &env) {
+    let working_dir = match step_working_directory(step, job_state, &env)? {
         Some(dir) => workspace.workspace_dir().join(dir),
         None => workspace.workspace_dir().to_path_buf(),
     };
@@ -414,7 +419,7 @@ pub async fn run_container_step(
     let env = build_step_env(step, job_state, workspace, base_env);
 
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
-    let script = super::expression::resolve_template(script_raw, &expr_ctx);
+    let script = super::expression::resolve_template(script_raw, &expr_ctx)?;
 
     let timeout = step.timeout();
     let container_id = docker_resources
@@ -433,7 +438,7 @@ pub async fn run_container_step(
         "running container step"
     );
 
-    let working_dir = match step_working_directory(step, job_state, &env) {
+    let working_dir = match step_working_directory(step, job_state, &env)? {
         Some(dir) if dir.starts_with('/') => dir,
         Some(dir) => format!("/github/workspace/{dir}"),
         None => "/github/workspace".into(),
@@ -589,7 +594,7 @@ pub fn evaluate_step(
     job_state: &JobState,
     workspace: &Workspace,
     base_env: &HashMap<String, String>,
-) -> Step {
+) -> Result<Step> {
     let mut evaluated = step.clone();
     let mut outer_env = base_env.clone();
     outer_env.extend(job_state.env.clone());
@@ -597,17 +602,20 @@ pub fn evaluate_step(
     evaluated.environment = step
         .environment
         .as_ref()
-        .map(|step_env| super::expression::resolve_template_map(step_env, &env_ctx));
+        .map(|step_env| super::expression::resolve_template_map(step_env, &env_ctx))
+        .transpose()
+        .context("evaluating the step's env")?;
 
     // A script step's inputs are its script, shell and working directory, which it
     // evaluates itself.
     if step.is_script() {
-        return evaluated;
+        return Ok(evaluated);
     }
     let env = build_step_env(&evaluated, job_state, workspace, base_env);
     let inputs_ctx = ExprContext::new(&env, job_state, false, false);
-    evaluated.inputs = super::expression::resolve_template_map(&step.inputs, &inputs_ctx);
-    evaluated
+    evaluated.inputs = super::expression::resolve_template_map(&step.inputs, &inputs_ctx)
+        .context("evaluating the step's with")?;
+    Ok(evaluated)
 }
 
 /// Build the full environment for a step execution. The step's own `env:` must
@@ -719,7 +727,7 @@ fn job_secrets(manifest: &JobManifest) -> HashMap<String, String> {
 
 pub fn resolve_container_specs(
     manifest: &JobManifest,
-) -> (Option<JobContainerSpec>, Vec<ServiceContainerSpec>) {
+) -> Result<(Option<JobContainerSpec>, Vec<ServiceContainerSpec>)> {
     let job_state = JobState::new(
         SecretMasker::default(),
         job_secrets(manifest),
@@ -732,14 +740,17 @@ pub fn resolve_container_specs(
     let job_container = manifest
         .job_container
         .as_ref()
-        .map(|c| c.resolved(&resolve));
+        .map(|c| c.resolved(&resolve))
+        .transpose()
+        .context("evaluating the job container")?;
     let services = manifest
         .service_containers
         .iter()
         .flatten()
         .map(|s| s.resolved(&resolve))
-        .collect();
-    (job_container, services)
+        .collect::<Result<_>>()
+        .context("evaluating the service containers")?;
+    Ok((job_container, services))
 }
 
 /// Run all steps in a job manifest.
@@ -785,8 +796,9 @@ pub async fn run_all_steps(
         manifest
             .environment
             .iter()
-            .map(|(k, v)| (k.clone(), super::expression::resolve_template(v, &ctx)))
-            .collect()
+            .map(|(k, v)| Ok((k.clone(), super::expression::resolve_template(v, &ctx)?)))
+            .collect::<Result<HashMap<_, _>>>()
+            .context("evaluating the job's env")?
     };
     job_state.env.extend(job_env);
 
@@ -849,9 +861,9 @@ pub async fn run_all_steps(
             update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
             trackers[tracker_idx].resolve_name(&condition_ctx);
-            let pre_step = &resolve_step_fields(pre_step, &condition_ctx);
-            if !super::expression::evaluate_condition(pre_step.condition.as_deref(), &condition_ctx)
-            {
+            let (pre_step, should_run) = plan_step(pre_step, &condition_ctx);
+            let pre_step = &pre_step;
+            if matches!(should_run, Ok(false)) {
                 debug!(step = %pre_step.display_name, "skipping pre step (condition not met)");
                 let now = format_timeline_timestamp(Utc::now());
                 trackers[tracker_idx].mark_started();
@@ -871,8 +883,6 @@ pub async fn run_all_steps(
                 continue;
             }
 
-            let step_token =
-                cancel.step_token(survives_cancel(pre_step, base_env, &job_state, job_failed));
             let start_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_started();
             report_step_started(
@@ -898,26 +908,33 @@ pub async fn run_all_steps(
             )
             .await;
 
-            let (conclusion, result_conclusion) = execute_step(
-                pre_step,
-                ActionStage::Pre,
-                &mut job_state,
-                workspace,
-                base_env,
-                logger.sender(),
-                runner_name,
-                action_cache,
-                access_token,
-                &step_token,
-                &JobStatus {
-                    failed: job_failed,
-                    cancelled: job_cancelled,
-                    cancel: cancel.clone(),
-                },
-                docker_resources,
-                node_runtimes,
-            )
-            .await;
+            let (conclusion, result_conclusion) = match should_run {
+                Err(e) => fail_step(logger.sender(), &e).await,
+                Ok(_) => {
+                    let step_token = cancel
+                        .step_token(survives_cancel(pre_step, base_env, &job_state, job_failed));
+                    execute_step(
+                        pre_step,
+                        ActionStage::Pre,
+                        &mut job_state,
+                        workspace,
+                        base_env,
+                        logger.sender(),
+                        runner_name,
+                        action_cache,
+                        access_token,
+                        &step_token,
+                        &JobStatus {
+                            failed: job_failed,
+                            cancelled: job_cancelled,
+                            cancel: cancel.clone(),
+                        },
+                        docker_resources,
+                        node_runtimes,
+                    )
+                    .await
+                }
+            };
 
             let legacy_log_id = logger.log_id();
             logger.finish().await;
@@ -986,8 +1003,9 @@ pub async fn run_all_steps(
         update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
         let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
         trackers[idx].resolve_name(&condition_ctx);
-        let step = &resolve_step_fields(step, &condition_ctx);
-        if !super::expression::evaluate_condition(step.condition.as_deref(), &condition_ctx) {
+        let (step, should_run) = plan_step(step, &condition_ctx);
+        let step = &step;
+        if matches!(should_run, Ok(false)) {
             debug!(step = %step.display_name, "skipping step (condition not met)");
             let now = format_timeline_timestamp(Utc::now());
             trackers[idx].mark_started();
@@ -1018,7 +1036,6 @@ pub async fn run_all_steps(
             continue;
         }
 
-        let step_token = cancel.step_token(survives_cancel(step, base_env, &job_state, job_failed));
         let start_time = format_timeline_timestamp(Utc::now());
         trackers[idx].mark_started();
 
@@ -1045,26 +1062,33 @@ pub async fn run_all_steps(
         )
         .await;
 
-        let (conclusion, result_conclusion) = execute_step(
-            step,
-            ActionStage::Main,
-            &mut job_state,
-            workspace,
-            base_env,
-            logger.sender(),
-            runner_name,
-            action_cache,
-            access_token,
-            &step_token,
-            &JobStatus {
-                failed: job_failed,
-                cancelled: job_cancelled,
-                cancel: cancel.clone(),
-            },
-            docker_resources,
-            node_runtimes,
-        )
-        .await;
+        let (conclusion, result_conclusion) = match should_run {
+            Err(e) => fail_step(logger.sender(), &e).await,
+            Ok(_) => {
+                let step_token =
+                    cancel.step_token(survives_cancel(step, base_env, &job_state, job_failed));
+                execute_step(
+                    step,
+                    ActionStage::Main,
+                    &mut job_state,
+                    workspace,
+                    base_env,
+                    logger.sender(),
+                    runner_name,
+                    action_cache,
+                    access_token,
+                    &step_token,
+                    &JobStatus {
+                        failed: job_failed,
+                        cancelled: job_cancelled,
+                        cancel: cancel.clone(),
+                    },
+                    docker_resources,
+                    node_runtimes,
+                )
+                .await
+            }
+        };
 
         let legacy_log_id = logger.log_id();
 
@@ -1190,11 +1214,9 @@ pub async fn run_all_steps(
             update_job_status(&mut job_state.context_data, job_failed, job_cancelled);
             let condition_ctx = ExprContext::new(base_env, &job_state, job_failed, job_cancelled);
             trackers[tracker_idx].resolve_name(&condition_ctx);
-            let post_step = &resolve_step_fields(post_step, &condition_ctx);
-            if !super::expression::evaluate_condition(
-                post_step.condition.as_deref(),
-                &condition_ctx,
-            ) {
+            let (post_step, should_run) = plan_step(post_step, &condition_ctx);
+            let post_step = &post_step;
+            if matches!(should_run, Ok(false)) {
                 debug!(step = %post_step.display_name, "skipping post step (condition not met)");
                 let now = format_timeline_timestamp(Utc::now());
                 trackers[tracker_idx].mark_started();
@@ -1214,8 +1236,6 @@ pub async fn run_all_steps(
                 continue;
             }
 
-            let step_token =
-                cancel.step_token(survives_cancel(post_step, base_env, &job_state, job_failed));
             let start_time = format_timeline_timestamp(Utc::now());
             trackers[tracker_idx].mark_started();
             report_step_started(
@@ -1241,26 +1261,33 @@ pub async fn run_all_steps(
             )
             .await;
 
-            let (conclusion, result_conclusion) = execute_step(
-                post_step,
-                ActionStage::Post,
-                &mut job_state,
-                workspace,
-                base_env,
-                logger.sender(),
-                runner_name,
-                action_cache,
-                access_token,
-                &step_token,
-                &JobStatus {
-                    failed: job_failed,
-                    cancelled: job_cancelled,
-                    cancel: cancel.clone(),
-                },
-                docker_resources,
-                node_runtimes,
-            )
-            .await;
+            let (conclusion, result_conclusion) = match should_run {
+                Err(e) => fail_step(logger.sender(), &e).await,
+                Ok(_) => {
+                    let step_token = cancel
+                        .step_token(survives_cancel(post_step, base_env, &job_state, job_failed));
+                    execute_step(
+                        post_step,
+                        ActionStage::Post,
+                        &mut job_state,
+                        workspace,
+                        base_env,
+                        logger.sender(),
+                        runner_name,
+                        action_cache,
+                        access_token,
+                        &step_token,
+                        &JobStatus {
+                            failed: job_failed,
+                            cancelled: job_cancelled,
+                            cancel: cancel.clone(),
+                        },
+                        docker_resources,
+                        node_runtimes,
+                    )
+                    .await
+                }
+            };
 
             let legacy_log_id = logger.log_id();
             logger.finish().await;
@@ -1346,7 +1373,9 @@ pub async fn run_all_steps(
 
 /// Whether a step's `if:` still holds once the job is cancelled. Like the official
 /// runner, a cancel only stops a step whose condition no longer holds, so cleanup
-/// guarded by `always()` or `cancelled()` runs to the end.
+/// guarded by `always()` or `cancelled()` runs to the end. The condition held a
+/// moment ago, so it only fails to evaluate here if it errors once cancelled, and
+/// then the cancel stops the step.
 fn survives_cancel(
     step: &Step,
     base_env: &HashMap<String, String>,
@@ -1359,7 +1388,7 @@ fn survives_cancel(
         context_data: &cancelled_context,
         ..ExprContext::new(base_env, job_state, job_failed, true)
     };
-    super::expression::evaluate_condition(step.condition.as_deref(), &ctx)
+    super::expression::evaluate_condition(step.condition.as_deref(), &ctx).unwrap_or(false)
 }
 
 /// Masks the job's secrets and its access token, which every step receives as
@@ -1420,7 +1449,11 @@ async fn execute_step(
         .is_some();
 
     log_sender.send_banner(runner_name, has_docker).await;
-    let step = &evaluate_step(step, job_state, workspace, base_env);
+    let step = match evaluate_step(step, job_state, workspace, base_env) {
+        Ok(step) => step,
+        Err(e) => return fail_step(log_sender, &e).await,
+    };
+    let step = &step;
     debug!(
         step = %step.display_name,
         is_script = step.is_script(),
@@ -1475,11 +1508,17 @@ async fn execute_step(
             let rc = ResultsConclusion::from(result.conclusion);
             (result.conclusion, rc)
         }
-        Err(e) => {
-            log_sender.send(format!("Step error: {e}")).await;
-            (StepConclusion::Failed, ResultsConclusion::Failure)
-        }
+        Err(e) => fail_step(log_sender, &e).await,
     }
+}
+
+/// Fail a step on an error that kept it from running, with the error in its log.
+async fn fail_step(
+    log_sender: &LogSender,
+    error: &anyhow::Error,
+) -> (StepConclusion, ResultsConclusion) {
+    log_sender.send(format!("##[error]{error:#}")).await;
+    (StepConclusion::Failed, ResultsConclusion::Failure)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1774,30 +1813,52 @@ async fn report_step_completed(
     }
 }
 
-fn resolve_step_fields(step: &Step, ctx: &ExprContext) -> Step {
-    Step {
-        timeout_in_minutes: step
-            .timeout_in_minutes
-            .clone()
-            .map(|v| resolve_evaluable(v, ctx)),
-        continue_on_error: step
-            .continue_on_error
-            .clone()
-            .map(|v| resolve_evaluable(v, ctx)),
-        ..step.clone()
+/// The step with its `timeout-minutes` and `continue-on-error` evaluated, and
+/// whether its `if:` holds. Like the official runner, an expression in any of them
+/// that cannot be evaluated fails the step rather than skipping it.
+fn plan_step(step: &Step, ctx: &ExprContext) -> (Step, Result<bool>) {
+    match resolve_step_fields(step, ctx) {
+        Ok(resolved) => {
+            let should_run =
+                super::expression::evaluate_condition(resolved.condition.as_deref(), ctx)
+                    .context("evaluating the step's if");
+            (resolved, should_run)
+        }
+        Err(e) => (step.clone(), Err(e)),
     }
 }
 
-fn resolve_evaluable<T: std::str::FromStr>(value: Evaluable<T>, ctx: &ExprContext) -> Evaluable<T> {
+fn resolve_step_fields(step: &Step, ctx: &ExprContext) -> Result<Step> {
+    Ok(Step {
+        timeout_in_minutes: step
+            .timeout_in_minutes
+            .clone()
+            .map(|v| resolve_evaluable(v, ctx))
+            .transpose()
+            .context("evaluating the step's timeout-minutes")?,
+        continue_on_error: step
+            .continue_on_error
+            .clone()
+            .map(|v| resolve_evaluable(v, ctx))
+            .transpose()
+            .context("evaluating the step's continue-on-error")?,
+        ..step.clone()
+    })
+}
+
+fn resolve_evaluable<T: std::str::FromStr>(
+    value: Evaluable<T>,
+    ctx: &ExprContext,
+) -> Result<Evaluable<T>> {
     let Evaluable::Expression(expression) = value else {
-        return value;
+        return Ok(value);
     };
-    let resolved = super::expression::resolve_template(&expression, ctx);
+    let resolved = super::expression::resolve_template(&expression, ctx)?;
     match resolved.trim().parse() {
-        Ok(literal) => Evaluable::Literal(literal),
+        Ok(literal) => Ok(Evaluable::Literal(literal)),
         Err(_) => {
             warn!(%expression, %resolved, "step field did not evaluate to the expected type");
-            Evaluable::Expression(expression)
+            Ok(Evaluable::Expression(expression))
         }
     }
 }

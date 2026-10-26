@@ -337,7 +337,7 @@ impl Runner {
             crate::docker::client::ping(&docker).await?;
             let mut resources = JobDockerResources::new(docker);
 
-            let (job_container, services) = resolve_container_specs(manifest);
+            let (job_container, services) = resolve_container_specs(manifest)?;
 
             let workflow_files_path = workspace
                 .workspace_dir()
@@ -480,12 +480,12 @@ impl Runner {
             feed.close().await;
         }
 
+        heartbeat_cancel.cancel();
+        let _ = heartbeat_handle.await;
+
         let (conclusion, job_outputs) = job_result.context("running job steps")?;
 
         info!(conclusion = %conclusion, "job steps completed");
-
-        heartbeat_cancel.cancel();
-        let _ = heartbeat_handle.await;
 
         let outputs_payload = outputs_to_variable_values(&job_outputs);
         debug!(outputs = ?job_outputs.keys().collect::<Vec<_>>(), "completing job");

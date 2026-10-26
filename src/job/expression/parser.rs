@@ -13,6 +13,8 @@ pub(crate) enum Expr {
     Literal(Value),
     Property(Vec<PropertySegment>),
     Call(String, Vec<Expr>),
+    /// Property access on a computed value, like `fromJSON(x).a[0]` or `(x).*.name`.
+    Member(Box<Expr>, Vec<PropertySegment>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
 }
@@ -136,7 +138,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let expr = self.parse_or()?;
                 self.expect(&Token::RParen)?;
-                Ok(expr)
+                self.parse_member_access(expr)
             }
             Some(Token::Ident(_)) => self.parse_property_or_call(),
             Some(tok) => Err(format!("unexpected token: {tok:?}")),
@@ -145,40 +147,59 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_property_or_call(&mut self) -> Result<Expr, String> {
-        let mut segments = Vec::new();
-        if let Some(Token::Ident(name)) = self.advance().cloned() {
-            segments.push(PropertySegment::Dot(name));
-        } else {
+        let Some(Token::Ident(name)) = self.advance().cloned() else {
             return Err("expected identifier".into());
-        }
+        };
+        let mut segments = vec![PropertySegment::Dot(name)];
+        segments.extend(self.parse_segments()?);
 
+        if self.peek() != Some(&Token::LParen) {
+            return Ok(Expr::Property(segments));
+        }
+        let call = self.parse_call(&segments)?;
+        self.parse_member_access(call)
+    }
+
+    // A dotted name before '(' is joined into the function name.
+    fn parse_call(&mut self, segments: &[PropertySegment]) -> Result<Expr, String> {
+        self.expect(&Token::LParen)?;
+        let func_name = segments
+            .iter()
+            .filter_map(|s| match s {
+                PropertySegment::Dot(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(".");
+        let mut args = Vec::new();
+        if self.peek() != Some(&Token::RParen) {
+            args.push(self.parse_or()?);
+            while self.peek() == Some(&Token::Comma) {
+                self.advance();
+                args.push(self.parse_or()?);
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Expr::Call(func_name, args))
+    }
+
+    /// The `.name`, `[expr]` and `.*` chain that may follow a call or a
+    /// parenthesized expression.
+    fn parse_member_access(&mut self, base: Expr) -> Result<Expr, String> {
+        let segments = self.parse_segments()?;
+        if segments.is_empty() {
+            return Ok(base);
+        }
+        Ok(Expr::Member(Box::new(base), segments))
+    }
+
+    fn parse_segments(&mut self) -> Result<Vec<PropertySegment>, String> {
+        let mut segments = Vec::new();
         loop {
             match self.peek() {
                 Some(Token::Dot) => {
                     self.advance();
-                    match self.peek().cloned() {
-                        Some(Token::Star) => {
-                            self.advance();
-                            segments.push(PropertySegment::Wildcard);
-                        }
-                        Some(Token::Ident(name)) => {
-                            self.advance();
-                            segments.push(PropertySegment::Dot(name));
-                        }
-                        Some(Token::Num(n)) => {
-                            self.advance();
-                            segments.push(PropertySegment::Dot(if n == (n as i64) as f64 {
-                                (n as i64).to_string()
-                            } else {
-                                n.to_string()
-                            }));
-                        }
-                        other => {
-                            return Err(format!(
-                                "expected identifier or '*' after '.', got {other:?}"
-                            ));
-                        }
-                    }
+                    segments.push(self.parse_dot_segment()?);
                 }
                 Some(Token::LBracket) => {
                     self.advance();
@@ -186,33 +207,23 @@ impl<'a> Parser<'a> {
                     self.expect(&Token::RBracket)?;
                     segments.push(PropertySegment::Bracket(Box::new(expr)));
                 }
-                _ => break,
+                _ => return Ok(segments),
             }
         }
+    }
 
-        // If followed by '(' it's a function call — join Dot segments as name
-        if self.peek() == Some(&Token::LParen) {
-            self.advance();
-            let func_name: String = segments
-                .iter()
-                .filter_map(|s| match s {
-                    PropertySegment::Dot(name) => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(".");
-            let mut args = Vec::new();
-            if self.peek() != Some(&Token::RParen) {
-                args.push(self.parse_or()?);
-                while self.peek() == Some(&Token::Comma) {
-                    self.advance();
-                    args.push(self.parse_or()?);
-                }
-            }
-            self.expect(&Token::RParen)?;
-            Ok(Expr::Call(func_name, args))
-        } else {
-            Ok(Expr::Property(segments))
+    fn parse_dot_segment(&mut self) -> Result<PropertySegment, String> {
+        match self.advance().cloned() {
+            Some(Token::Star) => Ok(PropertySegment::Wildcard),
+            Some(Token::Ident(name)) => Ok(PropertySegment::Dot(name)),
+            Some(Token::Num(n)) => Ok(PropertySegment::Dot(if n == (n as i64) as f64 {
+                (n as i64).to_string()
+            } else {
+                n.to_string()
+            })),
+            other => Err(format!(
+                "expected identifier or '*' after '.', got {other:?}"
+            )),
         }
     }
 }

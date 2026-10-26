@@ -5,8 +5,8 @@ mod value;
 
 use std::collections::HashMap;
 
+use anyhow::{Result, anyhow};
 use serde_json::Value as JsonValue;
-use tracing::debug;
 
 use super::execute::{JobState, StepConclusion, StepOutcome};
 use eval::eval;
@@ -76,20 +76,13 @@ impl<'a> ExprContext<'a> {
 }
 
 /// Evaluate a step `if:` condition. Returns whether the step should run.
-/// `None` condition defaults to `success()` behavior.
-pub fn evaluate_condition(condition: Option<&str>, ctx: &ExprContext) -> bool {
-    let expr_str = match condition {
-        Some(c) => c.trim(),
-        None => return ctx.success(),
+/// `None` condition defaults to `success()` behavior. Like the official runner, a
+/// condition that cannot be evaluated is an error, which fails the step.
+pub fn evaluate_condition(condition: Option<&str>, ctx: &ExprContext) -> Result<bool> {
+    let Some(condition) = condition.map(str::trim) else {
+        return Ok(ctx.success());
     };
-
-    match parse_and_eval(expr_str, ctx) {
-        Ok(val) => val.is_truthy(),
-        Err(e) => {
-            debug!(condition = expr_str, error = %e, "condition parse error, defaulting to success()");
-            ctx.success()
-        }
-    }
+    Ok(evaluate(condition, ctx)?.is_truthy())
 }
 
 const STATUS_FUNCTIONS: [&str; 4] = ["success", "failure", "cancelled", "always"];
@@ -126,26 +119,20 @@ fn calls_status_function(expr: &str) -> bool {
 
 /// Resolve a single `${{ ... }}` expression to a string.
 /// If the string is not a `${{ }}` wrapper, returns it unchanged.
-pub fn resolve_expression(expr: &str, ctx: &ExprContext) -> String {
-    let trimmed = expr.trim();
-
-    if let Some(inner) = trimmed
+pub fn resolve_expression(expr: &str, ctx: &ExprContext) -> Result<String> {
+    let inner = expr
+        .trim()
         .strip_prefix("${{")
-        .and_then(|s| s.strip_suffix("}}"))
-    {
-        match parse_and_eval(inner.trim(), ctx) {
-            Ok(val) => return val.to_display(),
-            Err(e) => {
-                debug!(expression = inner.trim(), error = %e, "failed to resolve expression");
-            }
-        }
+        .and_then(|s| s.strip_suffix("}}"));
+    match inner {
+        Some(inner) => Ok(evaluate(inner.trim(), ctx)?.to_display()),
+        None => Ok(expr.to_string()),
     }
-
-    expr.to_string()
 }
 
-/// Resolve all embedded `${{ ... }}` expressions in a template string.
-pub fn resolve_template(template: &str, ctx: &ExprContext) -> String {
+/// Resolve all embedded `${{ ... }}` expressions in a template string. As on the
+/// official runner, an expression that cannot be evaluated fails the whole template.
+pub fn resolve_template(template: &str, ctx: &ExprContext) -> Result<String> {
     let mut result = String::with_capacity(template.len());
     let mut rest = template;
 
@@ -155,12 +142,7 @@ pub fn resolve_template(template: &str, ctx: &ExprContext) -> String {
 
         if let Some(end) = find_closing_braces(after_open) {
             let expr = after_open[..end].trim();
-            match parse_and_eval(expr, ctx) {
-                Ok(val) => result.push_str(&val.to_display()),
-                Err(e) => {
-                    debug!(expression = expr, error = %e, "failed to resolve template expression");
-                }
-            }
+            result.push_str(&evaluate(expr, ctx)?.to_display());
             rest = &after_open[end + 2..];
         } else {
             // Unclosed — pass through remainder
@@ -169,17 +151,17 @@ pub fn resolve_template(template: &str, ctx: &ExprContext) -> String {
         }
     }
     result.push_str(rest);
-    result
+    Ok(result)
 }
 
 /// Resolve every value of an `env:` or `with:` mapping with `resolve_template`.
 pub fn resolve_template_map(
     values: &HashMap<String, String>,
     ctx: &ExprContext,
-) -> HashMap<String, String> {
+) -> Result<HashMap<String, String>> {
     values
         .iter()
-        .map(|(key, value)| (key.clone(), resolve_template(value, ctx)))
+        .map(|(key, value)| Ok((key.clone(), resolve_template(value, ctx)?)))
         .collect()
 }
 
@@ -209,7 +191,11 @@ pub fn find_closing_braces(s: &str) -> Option<usize> {
     None
 }
 
-fn parse_and_eval(expr: &str, ctx: &ExprContext) -> Result<Value, String> {
+fn evaluate(expr: &str, ctx: &ExprContext) -> Result<Value> {
+    parse_and_eval(expr, ctx).map_err(|e| anyhow!("failed to evaluate `${{{{ {expr} }}}}`: {e}"))
+}
+
+fn parse_and_eval(expr: &str, ctx: &ExprContext) -> std::result::Result<Value, String> {
     let tokens = tokenize(expr)?;
     let ast = Parser::new(&tokens).parse()?;
     eval(&ast, ctx)

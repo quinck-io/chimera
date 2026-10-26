@@ -11,6 +11,10 @@ pub(crate) fn eval(expr: &Expr, ctx: &ExprContext) -> Result<Value, String> {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Property(segments) => resolve_property(segments, ctx),
         Expr::Call(name, args) => eval_function(name, args, ctx),
+        Expr::Member(base, segments) => {
+            let value = eval(base, ctx)?;
+            walk(&value, segments, ctx)
+        }
         Expr::Binary(op, left, right) => eval_binary(op, left, right, ctx),
         Expr::Not(inner) => {
             let val = eval(inner, ctx)?;
@@ -107,7 +111,7 @@ fn resolve_property(segments: &[PropertySegment], ctx: &ExprContext) -> Result<V
                     return Ok(Value::Null);
                 }
             }
-            walk_json(ctx.context_data, segments, ctx)
+            walk(ctx.context_data, segments, ctx)
         }
         "runner" => {
             if let Some(seg) = rest.first()
@@ -146,7 +150,7 @@ fn resolve_property(segments: &[PropertySegment], ctx: &ExprContext) -> Result<V
                 return Ok(Value::String(value.clone()));
             }
 
-            let from_context = walk_json(ctx.context_data, segments, ctx)?;
+            let from_context = walk(ctx.context_data, segments, ctx)?;
             if from_context == Value::Null {
                 debug!(input = %key, "no value for input in env or context data");
             }
@@ -176,7 +180,7 @@ fn resolve_property(segments: &[PropertySegment], ctx: &ExprContext) -> Result<V
             }
             Ok(Value::Null)
         }
-        "needs" | "matrix" | "strategy" | "job" => walk_json(ctx.context_data, segments, ctx),
+        "needs" | "matrix" | "strategy" | "job" => walk(ctx.context_data, segments, ctx),
         _ => {
             debug!(context = root, "unknown expression context");
             Ok(Value::Null)
@@ -215,60 +219,103 @@ fn resolve_steps(rest: &[PropertySegment], ctx: &ExprContext) -> Result<Value, S
     }
 }
 
-/// Walk a JSON tree following PropertySegments, supporting wildcards.
-fn walk_json(
-    data: &JsonValue,
-    segments: &[PropertySegment],
-    ctx: &ExprContext,
-) -> Result<Value, String> {
-    walk_json_inner(data, segments, ctx)
+/// A tree that property access can walk: the context data, or a computed value
+/// like the result of `fromJSON()`.
+trait Node: Sized {
+    fn child(&self, key: &str) -> Option<&Self>;
+    fn children(&self) -> Vec<&Self>;
+    fn to_value(&self) -> Value;
 }
 
-fn walk_json_inner(
-    current: &JsonValue,
+impl Node for JsonValue {
+    fn child(&self, key: &str) -> Option<&Self> {
+        match self {
+            JsonValue::Object(map) => map.get(key).or_else(|| {
+                map.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                    .map(|(_, v)| v)
+            }),
+            JsonValue::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> Vec<&Self> {
+        match self {
+            JsonValue::Object(map) => map.values().collect(),
+            JsonValue::Array(items) => items.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        json_to_value(self)
+    }
+}
+
+impl Node for Value {
+    fn child(&self, key: &str) -> Option<&Self> {
+        match self {
+            Value::Object(pairs) => pairs
+                .iter()
+                .find(|(k, _)| k == key)
+                .or_else(|| pairs.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)))
+                .map(|(_, v)| v),
+            Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> Vec<&Self> {
+        match self {
+            Value::Object(pairs) => pairs.iter().map(|(_, v)| v).collect(),
+            Value::Array(items) => items.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        self.clone()
+    }
+}
+
+/// Follow `segments` from `root`. As in GitHub's expression engine, a missing key
+/// is null, and after a `*` every further key is looked up in each item, keeping
+/// only the items that have it.
+fn walk<N: Node>(
+    root: &N,
     segments: &[PropertySegment],
     ctx: &ExprContext,
 ) -> Result<Value, String> {
-    if segments.is_empty() {
-        return Ok(json_to_value(current));
+    enum Cursor<'a, N> {
+        Single(Option<&'a N>),
+        Filtered(Vec<&'a N>),
     }
 
-    let seg = &segments[0];
-    let rest = &segments[1..];
-
-    match seg {
-        PropertySegment::Wildcard => {
-            // Fan out over all children, collect results
-            let children: Vec<&JsonValue> = match current {
-                JsonValue::Object(map) => map.values().collect(),
-                JsonValue::Array(arr) => arr.iter().collect(),
-                _ => return Ok(Value::Null),
-            };
-            let mut results = Vec::new();
-            for child in children {
-                let val = walk_json_inner(child, rest, ctx)?;
-                results.push(val);
+    let mut cursor = Cursor::Single(Some(root));
+    for segment in segments {
+        cursor = match (segment, cursor) {
+            (PropertySegment::Wildcard, Cursor::Single(node)) => {
+                Cursor::Filtered(node.map(Node::children).unwrap_or_default())
             }
-            Ok(Value::Array(results))
-        }
-        _ => {
-            let key = segment_to_key(seg, ctx)?;
-            match current {
-                JsonValue::Object(map) => match map.get(&key) {
-                    Some(v) => walk_json_inner(v, rest, ctx),
-                    None => Ok(Value::Null),
-                },
-                JsonValue::Array(arr) => match key.parse::<usize>() {
-                    Ok(idx) => match arr.get(idx) {
-                        Some(v) => walk_json_inner(v, rest, ctx),
-                        None => Ok(Value::Null),
-                    },
-                    Err(_) => Ok(Value::Null),
-                },
-                _ => Ok(Value::Null),
+            (PropertySegment::Wildcard, Cursor::Filtered(nodes)) => {
+                Cursor::Filtered(nodes.into_iter().flat_map(Node::children).collect())
             }
-        }
+            (segment, Cursor::Single(node)) => {
+                let key = segment_to_key(segment, ctx)?;
+                Cursor::Single(node.and_then(|n| n.child(&key)))
+            }
+            (segment, Cursor::Filtered(nodes)) => {
+                let key = segment_to_key(segment, ctx)?;
+                Cursor::Filtered(nodes.into_iter().filter_map(|n| n.child(&key)).collect())
+            }
+        };
     }
+
+    Ok(match cursor {
+        Cursor::Single(node) => node.map_or(Value::Null, Node::to_value),
+        Cursor::Filtered(nodes) => Value::Array(nodes.into_iter().map(Node::to_value).collect()),
+    })
 }
 
 fn json_to_value(v: &JsonValue) -> Value {
@@ -383,10 +430,9 @@ fn eval_function(name: &str, args: &[Expr], ctx: &ExprContext) -> Result<Value, 
         "fromjson" => {
             check_args(name, args, 1)?;
             let s = eval(&args[0], ctx)?.to_display();
-            match serde_json::from_str::<JsonValue>(&s) {
-                Ok(json) => Ok(json_to_value(&json)),
-                Err(_) => Ok(Value::String(s)),
-            }
+            serde_json::from_str::<JsonValue>(&s)
+                .map(|json| json_to_value(&json))
+                .map_err(|e| format!("fromJSON(): invalid JSON: {e}"))
         }
         "hashfiles" => {
             if args.is_empty() {

@@ -677,8 +677,8 @@ fn container_image_expression_resolves_from_inputs() {
         serde_json::json!({ "inputs": { "browser": false, "db": "postgres:18" } }),
     );
 
-    let (browser_container, services) = resolve_container_specs(&with_browser);
-    let (plain_container, _) = resolve_container_specs(&without_browser);
+    let (browser_container, services) = resolve_container_specs(&with_browser).unwrap();
+    let (plain_container, _) = resolve_container_specs(&without_browser).unwrap();
 
     assert_eq!(
         browser_container.unwrap().image,
@@ -701,7 +701,7 @@ fn container_credentials_resolve_from_secrets() {
         }),
     );
 
-    let (container, _) = resolve_container_specs(&manifest);
+    let (container, _) = resolve_container_specs(&manifest).unwrap();
 
     let credentials = container.unwrap().credentials.unwrap();
     assert_eq!(credentials.username.as_deref(), Some("octocat"));
@@ -1000,7 +1000,7 @@ fn evaluate_step_evaluates_env_then_inputs_against_it() {
         &[("TARGET", "${{ env.BASE }}/out")],
     );
 
-    let evaluated = evaluate_step(&step, &empty_job_state(), &ws, &base_env);
+    let evaluated = evaluate_step(&step, &empty_job_state(), &ws, &base_env).unwrap();
 
     assert_eq!(evaluated.environment.unwrap()["TARGET"], "dist/out");
     assert_eq!(evaluated.inputs["path"], "dist/out/cache");
@@ -1024,7 +1024,7 @@ fn evaluate_step_does_not_evaluate_what_an_expression_returned() {
     );
     let state = job_state_with_secret();
 
-    let evaluated = evaluate_step(&step, &state, &ws, &base_env);
+    let evaluated = evaluate_step(&step, &state, &ws, &base_env).unwrap();
     let env = build_step_env(&evaluated, &state, &ws, &base_env);
 
     assert_eq!(evaluated.inputs["title"], "${{ secrets.MY_SECRET }}");
@@ -1044,7 +1044,7 @@ fn evaluate_step_leaves_a_script_steps_inputs_to_the_step() {
     .unwrap();
     let step = make_step("run", "echo ${{ env.BASE }}");
 
-    let evaluated = evaluate_step(&step, &empty_job_state(), &ws, &HashMap::new());
+    let evaluated = evaluate_step(&step, &empty_job_state(), &ws, &HashMap::new()).unwrap();
 
     assert_eq!(evaluated.inputs["script"], "echo ${{ env.BASE }}");
 }

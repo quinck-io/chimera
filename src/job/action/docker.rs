@@ -93,10 +93,10 @@ pub async fn run_docker_metadata_action(
     // Read before the action's own `runs.env` is merged, so an action cannot opt itself in.
     let command_policy = CommandPolicy::from_env(&env);
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
-    env.extend(build_action_inputs(metadata, step, &expr_ctx));
-    merge_action_env(&mut env, metadata, job_state);
+    env.extend(build_action_inputs(metadata, step, &expr_ctx)?);
+    merge_action_env(&mut env, metadata, job_state)?;
 
-    let resolved_args = resolve_args(&args, &env, job_state);
+    let resolved_args = resolve_args(&args, &env, job_state)?;
 
     debug!(
         image,
@@ -170,25 +170,28 @@ fn merge_action_env(
     env: &mut HashMap<String, String>,
     metadata: &ActionMetadata,
     job_state: &JobState,
-) {
+) -> Result<()> {
     if let Some(action_env) = &metadata.runs.env {
         for (k, v) in action_env {
             let ctx = ExprContext::new(env, job_state, false, false);
-            let resolved = crate::job::expression::resolve_expression(v, &ctx);
+            let resolved = crate::job::expression::resolve_expression(v, &ctx)
+                .with_context(|| format!("evaluating the action's env '{k}'"))?;
             env.insert(k.clone(), resolved);
         }
     }
+    Ok(())
 }
 
 fn resolve_args(
     args: &[String],
     env: &HashMap<String, String>,
     job_state: &JobState,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
+    let ctx = ExprContext::new(env, job_state, false, false);
     args.iter()
         .map(|a| {
-            let ctx = ExprContext::new(env, job_state, false, false);
             crate::job::expression::resolve_expression(a, &ctx)
+                .context("evaluating the action's args")
         })
         .collect()
 }

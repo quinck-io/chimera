@@ -7,6 +7,7 @@ pub mod resolve;
 
 use std::collections::HashMap;
 
+use anyhow::Context;
 use metadata::ActionMetadata;
 
 use crate::job::expression::ExprContext;
@@ -55,18 +56,19 @@ pub fn build_action_inputs(
     metadata: &ActionMetadata,
     step: &Step,
     expr_ctx: &ExprContext,
-) -> HashMap<String, String> {
+) -> anyhow::Result<HashMap<String, String>> {
     let mut inputs = HashMap::new();
     for (name, input_def) in &metadata.inputs {
         let upper_name = format!("INPUT_{}", name.to_uppercase().replace(' ', "_"));
         if let Some(value) = step.inputs.get(name) {
             inputs.insert(upper_name, value.clone());
         } else if let Some(default) = &input_def.default {
-            let resolved = crate::job::expression::resolve_template(default, expr_ctx);
+            let resolved = crate::job::expression::resolve_template(default, expr_ctx)
+                .with_context(|| format!("evaluating the default of input '{name}'"))?;
             inputs.insert(upper_name, resolved);
         }
     }
-    inputs
+    Ok(inputs)
 }
 
 /// The warning the official runner logs when a local action declares a `pre`: a

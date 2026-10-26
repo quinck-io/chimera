@@ -433,7 +433,7 @@ with:
     .unwrap();
     let env = HashMap::from([("INPUT_TARGET".to_string(), "dist".to_string())]);
 
-    let inputs = sub_step.inputs(&env, &state);
+    let inputs = sub_step.inputs(&env, &state).unwrap();
 
     assert_eq!(inputs["path"], "dist/out");
     assert_eq!(inputs["retries"], "3");
@@ -543,7 +543,7 @@ env:
     .unwrap();
     let env = HashMap::from([("BASE".to_string(), "dist".to_string())]);
 
-    let own_env = sub_step.own_env(&env, &state);
+    let own_env = sub_step.own_env(&env, &state).unwrap();
 
     assert_eq!(own_env["TARGET"], "dist/out");
     assert_eq!(own_env["RETRIES"], "3");
@@ -562,7 +562,7 @@ with:
     .unwrap();
     let own_env = HashMap::from([("MODE".to_string(), "fast".to_string())]);
 
-    let inputs = sub_step.inputs(&HashMap::new(), &new_job_state());
+    let inputs = sub_step.inputs(&HashMap::new(), &new_job_state()).unwrap();
 
     let step = nested_action_step(
         &sub_step,
@@ -681,7 +681,7 @@ fn evaluate_action_outputs_resolves_against_the_action_steps_and_inputs() {
         .insert("documented".into(), ActionOutput { value: None });
     let env = HashMap::from([("INPUT_SUFFIX".to_string(), "world".to_string())]);
 
-    let outputs = evaluate_action_outputs(&metadata, &env, &state);
+    let outputs = evaluate_action_outputs(&metadata, &env, &state).unwrap();
 
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs["greeting"], "hello-world");
@@ -709,8 +709,8 @@ with:
         "${{ secrets.MY_SECRET }}".to_string(),
     )]);
 
-    let inputs = sub_step.inputs(&env, &state);
-    let own_env = sub_step.own_env(&env, &state);
+    let inputs = sub_step.inputs(&env, &state).unwrap();
+    let own_env = sub_step.own_env(&env, &state).unwrap();
 
     assert_eq!(inputs["title"], "${{ secrets.MY_SECRET }}");
     assert_eq!(own_env["COPY"], "${{ secrets.MY_SECRET }}");

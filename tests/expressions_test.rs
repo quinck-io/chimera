@@ -1,5 +1,7 @@
 mod common;
 
+use std::collections::HashMap;
+
 use chimera::job::client::JobConclusion;
 use common::*;
 
@@ -311,6 +313,118 @@ async fn fromjson_parses_number() {
     );
     let (conclusion, _) = env.run(&manifest).await.unwrap();
     assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+/// The pattern GitHub documents for JSON outputs: parse a step output and read
+/// a property of the result.
+#[tokio::test]
+async fn fromjson_output_property_in_step_env() {
+    let env = TestEnv::setup().await;
+    let manifest = manifest_with_steps(
+        vec![
+            script_step(
+                "org",
+                r#"echo 'config={"firebase":{"apiKey":"key-123"},"apps":[{"name":"web"}]}' >> "$GITHUB_OUTPUT""#,
+            ),
+            script_step_env(
+                "deploy",
+                r#"test "$API_KEY" = "key-123" && test "$APP" = "web" || exit 1"#,
+                HashMap::from([
+                    (
+                        "API_KEY".to_string(),
+                        "${{ fromJSON(steps.org.outputs.config).firebase.apiKey }}".to_string(),
+                    ),
+                    (
+                        "APP".to_string(),
+                        "${{ fromJSON(steps.org.outputs.config).apps[0]['name'] }}".to_string(),
+                    ),
+                ]),
+            ),
+        ],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+// ─── Failed expressions ──────────────────────────────────────────────
+
+/// Like the official runner, an expression that cannot be evaluated fails its
+/// step instead of becoming an empty string.
+#[tokio::test]
+async fn unparsable_expression_in_step_env_fails_the_step() {
+    let env = TestEnv::setup().await;
+    let marker = env.tmp.path().join("ran");
+    let manifest = manifest_with_steps(
+        vec![
+            script_step_env(
+                "deploy",
+                &format!("touch '{}'", marker.display()),
+                HashMap::from([("X".to_string(), "${{ fromJSON('{}').a. }}".to_string())]),
+            ),
+            script_step_if(
+                "report",
+                r#"test "${{ steps.deploy.outcome }}" = "failure" || exit 1"#,
+                "failure()",
+            ),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Failed);
+    assert!(!marker.exists(), "the step's script must not run");
+}
+
+#[tokio::test]
+async fn failed_expression_in_step_env_with_continue_on_error_keeps_the_job_green() {
+    let env = TestEnv::setup().await;
+    let mut step = script_step_env(
+        "deploy",
+        "echo never",
+        HashMap::from([("X".to_string(), "${{ fromJSON('') }}".to_string())]),
+    );
+    step["continueOnError"] = serde_json::json!(true);
+    let manifest = manifest_with_steps(vec![step], &env.mock_server.uri());
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
+async fn failed_expression_in_script_fails_the_step() {
+    let env = TestEnv::setup().await;
+    let manifest = manifest_with_steps(
+        vec![script_step("s1", "echo ${{ noSuchFunction() }}")],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Failed);
+}
+
+#[tokio::test]
+async fn failed_expression_in_if_fails_the_step() {
+    let env = TestEnv::setup().await;
+    let marker = env.tmp.path().join("ran");
+    let manifest = manifest_with_steps(
+        vec![
+            script_step_if("s1", "echo never", "noSuchFunction()"),
+            script_step_if("s2", &format!("touch '{}'", marker.display()), "failure()"),
+        ],
+        &env.mock_server.uri(),
+    );
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+
+    assert_eq!(conclusion, JobConclusion::Failed);
+    assert!(
+        marker.exists(),
+        "a failure() step should see the failed step"
+    );
 }
 
 // ─── Context resolution ──────────────────────────────────────────────

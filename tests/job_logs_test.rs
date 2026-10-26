@@ -129,3 +129,25 @@ async fn local_action_with_pre_logs_a_warning() {
         "step log should warn about the skipped pre, got: {step_log}"
     );
 }
+
+/// A step that fails on an expression says why in its own log.
+#[tokio::test]
+async fn failed_expression_is_reported_in_the_step_log() {
+    let mut env = TestEnv::setup().await;
+    let step = spy_on_blob(&env.mock_server, "Step").await;
+
+    let mut deploy = script_step("deploy", "echo never");
+    deploy["environment"] = serde_json::json!({ "X": "${{ fromJSON('{}').a. }}" });
+    let manifest = manifest_with_results_endpoint(vec![deploy], &env.mock_server.uri());
+    env.configure_from_manifest(&manifest);
+
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, chimera::job::client::JobConclusion::Failed);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let step_log = step.content.lock().await;
+    assert!(
+        step_log.contains("##[error]") && step_log.contains("fromJSON('{}').a."),
+        "step log should hold the expression error, got: {step_log}"
+    );
+}

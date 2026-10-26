@@ -89,7 +89,8 @@ fn action_inputs_take_the_evaluated_with_verbatim_and_evaluate_defaults() {
         &metadata,
         &step,
         &ExprContext::new(&env, &state, false, false),
-    );
+    )
+    .unwrap();
 
     assert_eq!(inputs["INPUT_VALUE"], "${{ secrets.MY_SECRET }}");
     assert_eq!(inputs["INPUT_TARGET"], "dist/out");
